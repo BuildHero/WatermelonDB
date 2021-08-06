@@ -49,6 +49,31 @@ export default class DatabaseAdapterCompat {
     return toPromise((callback) => this.underlyingAdapter.count(query, callback))
   }
 
+  batchImport(tables: TableName<any>[], srcDB: String): Promise<void> {
+    const attachDatabase = {
+      sql: `ATTACH DATABASE '${srcDB}' as 'other'`,
+      args: []
+    }
+
+    const insertFromTables = tables.map(table => ({
+      sql: `INSERT OR IGNORE INTO ${table} SELECT * FROM other.${table}`,
+      args: []
+    }))
+
+    const detachDatabase = {
+      sql: `DETACH DATABASE 'other'`,
+      args: []
+    }
+    
+    const operations = [
+      attachDatabase,
+      ...insertFromTables,
+      detachDatabase
+    ]
+
+    return toPromise((callback) => this.underlyingAdapter.unsafeExecute(operations, callback))
+  }
+
   batch(operations: BatchOperation[]): Promise<void> {
     return toPromise((callback) => this.underlyingAdapter.batch(operations, callback))
   }

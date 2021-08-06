@@ -153,6 +153,11 @@ export default class Database {
     return undefined // shuts up flow
   }
 
+  // Imports tables from another sqlite db
+  async copyTables(tables: TableName<any>[], srcDB: String): Promise<void> {
+    await this.adapter.batchImport(tables, srcDB);
+  }
+
   // Enqueues a Writer - a block of code that, when it's running, has a guarantee that no other Writer
   // is running at the same time.
   // All actions that modify the database (create, update, delete) must be performed inside of a Writer block
