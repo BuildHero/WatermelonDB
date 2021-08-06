@@ -1,7 +1,6 @@
 #pragma once
 
 #include <string>
-#include "Database.h"
 
 namespace watermelondb {
 namespace platform {
@@ -32,9 +31,6 @@ std::string_view getSyncJson(int id);
 
 // Destroys sync json after it's used
 void deleteSyncJson(int id);
-
-// Called when React Native bridge is being torn down
-void onDestroy(std::function<void(void)> callback);
 
 } // namespace platform
 } // namespace watermelondb

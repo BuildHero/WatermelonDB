@@ -64,7 +64,7 @@ export default class DatabaseAdapterCompat {
       sql: `DETACH DATABASE 'other'`,
       args: []
     }
-    
+
     const operations = [
       attachDatabase,
       ...insertFromTables,
