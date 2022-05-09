@@ -153,12 +153,10 @@ const buildTasks = options => {
       task: () => {
         console.log('\u0007')
         return listrInput('2-Factor Authentication code', {
-          validate: otp => otp.length > 0,
           done: otp =>
             execa('npm', [
               'publish',
-              `./dist/nozbe-watermelondb-v${version}.tgz`,
-              `--otp=${otp}`,
+              `./dist/BuildHero-watermelondb-v${version}.tgz`,
               '--tag',
               tag,
             ]),
