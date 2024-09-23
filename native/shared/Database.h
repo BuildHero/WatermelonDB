@@ -1,35 +1,56 @@
 #pragma once
 
-#import <jsi/jsi.h>
-#import <unordered_map>
-#import <unordered_set>
-#import <sqlite3.h>
+#include <jsi/jsi.h>
+#include <unordered_map>
+#include <unordered_set>
+#include <mutex>
+#include <sqlite3.h>
 
-#import "Sqlite.h"
+// FIXME: Make these paths consistent across platforms
+#if __ANDROID__
+#import <simdjson.h>
+#elif defined(WIN32) || defined(_WIN32) || defined(__WIN32__) || defined(__NT__)
+#include <simdjson.h>
+#else
+// Does Xcode error on this line? You probably didn't include `simdjson` as a dependency in your Podfile.
+#include <simdjson/simdjson.h>
+#endif
+
+#include "Sqlite.h"
+#include "DatabasePlatform.h"
 
 using namespace facebook;
 
 namespace watermelondb {
 
 class Database : public jsi::HostObject {
-    public:
+public:
     static void install(jsi::Runtime *runtime);
-    Database(jsi::Runtime *runtime, std::string path);
+    Database(jsi::Runtime *runtime, std::string path, bool usesExclusiveLocking);
     ~Database();
+    void destroy();
 
+    jsi::Value getDeletedRecords(jsi::String &tableName);
     jsi::Value find(jsi::String &tableName, jsi::String &id);
+    jsi::Value execSqlQuery(jsi::String &sql, jsi::Array &arguments)
     jsi::Value query(jsi::String &tableName, jsi::String &sql, jsi::Array &arguments);
+    jsi::Value queryAsArray(jsi::String &tableName, jsi::String &sql, jsi::Array &arguments);
+    jsi::Array queryIds(jsi::String &sql, jsi::Array &arguments);
+    jsi::Array unsafeQueryRaw(jsi::String &sql, jsi::Array &arguments);
     jsi::Value count(jsi::String &sql, jsi::Array &arguments);
     void batch(jsi::Array &operations);
-    jsi::Array getDeletedRecords(jsi::String &tableName);
-    void destroyDeletedRecords(jsi::String &tableName, jsi::Array &recordIds);
+    void batchJSON(jsi::String &&operationsJson);
+    jsi::Value unsafeLoadFromSync(int jsonId, jsi::Object &schema, std::string preamble, std::string postamble);
     void unsafeResetDatabase(jsi::String &schema, int schemaVersion);
     jsi::Value getLocal(jsi::String &key);
-    void setLocal(jsi::String &key, jsi::String &value);
     void removeLocal(jsi::String &key);
+    void setLocal(jsi::String &key, jsi::String &value);
+    void executeMultiple(std::string sql);
 
-    private:
+private:
     bool initialized_;
+    bool isDestroyed_;
+    std::mutex mutex_;
     jsi::Runtime *runtime_; // TODO: std::shared_ptr would be better, but I don't know how to make it from void* in RCTCxxBridge
     std::unique_ptr<SqliteDb> db_;
     std::unordered_map<std::string, sqlite3_stmt *> cachedStatements_; // NOTE: may contain null pointers!
@@ -38,11 +59,19 @@ class Database : public jsi::HostObject {
     jsi::Runtime &getRt();
     jsi::JSError dbError(std::string description);
 
+    sqlite3_stmt* prepareQuery(std::string sql);
+    void bindArgs(sqlite3_stmt *statement, jsi::Array &arguments);
+    std::string bindArgsAndReturnId(sqlite3_stmt *statement, simdjson::ondemand::array &args);
     SqliteStatement executeQuery(std::string sql, jsi::Array &arguments);
+    void executeUpdate(sqlite3_stmt *statement);
     void executeUpdate(std::string sql, jsi::Array &arguments);
     void executeUpdate(std::string sql);
-    void executeMultiple(std::string sql);
+    void getRow(sqlite3_stmt *stmt);
+    bool getNextRowOrTrue(sqlite3_stmt *stmt);
     jsi::Object resultDictionary(sqlite3_stmt *statement);
+    jsi::Array resultArray(sqlite3_stmt *statement);
+    jsi::Array resultColumns(sqlite3_stmt *statement);
+    jsi::Array arrayFromStd(std::vector<jsi::Value> &vector);
 
     void beginTransaction();
     void commit();
@@ -56,5 +85,9 @@ class Database : public jsi::HostObject {
     void markAsCached(std::string cacheKey);
     void removeFromCache(std::string cacheKey);
 };
+
+inline std::string cacheKey(std::string tableName, std::string recordId) {
+    return tableName + "$" + recordId; // NOTE: safe as long as table names cannot contain $ sign
+}
 
 } // namespace watermelondb

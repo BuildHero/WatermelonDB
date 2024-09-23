@@ -18,8 +18,11 @@ std::string resolveDatabasePath(std::string path) {
 }
 
 SqliteDb::SqliteDb(std::string path) {
+    consoleLog("Will open database...");
     platform::initializeSqlite();
+    #ifndef ANDROID
     assert(sqlite3_threadsafe());
+    #endif
 
     auto resolvedPath = resolveDatabasePath(path);
     int openResult = sqlite3_open(resolvedPath.c_str(), &sqlite);
@@ -38,7 +41,13 @@ SqliteDb::SqliteDb(std::string path) {
     consoleLog("Opened database at " + resolvedPath);
 }
 
-SqliteDb::~SqliteDb() {
+void SqliteDb::destroy() {
+    if (isDestroyed_) {
+        return;
+    }
+    consoleLog("Closing database...");
+
+    isDestroyed_ = true;
     assert(sqlite != nullptr);
 
     // Find and finalize all prepared statements
@@ -51,16 +60,20 @@ SqliteDb::~SqliteDb() {
     }
 
     // Close connection
-    int closeResult = sqlite3_close(sqlite);
-
     // NOTE: Applications should finalize all prepared statements, close all BLOB handles, and finish all sqlite3_backup objects
-    assert(sqlite != nullptr && sqlite3_next_stmt(sqlite, nullptr) == nullptr);
+    int closeResult = sqlite3_close(sqlite);
 
     if (closeResult != SQLITE_OK) {
         // NOTE: We're just gonna log an error. We can't throw an exception here. We could crash, but most likely we're
         // only leaking memory/resources
         consoleError("Failed to close sqlite database - " + std::string(sqlite3_errmsg(sqlite)));
     }
+
+    consoleLog("Database closed.");
+}
+
+SqliteDb::~SqliteDb() {
+    destroy();
 }
 
 SqliteStatement::SqliteStatement(sqlite3_stmt *statement) : stmt(statement) {

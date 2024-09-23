@@ -46,7 +46,7 @@ export const makeDispatcher = (
   tag: ConnectionTag,
   dbName: string,
 ): NativeDispatcher => {
-  const jsiDb = type === 'jsi' && global.nativeWatermelonCreateAdapter(dbName)
+  const jsiDb = type === 'jsi' && global.nativeWatermelonCreateAdapter(dbName, false)
 
   const methods = dispatcherMethods.map(methodName => {
     // batchJSON is missing on Android
