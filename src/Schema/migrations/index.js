@@ -118,22 +118,6 @@ export function schemaMigrations(migrationSpec: SchemaMigrationsSpec): SchemaMig
   const minVersion = oldestMigration ? oldestMigration.toVersion - 1 : 1
   const maxVersion = newestMigration?.toVersion || 1
 
-  if (process.env.NODE_ENV !== 'production') {
-    // validate that migration spec is without gaps and duplicates
-    sortedMigrations.reduce((maxCoveredVersion, migration) => {
-      const { toVersion } = migration
-      if (maxCoveredVersion) {
-        invariant(
-          toVersion === maxCoveredVersion + 1,
-          `Invalid migrations! Migrations listed cover range from version ${minVersion} to ${maxCoveredVersion}, but migration ${JSON.stringify(
-            migration,
-          )} is to version ${toVersion}. Migrations must be listed without gaps, or duplicates.`,
-        )
-      }
-      return toVersion
-    }, null)
-  }
-
   return {
     sortedMigrations,
     minVersion,
