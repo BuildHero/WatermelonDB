@@ -1,11 +1,10 @@
 // @ts-nocheck
 
 import { ensureDecoratorUsedProperly } from '../common'
-
+import makeDecorator from '../../utils/common/makeDecorator'
 import Relation, { Options } from '../../Relation'
 import type Model from '../../Model'
 import type { ColumnName, TableName } from '../../Schema'
-import { makeDecorator } from 'utils/common'
 
 // Defines a model property that fetches a record with a specific ID
 // Returns an mutable Relation object
@@ -21,7 +20,7 @@ import { makeDecorator } from 'utils/common'
 
 const relation = makeDecorator(
   (relationTable: TableName<any>, relationIdColumn: ColumnName, options?: Options | null) =>
-    (target: any, key: string, descriptor?: any) => {
+    (target: any, key: string, descriptor: any) => {
       ensureDecoratorUsedProperly(relationIdColumn, target, key, descriptor)
 
       return {

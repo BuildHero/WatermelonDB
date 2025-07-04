@@ -29,12 +29,17 @@ export default class Relation<T extends Model = Model> {
 
   _isImmutable: boolean
 
-  // @ts-ignore
-  @lazy
-  _cachedObservable: Observable<T> = createObservable(this)
-    .pipe(publishReplayLatestWhileConnected)
-    // @ts-ignore
-    .refCount()
+  private _cachedObservableInternal?: Observable<T>
+
+  get _cachedObservable(): Observable<T> {
+    if (!this._cachedObservableInternal) {
+      this._cachedObservableInternal = createObservable(this)
+        .pipe(publishReplayLatestWhileConnected)
+        // @ts-ignore
+        .refCount()
+    }
+    return this._cachedObservableInternal!
+  }
 
   constructor(
     model: Model,
