@@ -18,33 +18,30 @@ import { ensureDecoratorUsedProperly } from '../common'
 // Examples:
 //   @json('contact_info', jsonValue => jasonValue || {}) contactInfo: ContactInfo
 
-const parseJSON = tryCatch(JSON.parse, always(undefined));
+const parseJSON = tryCatch(JSON.parse, always(undefined))
 
 export const jsonDecorator = makeDecorator(
-  (rawFieldName: ColumnName, sanitizer: (json?: any, model?: Model) => any) => (
-    target: any,
-    key: string,
-    descriptor: any,
-  ) => {
-    ensureDecoratorUsedProperly(rawFieldName, target, key, descriptor)
+  (rawFieldName: ColumnName, sanitizer: (json?: unknown, model?: Model) => any) =>
+    (target: any, key: string, descriptor: any) => {
+      ensureDecoratorUsedProperly(rawFieldName, target, key, descriptor)
 
-    return {
-      configurable: true,
-      enumerable: true,
-      get(): any {
-        const rawValue = this.asModel._getRaw(rawFieldName)
-        const parsedValue = parseJSON(rawValue)
+      return {
+        configurable: true,
+        enumerable: true,
+        get(): any {
+          const rawValue = this.asModel._getRaw(rawFieldName)
+          const parsedValue = parseJSON(rawValue)
 
-        return sanitizer(parsedValue, this)
-      },
-      set(json: any): undefined {
-        const sanitizedValue = sanitizer(json, this)
-        const stringifiedValue = sanitizedValue != null ? JSON.stringify(sanitizedValue) : null
+          return sanitizer(parsedValue, this)
+        },
+        set(json: any): undefined {
+          const sanitizedValue = sanitizer(json, this)
+          const stringifiedValue = sanitizedValue != null ? JSON.stringify(sanitizedValue) : null
 
-        this.asModel._setRaw(rawFieldName, stringifiedValue)
-      },
-    };
-  },
+          this.asModel._setRaw(rawFieldName, stringifiedValue)
+        },
+      }
+    },
 )
 
 export default jsonDecorator

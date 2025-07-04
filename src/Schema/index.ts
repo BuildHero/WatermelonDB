@@ -1,65 +1,65 @@
-import invariant from '../utils/common/invariant';
+import invariant from '../utils/common/invariant'
 import checkName from '../utils/fp/checkName'
 import type { $RE } from '../types'
 
 import type Model from '../Model'
 
-export type TableName<T extends Model> = string;
-export type ColumnName = string;
+export type TableName<T = any> = string
+export type ColumnName = string
 
-export type ColumnType = 'string' | 'number' | 'boolean';
+export type ColumnType = 'string' | 'number' | 'boolean'
 export type ColumnSchema = $RE<{
-  name: ColumnName;
-  type: ColumnType;
-  isOptional?: boolean;
-  isIndexed?: boolean;
-}>;
+  name: ColumnName
+  type: ColumnType
+  isOptional?: boolean
+  isIndexed?: boolean
+}>
 
-export type ColumnMap = Partial<Record<ColumnName, ColumnSchema>>;
+export type ColumnMap = Partial<Record<ColumnName, ColumnSchema>>
 
 export type TableSchemaSpec = {
-  name: TableName<any>;
-  columns: ColumnName[];
-  unsafeSql?: (arg1: string) => string;
-};
+  name: TableName
+  columns: ColumnSchema[]
+  unsafeSql?: (arg1: string) => string
+}
 
 export type FTS5TableSchemaSpec = {
-  name: TableName<any>;
-  columns: ColumnName[];
-  contentTable: TableName<any>;
-};
+  name: TableName
+  columns: ColumnName[]
+  contentTable: TableName
+}
 
 export type FTS5TableSchema = $RE<{
-  name: TableName<any>;
-  columns: ColumnName[];
-  contentTable: TableName<any>;
-}>;
+  name: TableName
+  columns: ColumnName[]
+  contentTable: TableName
+}>
 
 export type TableSchema = $RE<{
-  name: TableName<any>;
+  name: TableName
   // depending on operation, it's faster to use map or array
-  columns: ColumnMap;
-  columnArray: ColumnSchema[];
-  unsafeSql?: (arg1: string) => string;
-}>;
+  columns: ColumnMap
+  columnArray: ColumnSchema[]
+  unsafeSql?: (arg1: string) => string
+}>
 
-type TableMap = Partial<Record<TableName<any>, TableSchema>>;
+type TableMap = Partial<Record<TableName, TableSchema>>
 
-export type SchemaVersion = number;
+export type SchemaVersion = number
 
 export type AppSchemaSpec = {
-  version: number;
-  tables: TableSchema[];
-  fts5Tables?: FTS5TableSchema[];
-  unsafeSql?: (arg1: string) => string;
-};
+  version: number
+  tables: TableSchema[]
+  fts5Tables?: FTS5TableSchema[]
+  unsafeSql?: (arg1: string) => string
+}
 
 export type AppSchema = $RE<{
-  version: SchemaVersion;
-  tables: TableMap;
-  fts5Tables: FTS5TableSchema[] | null | undefined;
-  unsafeSql: ((arg1: string) => string) | null | undefined;
-}>;
+  version: SchemaVersion
+  tables: TableMap
+  fts5Tables: FTS5TableSchema[] | null | undefined
+  unsafeSql: ((arg1: string) => string) | null | undefined
+}>
 
 export function tableName<T extends Model>(name: string): TableName<T> {
   return name
@@ -69,14 +69,12 @@ export function columnName(name: string): ColumnName {
   return name
 }
 
-export function appSchema(
-  {
-    version,
-    tables: tableList,
-    fts5Tables: fts5TableList = [],
-    unsafeSql,
-  }: AppSchemaSpec,
-): AppSchema {
+export function appSchema({
+  version,
+  tables: tableList,
+  fts5Tables: fts5TableList = [],
+  unsafeSql,
+}: AppSchemaSpec): AppSchema {
   if (process.env.NODE_ENV !== 'production') {
     invariant(version > 0, `Schema version must be greater than 0`)
   }
@@ -88,7 +86,7 @@ export function appSchema(
 
     map[table.name] = table
     return map
-  }, {});
+  }, {})
 
   // @ts-ignore
   const fts5Tables: FTS5TableSchema[] = fts5TableList?.reduce((map: Record<any, any>, table) => {
@@ -99,7 +97,7 @@ export function appSchema(
     map[table.name] = table
 
     return map
-  }, {});
+  }, {})
 
   return { version, tables, fts5Tables, unsafeSql }
 }
@@ -137,13 +135,11 @@ export function validateColumnSchema(column: ColumnSchema): void {
   }
 }
 
-export function tableSchema(
-  {
-    name,
-    columns: columnArray,
-    unsafeSql,
-  }: TableSchemaSpec,
-): TableSchema {
+export function tableSchema({
+  name,
+  columns: columnArray,
+  unsafeSql,
+}: TableSchemaSpec): TableSchema {
   if (process.env.NODE_ENV !== 'production') {
     invariant(name, `Missing table name in schema`)
     validateName(name)
@@ -151,30 +147,28 @@ export function tableSchema(
 
   const columns: ColumnMap = columnArray.reduce<Record<string, any>>((map, column) => {
     if (process.env.NODE_ENV !== 'production') {
-      validateColumnSchema(column as any);
+      validateColumnSchema(column as any)
     }
     // @ts-ignore
-    map[column.name] = column;
+    map[column.name] = column
     return map
-  }, {});
+  }, {})
 
   // @ts-ignore
-  return { name, columns, columnArray, unsafeSql };
+  return { name, columns, columnArray, unsafeSql }
 }
 
-export function fts5TableSchema(
-  {
-    name,
-    columns,
-    contentTable,
-  }: FTS5TableSchemaSpec,
-): FTS5TableSchema {
+export function fts5TableSchema({
+  name,
+  columns,
+  contentTable,
+}: FTS5TableSchemaSpec): FTS5TableSchema {
   if (process.env.NODE_ENV !== 'production') {
     invariant(name, `Missing table name in schema`)
     validateName(name)
   }
 
-  columns.forEach(columnName => {
+  columns.forEach((columnName) => {
     invariant(columnName, `Missing column name`)
     validateName(columnName)
   })

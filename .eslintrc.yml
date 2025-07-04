@@ -1,5 +1,4 @@
 ---
-
 env:
   es6: true
   jest: true
@@ -43,7 +42,7 @@ rules:
   function-paren-newline: 0
   no-unused-vars:
     - 2
-    - argsIgnorePattern: "^_"
+    - argsIgnorePattern: '^_'
   no-else-return:
     - 2
     - allowElseIf: true
@@ -73,14 +72,6 @@ rules:
   react/no-unused-prop-types: 0
   react/destructuring-assignment: 0
   react/jsx-one-expression-per-line: 0
-  flowtype/delimiter-dangle:
-    - 2
-    - always-multiline
-  flowtype/require-return-type:
-    - 2
-    - always
-    - excludeArrowFunctions: true
-      annotateUndefined: always
   import/prefer-default-export: 0
   import/named: 0 # doesn't seem to work with Flow
   import/no-extraneous-dependencies: 0
@@ -91,16 +82,12 @@ rules:
 
 overrides:
   - files:
-      - "src/**/*.js"
+      - 'src/**/*.js'
     excludedFiles:
-      - "*integrationTest.js"
-      - "*test.js"
-      - "**/__tests__/**"
-      - "*test.*.js"
-    rules:
-      flowtype/require-valid-file-annotation:
-        - 2
-        - always
+      - '*integrationTest.js'
+      - '*test.js'
+      - '**/__tests__/**'
+      - '*test.*.js'
 
 globals:
   document: true

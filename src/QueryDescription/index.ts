@@ -1,6 +1,6 @@
 /* eslint-disable no-use-before-define */
 
-import {uniq, partition, piped, map, groupBy} from 'rambdax';
+import { uniq, partition, piped, map, groupBy } from 'rambdax'
 import { unnest } from '../utils/fp'
 
 // don't import whole `utils` to keep worker size small
@@ -11,121 +11,145 @@ import type { $RE } from '../types'
 
 import { TableName, ColumnName, columnName } from '../Schema'
 
-export type NonNullValue = number | string | boolean;
-export type NonNullValues = number[] | string[] | boolean[];
-export type Value = NonNullValue | null;
-export type CompoundValue = Value | Value[];
+export type NonNullValue = number | string | boolean
+export type NonNullValues = number[] | string[] | boolean[]
+export type Value = NonNullValue | null
+export type CompoundValue = Value | Value[]
 
-export type Operator = 'eq' | 'notEq' | 'gt' | 'gte' | // TODO: Do we still even need `gt`?
-'weakGt' | 'lt' | 'lte' | 'oneOf' | 'notIn' | 'between' | 'like' | 'notLike';
+export type Operator =
+  | 'eq'
+  | 'notEq'
+  | 'gt'
+  | 'gte' // TODO: Do we still even need `gt`?
+  | 'weakGt'
+  | 'lt'
+  | 'lte'
+  | 'oneOf'
+  | 'notIn'
+  | 'between'
+  | 'like'
+  | 'notLike'
 
 export type ColumnDescription = $RE<{
-  column: ColumnName;
-  type?: symbol;
-}>;
-export type ComparisonRight = $RE<{
-  value: Value;
-}> | $RE<{
-  values: NonNullValues;
-}> | ColumnDescription;
+  column: ColumnName
+  type?: symbol
+}>
+export type ComparisonRight =
+  | $RE<{
+      value: Value
+    }>
+  | $RE<{
+      values: NonNullValues
+    }>
+  | ColumnDescription
 export type Comparison = $RE<{
-  operator: Operator;
-  right: ComparisonRight;
-  type?: symbol;
-}>;
+  operator: Operator
+  right: ComparisonRight
+  type?: symbol
+}>
 
 export type WhereDescription = $RE<{
-  type: 'where';
-  left: ColumnName;
-  comparison: Comparison;
-}>;
+  type: 'where'
+  left: ColumnName
+  comparison: Comparison
+}>
 
 export type SqlExpr = $RE<{
-  type: 'sql';
-  expr: string;
-}>;
+  type: 'sql'
+  expr: string
+}>
 export type LokiExpr = $RE<{
-  type: 'loki';
-  expr: any;
-}>;
+  type: 'loki'
+  expr: any
+}>
 
-export type Where = WhereDescription | And | Or | On | SqlExpr | LokiExpr;
+export type Where = WhereDescription | And | Or | On | SqlExpr | LokiExpr
 export type And = $RE<{
-  type: 'and';
-  conditions: Where[];
-}>;
+  type: 'and'
+  conditions: Where[]
+}>
 export type Or = $RE<{
-  type: 'or';
-  conditions: Where[];
-}>;
+  type: 'or'
+  conditions: Where[]
+}>
 export type On = $RE<{
-  type: 'on';
-  table: TableName<any>;
-  conditions: Where[];
-}>;
-export type SortOrder = 'asc' | 'desc';
+  type: 'on'
+  table: TableName
+  conditions: Where[]
+}>
+export type SortOrder = 'asc' | 'desc'
 export const asc: SortOrder = 'asc'
 export const desc: SortOrder = 'desc'
 export type SortBy = $RE<{
-  type: 'sortBy';
-  sortColumn: ColumnName;
-  sortOrder: SortOrder;
-}>;
+  type: 'sortBy'
+  sortColumn: ColumnName
+  sortOrder: SortOrder
+}>
 export type Take = $RE<{
-  type: 'take';
-  count: number;
-}>;
+  type: 'take'
+  count: number
+}>
 export type Skip = $RE<{
-  type: 'skip';
-  count: number;
-}>;
+  type: 'skip'
+  count: number
+}>
 export type JoinTables = $RE<{
-  type: 'joinTables';
-  tables: TableName<any>[];
-}>;
+  type: 'joinTables'
+  tables: TableName[]
+}>
 export type NestedJoinTable = $RE<{
-  type: 'nestedJoinTable';
-  from: TableName<any>;
-  to: TableName<any>;
-  joinedAs?: TableName<any>;
-}>;
+  type: 'nestedJoinTable'
+  from: TableName
+  to: TableName
+  joinedAs?: TableName
+}>
 export type EagerJoinTables = $RE<{
-  type: 'eagerJoinTables';
-  joinTables: TableName<any>[];
-  nestedJoinTables: NestedJoinTableDef[];
-}>;
-export type LokiFilterFunction = (rawLokiRecord?: any, loki?: any) => boolean;
+  type: 'eagerJoinTables'
+  joinTables: TableName[]
+  nestedJoinTables: NestedJoinTableDef[]
+}>
+export type LokiFilterFunction = (rawLokiRecord?: any, loki?: any) => boolean
 export type LokiFilter = $RE<{
-  type: 'lokiFilter';
-  function: LokiFilterFunction;
-}>;
+  type: 'lokiFilter'
+  function: LokiFilterFunction
+}>
 export type SqlQuery = $RE<{
-  type: 'sqlQuery';
-  sql: string;
-}>;
+  type: 'sqlQuery'
+  sql: string
+}>
 export type SqlCTE = $RE<{
-  type: 'sqlCTE';
-  cte: string;
-}>;
-export type Clause = Where | SortBy | Take | Skip | JoinTables | NestedJoinTable | LokiFilter | EagerJoinTables | SqlQuery | SqlCTE;
+  type: 'sqlCTE'
+  cte: string
+}>
+export type Clause =
+  | Where
+  | SortBy
+  | Take
+  | Skip
+  | JoinTables
+  | NestedJoinTable
+  | LokiFilter
+  | EagerJoinTables
+  | SqlQuery
+  | SqlCTE
 
 type NestedJoinTableDef = $RE<{
-  from: TableName<any>;
-  to: TableName<any>;
-  joinedAs?: TableName<any>;
-}>;
+  from: TableName
+  to: TableName
+  joinedAs?: TableName
+}>
 export type QueryDescription = $RE<{
-  where: Where[];
-  joinTables: TableName<any>[];
-  nestedJoinTables: NestedJoinTableDef[];
-  eagerJoinTables: EagerJoinTables[];
-  sortBy: SortBy[];
-  take?: number;
-  skip?: number;
-  lokiFilter?: LokiFilterFunction;
-  sql?: string;
-  cte?: string;
-}>;
+  where: Where[]
+  joinTables: TableName[]
+  nestedJoinTables: NestedJoinTableDef[]
+  eagerJoinTables: EagerJoinTables[]
+  sortBy: SortBy[]
+  take?: number
+  skip?: number
+  lokiFilter?: LokiFilterFunction
+  sql?: string
+  cte?: string
+}>
 
 const columnSymbol = Symbol('Q.column')
 const comparisonSymbol = Symbol('QueryComparison')
@@ -340,12 +364,15 @@ export function experimentalSkip(count: number): Skip {
 
 // Note: we have to write out three separate meanings of OnFunction because of a Babel bug
 // (it will remove the parentheses, changing the meaning of the flow type)
-type _OnFunctionColumnValue = (arg1: TableName<any>, arg2: ColumnName, arg3: Value) => On;
-type _OnFunctionColumnComparison = (arg1: TableName<any>, arg2: ColumnName, arg3: Comparison) => On;
-type _OnFunctionWhere = (arg1: TableName<any>, arg2: Where) => On;
-type _OnFunctionWhereList = (arg1: TableName<any>, arg2: Where[]) => On;
+type _OnFunctionColumnValue = (arg1: TableName, arg2: ColumnName, arg3: Value) => On
+type _OnFunctionColumnComparison = (arg1: TableName, arg2: ColumnName, arg3: Comparison) => On
+type _OnFunctionWhere = (arg1: TableName, arg2: Where) => On
+type _OnFunctionWhereList = (arg1: TableName, arg2: Where[]) => On
 
-type OnFunction = _OnFunctionColumnValue & _OnFunctionColumnComparison & _OnFunctionWhere & _OnFunctionWhereList;
+type OnFunction = _OnFunctionColumnValue &
+  _OnFunctionColumnComparison &
+  _OnFunctionWhere &
+  _OnFunctionWhereList
 
 // Use: on('tableName', 'left_column', 'right_value')
 // or: on('tableName', 'left_column', gte(10))
@@ -359,7 +386,7 @@ export const on: OnFunction = (table, leftOrClauseOrList, valueOrComparison) => 
     return on(table, [where(leftOrClauseOrList, valueOrComparison)])
   }
 
-  const clauseOrList: Where | Where[] = (leftOrClauseOrList as any)
+  const clauseOrList: Where | Where[] = leftOrClauseOrList as any
 
   if (Array.isArray(clauseOrList)) {
     const conditions: Where[] = clauseOrList
@@ -376,24 +403,24 @@ export const on: OnFunction = (table, leftOrClauseOrList, valueOrComparison) => 
   return on(table, [clauseOrList])
 }
 
-export function experimentalJoinTables(tables: TableName<any>[]): JoinTables {
+export function experimentalJoinTables(tables: TableName[]): JoinTables {
   invariant(Array.isArray(tables), 'experimentalJoinTables expected an array')
-  return { type: 'joinTables', tables: tables.map(checkName) }
+  return { type: 'joinTables' as const, tables: tables.map(checkName) }
 }
 
 export function experimentalNestedJoin(
-  from: TableName<any>,
-  to: TableName<any>,
-  joinedAs: TableName<any> | undefined = undefined,
+  from: TableName,
+  to: TableName,
+  joinedAs: TableName | undefined = undefined,
 ): NestedJoinTable {
-  return { type: 'nestedJoinTable', from: checkName(from), to: checkName(to), joinedAs };
+  return { type: 'nestedJoinTable' as const, from: checkName(from), to: checkName(to), joinedAs }
 }
 
-export function eager(...joins: JoinTables[] | NestedJoinTable[]) {
-  const joinTables: TableName<any>[] = []
+export function eager(...joins: Array<JoinTables | NestedJoinTable>) {
+  const joinTables: TableName[] = []
   const nestedJoinTables: NestedJoinTableDef[] = []
 
-  joins.forEach(join => {
+  joins.forEach((join) => {
     if (join.type === 'joinTables') {
       joinTables.push(...join.tables)
     } else if (join.type === 'nestedJoinTable') {
@@ -401,7 +428,7 @@ export function eager(...joins: JoinTables[] | NestedJoinTable[]) {
     }
   })
 
-  return { type: 'eagerJoinTables', joinTables, nestedJoinTables }
+  return { type: 'eagerJoinTables' as const, joinTables, nestedJoinTables }
 }
 
 const compressTopLevelOns = (conditions: Where[]): Where[] => {
@@ -409,14 +436,14 @@ const compressTopLevelOns = (conditions: Where[]): Where[] => {
   // special cases are used. Here, we're special casing only top-level Q.ons to avoid regressions
   // but it's not recommended for new code
   // TODO: Remove this special case
-  const [ons, wheres] = partition(clause => clause.type === 'on', conditions)
+  const [ons, wheres] = partition((clause) => clause.type === 'on', conditions)
   const grouppedOns: On[] = piped(
     ons,
     groupBy((clause: any) => clause.table),
     Object.values,
     map((clauses: On[]) => {
       const { table } = clauses[0]
-      const onConditions: Where[] = unnest(clauses.map(clause => clause.conditions))
+      const onConditions: Where[] = unnest(clauses.map((clause) => clause.conditions))
       return on(table, onConditions)
     }),
   )
@@ -426,7 +453,7 @@ const compressTopLevelOns = (conditions: Where[]): Where[] => {
 const syncStatusColumn = columnName('_status')
 
 // @ts-ignore
-const extractClauses: (arg1: Clause[]) => QueryDescription = clauses => {
+const extractClauses: (arg1: Clause[]) => QueryDescription = (clauses) => {
   const clauseMap = {
     eagerJoinTables: [],
     where: [],
@@ -435,7 +462,7 @@ const extractClauses: (arg1: Clause[]) => QueryDescription = clauses => {
     sortBy: [],
   } as any
 
-  clauses.forEach(clause => {
+  clauses.forEach((clause) => {
     const { type } = clause
     switch (type) {
       case 'where':
@@ -446,47 +473,47 @@ const extractClauses: (arg1: Clause[]) => QueryDescription = clauses => {
         clauseMap.where.push(clause)
         break
       case 'on':
-        clauseMap.joinTables.push(clause.table);
+        clauseMap.joinTables.push(clause.table)
         clauseMap.where.push(clause)
         break
       case 'sortBy':
         clauseMap.sortBy.push(clause)
         break
       case 'take':
-        clauseMap.take = clause.count;
+        clauseMap.take = clause.count
         break
       case 'skip':
-        clauseMap.skip = clause.count;
+        clauseMap.skip = clause.count
         break
       case 'joinTables':
-        clauseMap.joinTables.push(...clause.tables);
+        clauseMap.joinTables.push(...clause.tables)
         break
       case 'nestedJoinTable':
         clauseMap.nestedJoinTables.push({
           from: clause.from,
           to: clause.to,
           joinedAs: clause.joinedAs,
-        });
+        })
         break
       case 'eagerJoinTables':
-        clauseMap.eagerJoinTables.push(clause);
+        clauseMap.eagerJoinTables.push(clause)
       case 'lokiFilter':
         // @ts-ignore
-        clauseMap.lokiFilter = clause.function;
+        clauseMap.lokiFilter = clause.function
         break
       case 'sqlQuery':
-        clauseMap.sql = clause.sql;
+        clauseMap.sql = clause.sql
         break
       case 'sqlCTE':
-        clauseMap.cte = clause.cte;
+        clauseMap.cte = clause.cte
         break
       default:
         throw new Error('Invalid Query clause passed')
     }
   })
   clauseMap.joinTables = uniq(clauseMap.joinTables)
-  clauseMap.where = compressTopLevelOns(clauseMap.where);
-  return clauseMap;
+  clauseMap.where = compressTopLevelOns(clauseMap.where)
+  return clauseMap
 }
 
 export function buildQueryDescription(clauses: Clause[]): QueryDescription {
@@ -534,7 +561,7 @@ export function queryWithoutDeleted(query: QueryDescription): QueryDescription {
   return newQuery
 }
 
-const searchForColumnComparisons: (arg1?: any) => boolean = value => {
+const searchForColumnComparisons: (arg1?: any) => boolean = (value) => {
   // Performance critical (100ms on login in previous rambdax-based implementation)
 
   if (Array.isArray(value)) {

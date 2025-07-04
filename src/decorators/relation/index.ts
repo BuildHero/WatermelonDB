@@ -1,7 +1,7 @@
 // @ts-nocheck
 
-import {ensureDecoratorUsedProperly} from '../common';
-
+import { ensureDecoratorUsedProperly } from '../common'
+import makeDecorator from '../../utils/common/makeDecorator'
 import Relation, { Options } from '../../Relation'
 import type Model from '../../Model'
 import type { ColumnName, TableName } from '../../Schema'
@@ -18,35 +18,34 @@ import type { ColumnName, TableName } from '../../Schema'
 // Example: a Task has a project it belongs to (and the project can change), so it may define:
 //   @relation('project', 'project_id') project: Relation<Project>
 
-const relation = (
-  relationTable: TableName<any>,
-  relationIdColumn: ColumnName,
-  options?: Options | null,
-) => (target: any, key: string, descriptor: any) => {
-  ensureDecoratorUsedProperly(relationIdColumn, target, key, descriptor)
+const relation = makeDecorator(
+  (relationTable: TableName<any>, relationIdColumn: ColumnName, options?: Options | null) =>
+    (target: any, key: string, descriptor: any) => {
+      ensureDecoratorUsedProperly(relationIdColumn, target, key, descriptor)
 
-  return {
-    get(): Relation<Model> {
-      this._relationCache = this._relationCache || {}
-      const cachedRelation = this._relationCache[key]
-      if (cachedRelation) {
-        return cachedRelation
+      return {
+        get(): Relation<Model> {
+          this._relationCache = this._relationCache || {}
+          const cachedRelation = this._relationCache[key]
+          if (cachedRelation) {
+            return cachedRelation
+          }
+
+          const newRelation = new Relation(
+            this.asModel,
+            relationTable,
+            relationIdColumn,
+            options || { isImmutable: false },
+          )
+          this._relationCache[key] = newRelation
+
+          return newRelation
+        },
+        set(): undefined {
+          throw new Error(`Don't set relation directly. Use relation.set() instead`)
+        },
       }
-
-      const newRelation = new Relation(
-        this.asModel,
-        relationTable,
-        relationIdColumn,
-        options || { isImmutable: false },
-      )
-      this._relationCache[key] = newRelation
-
-      return newRelation
     },
-    set(): undefined {
-      throw new Error(`Don't set relation directly. Use relation.set() instead`)
-    },
-  };
-};
+)
 
 export default relation
