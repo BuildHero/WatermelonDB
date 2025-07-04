@@ -1,4 +1,4 @@
-import type {Descriptor} from '../../utils/common/makeDecorator';
+import type { Descriptor } from '../../utils/common/makeDecorator'
 
 // Defines a property whose value is evaluated the first time it is accessed
 // For example:
@@ -9,7 +9,7 @@ import type {Descriptor} from '../../utils/common/makeDecorator';
 // All subsequent calls will return the same value
 
 export default function lazy(target: any, key: string, descriptor: Descriptor): Descriptor {
-  const { configurable, enumerable, initializer, value } = descriptor
+  const { configurable, enumerable, initializer, value } = descriptor || {}
   return {
     configurable,
     enumerable,
@@ -33,7 +33,7 @@ export default function lazy(target: any, key: string, descriptor: Descriptor): 
       return returnValue
     },
     // TODO: What should be the behavior on set?
-  };
+  }
 }
 
 // Implementation inspired by lazyInitialize from `core-decorators`

@@ -1,4 +1,4 @@
-import {values} from 'rambdax';
+import { values } from 'rambdax'
 
 import { Observable, startWith, merge as merge$ } from '../utils/rx'
 import { Unsubscribe } from '../utils/subscriptions'
@@ -17,29 +17,23 @@ import CollectionMap from './CollectionMap'
 import ActionQueue, { ActionInterface } from './ActionQueue'
 
 type DatabaseProps = {
-  adapter: DatabaseAdapter;
-  modelClasses: Array<typeof Model>;
-  actionsEnabled: boolean;
-};
+  adapter: DatabaseAdapter
+  modelClasses: Array<typeof Model>
+  actionsEnabled: boolean
+}
 
 export default class Database {
-  adapter: DatabaseAdapterCompat;
+  adapter: DatabaseAdapterCompat
 
-  schema: AppSchema;
+  schema: AppSchema
 
-  collections: CollectionMap;
+  collections: CollectionMap
 
   _actionQueue = new ActionQueue()
 
-  _actionsEnabled: boolean;
+  _actionsEnabled: boolean
 
-  constructor(
-    {
-      adapter,
-      modelClasses,
-      actionsEnabled,
-    }: DatabaseProps,
-  ) {
+  constructor({ adapter, modelClasses, actionsEnabled }: DatabaseProps) {
     if (process.env.NODE_ENV !== 'production') {
       invariant(adapter, `Missing adapter parameter for new Database()`)
       invariant(
@@ -75,7 +69,7 @@ export default class Database {
   async batch(...records: Array<Model | null | undefined | false | Model[]>): Promise<void> {
     // If we're passed multiple arguments, wrap them in an array
     if (records.length > 1) {
-      return this.batch(records as any);
+      return this.batch(records as any)
     }
 
     // If we're passed a single array argument, use it directly
@@ -87,7 +81,7 @@ export default class Database {
 
     // performance critical - using mutations
     const batchOperations: BatchOperation[] = []
-    const changeNotifications: Partial<Record<TableName<any>, CollectionChangeSet<any>>> = {};
+    const changeNotifications: Partial<Record<TableName<any>, CollectionChangeSet<any>>> = {}
     const chunkSize = 10000 // Set the chunk size to 10,000
 
     // Split actualRecords into chunks
@@ -138,13 +132,13 @@ export default class Database {
     }
 
     // NOTE: We must make two passes to ensure all changes to caches are applied before subscribers are called
-    Object.entries(changeNotifications).forEach(notification => {
-      const [table, changeSet]: [TableName<any>, CollectionChangeSet<any>] = (notification as any)
+    Object.entries(changeNotifications).forEach((notification) => {
+      const [table, changeSet]: [TableName<any>, CollectionChangeSet<any>] = notification as any
       this.collections.get(table)._applyChangesToCache(changeSet)
     })
 
-    Object.entries(changeNotifications).forEach(notification => {
-      const [table, changeSet]: [TableName<any>, CollectionChangeSet<any>] = (notification as any)
+    Object.entries(changeNotifications).forEach((notification) => {
+      const [table, changeSet]: [TableName<any>, CollectionChangeSet<any>] = notification as any
       this.collections.get(table)._notify(changeSet)
     })
 
@@ -165,6 +159,13 @@ export default class Database {
   // must be performed inside Actions, so Actions guarantee a write lock.
   //
   // See docs for more details and practical guide
+
+  // Overload 1: Callback returns Promise<T> → method returns Promise<T>
+  action<T>(work: (arg1: ActionInterface) => Promise<T>, description?: string): Promise<T>
+
+  // Overload 2: Callback returns Promise<void> → method returns void
+  action(work: () => Promise<void>, description?: string): Promise<void>
+
   action<T>(work: (arg1: ActionInterface) => Promise<T>, description?: string): Promise<T> {
     return this._actionQueue.enqueue(work, description)
   }
@@ -184,15 +185,19 @@ export default class Database {
 
   // Emits a signal immediately, and on change in any of the passed tables
   withChangesForTables(tables: TableName<any>[]): Observable<CollectionChangeSet<any> | null> {
-    const changesSignals = tables.map(table => this.collections.get(table).changes)
+    const changesSignals = tables.map((table) => this.collections.get(table).changes)
 
     return merge$(...changesSignals).pipe(startWith(null))
   }
 
-  _subscribers: [TableName<any>[], () => void, any][] = [];
+  _subscribers: [TableName<any>[], () => void, any][] = []
 
   // Notifies `subscriber` on change in any of passed tables (only a signal, no change set)
-  experimentalSubscribe(tables: TableName<any>[], subscriber: () => void, debugInfo?: any): Unsubscribe {
+  experimentalSubscribe(
+    tables: TableName<any>[],
+    subscriber: () => void,
+    debugInfo?: any,
+  ): Unsubscribe {
     if (!tables.length) {
       return noop
     }
@@ -206,9 +211,9 @@ export default class Database {
     }
   }
 
-  _resetCount: number = 0;
+  _resetCount: number = 0
 
-  _isBeingReset: boolean = false;
+  _isBeingReset: boolean = false
 
   // Resets database - permanently destroys ALL records stored in the database, and sets up empty database
   //
@@ -232,7 +237,7 @@ export default class Database {
       // Kill ability to call adapter methods during reset (to catch bugs if someone does this)
       const { adapter } = this
       const ErrorAdapter = require('../adapters/error').default
-      this.adapter = (new ErrorAdapter() as any)
+      this.adapter = new ErrorAdapter() as any
 
       // Check for illegal subscribers
       if (this._subscribers.length) {

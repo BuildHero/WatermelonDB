@@ -16,16 +16,8 @@
     "emitDecoratorMetadata": true,
     "experimentalDecorators": true,
     "jsx": "react",
-    "lib": [
-      "dom",
-      "esnext"
-    ],
-    "types": [
-      "node",
-      "jest",
-      "react",
-      "react-native"
-    ],
+    "lib": ["dom", "esnext"],
+    "types": ["node", "jest", "react", "react-native"],
     "allowSyntheticDefaultImports": true,
     "importHelpers": true,
     "outDir": "./dist",
@@ -33,17 +25,10 @@
     "baseUrl": ".",
     "paths": {
       "*": ["src/*"]
-    }
+    },
+    "allowJs": true,
+    "checkJs": false
   },
-  "include": [
-    "src/**/*",
-    "src/**/*.json",
-    "src/**/__tests__/**/*"
-  ],
-  "exclude": [
-    "node_modules",
-    "dist",
-    "examples",
-    "coverage"
-  ]
+  "include": ["src/**/*", "src/**/*.json", "src/**/__tests__/**/*"],
+  "exclude": ["node_modules", "dist", "examples", "coverage"]
 }

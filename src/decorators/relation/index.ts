@@ -1,6 +1,6 @@
 // @ts-nocheck
 
-import {ensureDecoratorUsedProperly} from '../common';
+import { ensureDecoratorUsedProperly } from '../common'
 
 import Relation, { Options } from '../../Relation'
 import type Model from '../../Model'
@@ -18,35 +18,35 @@ import type { ColumnName, TableName } from '../../Schema'
 // Example: a Task has a project it belongs to (and the project can change), so it may define:
 //   @relation('project', 'project_id') project: Relation<Project>
 
-const relation = (
-  relationTable: TableName<any>,
-  relationIdColumn: ColumnName,
-  options?: Options | null,
-) => (target: any, key: string, descriptor: any) => {
-  ensureDecoratorUsedProperly(relationIdColumn, target, key, descriptor)
+const relation =
+  (relationTable: TableName<any>, relationIdColumn: ColumnName, options?: Options | null) =>
+  (target: any, key: string, descriptor?: any) => {
+    ensureDecoratorUsedProperly(relationIdColumn, target, key, descriptor)
 
-  return {
-    get(): Relation<Model> {
-      this._relationCache = this._relationCache || {}
-      const cachedRelation = this._relationCache[key]
-      if (cachedRelation) {
-        return cachedRelation
-      }
+    Object.defineProperty(target, key, {
+      get(): Relation<Model> {
+        this._relationCache = this._relationCache || {}
+        const cachedRelation = this._relationCache[key]
+        if (cachedRelation) {
+          return cachedRelation
+        }
 
-      const newRelation = new Relation(
-        this.asModel,
-        relationTable,
-        relationIdColumn,
-        options || { isImmutable: false },
-      )
-      this._relationCache[key] = newRelation
+        const newRelation = new Relation(
+          this.asModel,
+          relationTable,
+          relationIdColumn,
+          options || { isImmutable: false },
+        )
+        this._relationCache[key] = newRelation
 
-      return newRelation
-    },
-    set(): undefined {
-      throw new Error(`Don't set relation directly. Use relation.set() instead`)
-    },
-  };
-};
+        return newRelation
+      },
+      set(): void {
+        throw new Error(`Don't set relation directly. Use relation.set() instead`)
+      },
+      enumerable: true,
+      configurable: true,
+    })
+  }
 
 export default relation
