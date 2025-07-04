@@ -8,7 +8,7 @@ import type { Descriptor } from '../../utils/common/makeDecorator'
 // `date` will be set to the current date not when constructed, but only when `xx.date` is called.
 // All subsequent calls will return the same value
 
-export default function lazy(target: any, key: string, descriptor: Descriptor): Descriptor {
+export default function lazy(target: any, key: string, descriptor?: Descriptor): Descriptor {
   const { configurable, enumerable, initializer, value } = descriptor || {}
   return {
     configurable,

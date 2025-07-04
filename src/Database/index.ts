@@ -165,6 +165,7 @@ export default class Database {
 
   // Overload 2: Callback returns Promise<void> → method returns void
   action(work: () => Promise<void>, description?: string): Promise<void>
+  action<T>(work: () => Promise<void>, description?: string): Promise<void>
 
   action<T>(work: (arg1: ActionInterface) => Promise<T>, description?: string): Promise<T> {
     return this._actionQueue.enqueue(work, description)
