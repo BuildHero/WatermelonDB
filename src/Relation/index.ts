@@ -1,4 +1,4 @@
-import type {Observable} from '../utils/rx';
+import type { Observable } from '../utils/rx'
 import invariant from '../utils/common/invariant'
 import publishReplayLatestWhileConnected from '../utils/rx/publishReplayLatestWhileConnected'
 import lazy from '../decorators/lazy'
@@ -8,31 +8,38 @@ import type { ColumnName, TableName } from '../Schema'
 
 import { createObservable } from './helpers'
 
-type ExtractRecordIdNonOptional = <T extends Model>(value: T) => RecordId;
-type ExtractRecordIdOptional = <T extends Model>(value?: T | null | undefined) => RecordId | null | undefined;
-type ExtractRecordId = ExtractRecordIdNonOptional & ExtractRecordIdOptional;
+type ExtractRecordIdNonOptional = <T extends Model>(value: T) => RecordId
+type ExtractRecordIdOptional = <T extends Model>(
+  value?: T | null | undefined,
+) => RecordId | null | undefined
+type ExtractRecordId = ExtractRecordIdNonOptional & ExtractRecordIdOptional
 
 export type Options = {
-  isImmutable: boolean;
-};
+  isImmutable: boolean
+}
 
 // Defines a one-to-one relation between two Models (two tables in db)
 // Do not create this object directly! Use `relation` or `immutableRelation` decorators instead
-export default class Relation<T extends Model | null | undefined> {
-  _model: Model;
+export default class Relation<T extends Model = Model> {
+  _model: Model
 
-  _columnName: ColumnName;
+  _columnName: ColumnName
 
-  _relationTableName: TableName<NonNullable<T>>;
+  _relationTableName: TableName<NonNullable<T>>
 
-  _isImmutable: boolean;
+  _isImmutable: boolean
 
-  // @ts-ignore
-  @lazy
-  _cachedObservable: Observable<T> = createObservable(this)
-    .pipe(publishReplayLatestWhileConnected)
-    // @ts-ignore
-    .refCount();
+  private _cachedObservableInternal?: Observable<T>
+
+  get _cachedObservable(): Observable<T> {
+    if (!this._cachedObservableInternal) {
+      this._cachedObservableInternal = createObservable(this)
+        .pipe(publishReplayLatestWhileConnected)
+        // @ts-ignore
+        .refCount()
+    }
+    return this._cachedObservableInternal!
+  }
 
   constructor(
     model: Model,
@@ -47,7 +54,7 @@ export default class Relation<T extends Model | null | undefined> {
   }
 
   get id(): ReturnType<ExtractRecordId> {
-    return this._model._getRaw(this._columnName) as any;
+    return this._model._getRaw(this._columnName) as any
   }
 
   set id(newId: ReturnType<ExtractRecordId>) {
@@ -63,13 +70,13 @@ export default class Relation<T extends Model | null | undefined> {
     this._model._setRaw(this._columnName, newId || null)
   }
 
-  fetch(): Promise<T|Model> {
+  fetch(): Promise<T> {
     const { id } = this
     if (id) {
-      return this._model.collections.get(this._relationTableName).find(id)
+      return this._model.collections.get<T>(this._relationTableName).find(id)
     }
 
-    return Promise.resolve((null as any));
+    return Promise.resolve(null as any)
   }
 
   then<U>(
@@ -77,7 +84,7 @@ export default class Relation<T extends Model | null | undefined> {
     onReject?: (error?: any) => Promise<U> | U,
   ): Promise<U> {
     // @ts-ignore
-    return this.fetch().then(onFulfill, onReject);
+    return this.fetch().then(onFulfill, onReject)
   }
 
   set(record: T): void {

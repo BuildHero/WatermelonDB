@@ -52,12 +52,12 @@ const notOneOf: OperatorFunction = (value, values) => !values?.includes(value)
 const operators: Partial<Record<Operator, OperatorFunction>> = {
   eq: rawFieldEquals,
   notEq: rawFieldNotEquals,
-  gt: noNullComparisons(gt),
-  gte: noNullComparisons(gte),
+  gt: noNullComparisons(gt as OperatorFunction),
+  gte: noNullComparisons(gte as OperatorFunction),
   // @ts-ignore
   weakGt,
-  lt: noNullComparisons(lt),
-  lte: noNullComparisons(lte),
+  lt: noNullComparisons(lt as OperatorFunction),
+  lte: noNullComparisons(lte as OperatorFunction),
   oneOf,
   notIn: noNullComparisons(notOneOf),
   between,

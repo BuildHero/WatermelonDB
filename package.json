@@ -1,7 +1,7 @@
 {
   "name": "@BuildHero/watermelondb",
   "description": "Build powerful React Native and React web apps that scale from hundreds to tens of thousands of records and remain fast",
-  "version": "4.1.0-184",
+  "version": "4.1.0-198",
   "scripts": {
     "build": "NODE_ENV=production node ./scripts/make.js",
     "dev": "NODE_ENV=development node ./scripts/make.js",
@@ -41,13 +41,15 @@
     "type": "git",
     "url": "https://github.com/BuildHero/WatermelonDB.git"
   },
+  "peerDependencies": {
+    "rxjs": "*"
+  },
   "dependencies": {
     "@babel/runtime": "^7.11.2",
     "@nozbe/simdjson": "3.9.4",
     "@nozbe/sqlite": "3.31.1",
     "lokijs": "npm:@nozbe/lokijs@1.5.10-wmelon3",
     "rambdax": "2.15.0",
-    "rxjs": "^6.5.3",
     "sql-escape-string": "^1.1.0",
     "ulid": "^2.3.0",
     "uuid": "^11.1.0"
@@ -145,14 +147,14 @@
     "lodash.clonedeep": "^4.5.0",
     "mkdirp": "^0.5.1",
     "p-timeout": "^3.0.0",
-    "prettier": "^1.14.2",
-    "prettier-eslint": "^9.0.0",
-    "prettier-eslint-cli": "^4.7.1",
+    "prettier": "3.2.5",
+    "prettier-eslint": "16.3.0",
     "react": "^16.11.0",
     "react-dom": "^16.11.0",
     "react-native": "^0.59.3",
     "react-test-renderer": "16.11.0",
     "rimraf": "^3.0.0",
+    "rxjs": "^6.5.3",
     "semver": "^6.0.0",
     "ts-node": "^10.9.1",
     "ts-node-register": "1.0.0",

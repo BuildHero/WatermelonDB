@@ -1,4 +1,4 @@
-import type {Descriptor} from '../../utils/common/makeDecorator';
+import type { Descriptor } from '../../utils/common/makeDecorator'
 
 // Defines a property whose value is evaluated the first time it is accessed
 // For example:
@@ -8,8 +8,8 @@ import type {Descriptor} from '../../utils/common/makeDecorator';
 // `date` will be set to the current date not when constructed, but only when `xx.date` is called.
 // All subsequent calls will return the same value
 
-export default function lazy(target: any, key: string, descriptor: Descriptor): Descriptor {
-  const { configurable, enumerable, initializer, value } = descriptor
+export default function lazy(target: any, key: string, descriptor?: Descriptor): Descriptor {
+  const { configurable, enumerable, initializer, value } = descriptor || {}
   return {
     configurable,
     enumerable,
@@ -33,7 +33,7 @@ export default function lazy(target: any, key: string, descriptor: Descriptor): 
       return returnValue
     },
     // TODO: What should be the behavior on set?
-  };
+  }
 }
 
 // Implementation inspired by lazyInitialize from `core-decorators`
