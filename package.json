@@ -1,7 +1,7 @@
 {
   "name": "@BuildHero/watermelondb",
   "description": "Build powerful React Native and React web apps that scale from hundreds to tens of thousands of records and remain fast",
-  "version": "5.0.0-7",
+  "version": "5.0.0-8",
   "scripts": {
     "build": "NODE_ENV=production node ./scripts/make.js",
     "dev": "NODE_ENV=development node ./scripts/make.js",
@@ -55,6 +55,17 @@
   "peerDependencies": {
     "react": ">=18.2.0",
     "react-native": ">=0.73.0"
+  },
+  "codegenConfig": {
+    "name": "WatermelonTurboModule",
+    "type": "modules",
+    "jsSrcsDir": "src/TurboModuleSpecs",
+    "android": {
+      "javaPackageName": "com.nozbe.watermelondb.turbo"
+    },
+    "ios": {
+      "moduleName": "WatermelonTurboModule"
+    }
   },
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"
