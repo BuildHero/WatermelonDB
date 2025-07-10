@@ -1,4 +1,4 @@
-export {default as cacheWhileConnected} from './cacheWhileConnected';
+export { default as cacheWhileConnected } from './cacheWhileConnected'
 // export { default as doOnDispose } from './doOnDispose'
 // export { default as doOnSubscribe } from './doOnSubscribe'
 export { default as publishReplayLatestWhileConnected } from './publishReplayLatestWhileConnected'
@@ -20,5 +20,6 @@ export {
   switchMap,
   throttleTime,
   startWith,
+  catchError,
 } from './__wmelonRxShim'
 export type { ConnectableObservable } from './__wmelonRxShim'

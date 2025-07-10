@@ -5,7 +5,7 @@ import { SchemaMigrations, MigrationStep } from './index'
 import { SchemaVersion } from '../index'
 
 const getAllSteps = pipe(
-  map(prop('steps')),
+  map(prop('steps')) as any,
   unnest,
 )
 

@@ -3,9 +3,16 @@
 // from different locations
 // This allows manual tree shaking on React Native
 
-export {// classes
-Observable, Subject, ReplaySubject, BehaviorSubject, // observables
-of, merge, defer} from 'rxjs';
+export {
+  // classes
+  Observable,
+  Subject,
+  ReplaySubject,
+  BehaviorSubject, // observables
+  of,
+  merge,
+  defer,
+} from 'rxjs'
 export {
   // operators
   multicast,
@@ -14,5 +21,6 @@ export {
   switchMap,
   throttleTime,
   startWith,
+  catchError,
 } from 'rxjs/operators'
 export type { ConnectableObservable } from 'rxjs'
