@@ -50,31 +50,28 @@ const DO_NOT_BUILD_PATHS = [
   /package\.json/,
 ]
 
-const isNotIncludedInBuildPaths = value => !anymatch(DO_NOT_BUILD_PATHS, value)
+const isNotIncludedInBuildPaths = (value) => !anymatch(DO_NOT_BUILD_PATHS, value)
 
-const cleanFolder = dir => rimraf.sync(dir)
+const cleanFolder = (dir) => rimraf.sync(dir)
 
 const takeFiles = pipe(
   prop('path'),
-  both(file => file.match(/\.(js|jsx|ts|tsx)$/), isNotIncludedInBuildPaths),
+  both((file) => file.match(/\.(js|jsx|ts|tsx)$/), isNotIncludedInBuildPaths),
 )
 
-const takeModules = pipe(
-  filter(takeFiles),
-  map(prop('path')),
-)
+const takeModules = pipe(filter(takeFiles), map(prop('path')))
 
 const removeSourcePath = replace(SOURCE_PATH, '')
 
-const createModulePath = format => {
+const createModulePath = (format) => {
   const formatPathSegment = format === CJS_MODULES ? [] : [format]
   const modulePath = resolvePath(DIR_PATH, ...formatPathSegment)
   return replace(SOURCE_PATH, modulePath)
 }
 
-const createFolder = dir => mkdirp.sync(resolvePath(dir))
+const createFolder = (dir) => mkdirp.sync(resolvePath(dir))
 
-const getBabelConfig = file => {
+const getBabelConfig = (file) => {
   const isTypeScript = file.match(/\.(ts|tsx)$/)
   return {
     presets: [...(isTypeScript ? ['@babel/preset-typescript'] : []), '@babel/preset-env'],
@@ -108,7 +105,7 @@ const compileTypeScript = () => {
 const paths = klaw(SOURCE_PATH)
 const modules = takeModules(paths)
 
-const buildModule = format => file => {
+const buildModule = (format) => (file) => {
   const modulePath = createModulePath(format)
   const code = babelTransform(format, file)
   const filename = modulePath(file).replace(/\.(ts|tsx)$/, '.js')
@@ -124,7 +121,7 @@ const prepareJson = pipe(
     types: './index.d.ts',
     sideEffects: false,
   }),
-  obj => prettyJson(obj),
+  (obj) => prettyJson(obj),
 )
 
 const createPackageJson = (dir, obj) => {
@@ -133,11 +130,11 @@ const createPackageJson = (dir, obj) => {
 }
 
 const copyFiles = (dir, files, rm = resolvePath()) =>
-  forEach(file => {
+  forEach((file) => {
     fs.copySync(file, path.join(dir, replace(rm, '', file)))
   }, files)
 
-const copyNonJavaScriptFiles = buildPath => {
+const copyNonJavaScriptFiles = (buildPath) => {
   createPackageJson(buildPath, pkg)
   copyFiles(buildPath, [
     'LICENSE',
@@ -149,6 +146,7 @@ const copyNonJavaScriptFiles = buildPath => {
     'native/ios',
     'native/android',
     'native/android-jsi',
+    'specs',
   ])
   cleanFolder(`${buildPath}/native/android/build`)
   cleanFolder(`${buildPath}/native/android/bin/build`)
