@@ -1,7 +1,7 @@
 {
   "name": "@BuildHero/watermelondb",
   "description": "Build powerful React Native and React web apps that scale from hundreds to tens of thousands of records and remain fast",
-  "version": "5.0.0-28",
+  "version": "5.0.0-29",
   "scripts": {
     "build": "NODE_ENV=production node ./scripts/make.js",
     "dev": "NODE_ENV=development node ./scripts/make.js",
@@ -26,9 +26,9 @@
   "codegenConfig": {
     "name": "WatermelonDBSpec",
     "type": "modules",
-    "jsSrcsDir": "specs",
+    "jsSrcsDir": "native/specs",
     "android": {
-      "javaPackageName": "com.watermelondb"
+      "javaPackageName": "com.watermelondb.specs"
     }
   },
   "author": "@BuildHero",
