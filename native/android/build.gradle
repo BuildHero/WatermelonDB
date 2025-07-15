@@ -1,6 +1,6 @@
 apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
-apply plugin: 'com.facebook.react.codegen'
+apply plugin: 'com.facebook.react'
 
 def DEFAULT_COMPILE_SDK_VERSION = 28
 def DEFAULT_BUILD_TOOLS_VERSION = "28.0.3"
@@ -40,6 +40,22 @@ android {
         pickFirst '**/libfbjni.so'
         pickFirst '**/libsqlite3x.so'
     }
+
+    sourceSets {
+        main {
+            java.srcDirs += [
+                "${project.buildDir}/generated/java",
+                "${project.buildDir}/generated/jni"
+            ]
+        }
+    }
+}
+
+react {
+    codegenDir = file("$rootDir/../node_modules/react-native-codegen")
+    jsRootDir = file("../specs")
+    libraryName = "WatermelonDBSpec"
+    codegenJavaPackageName = "com.watermelondb.specs"
 }
 
 dependencies {
@@ -48,6 +64,7 @@ dependencies {
 
     //noinspection GradleDynamicVersion
     implementation 'com.facebook.react:react-native:+'
+    implementation "com.facebook.react:react-android"
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlin_version"
 
 }
@@ -58,4 +75,3 @@ repositories {
         dirs 'libs'
     }
 }
-

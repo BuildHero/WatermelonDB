@@ -2,6 +2,7 @@
 #include <jni.h>
 #include <jsi/jsi.h>
 #include "JSIAndroidBridgeWrapper.h"
+#include "JSIAndroidUtils.h"
 
 using namespace facebook;
 
