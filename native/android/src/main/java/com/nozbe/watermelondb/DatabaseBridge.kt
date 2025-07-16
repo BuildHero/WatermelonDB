@@ -22,6 +22,29 @@ import kotlin.collections.ArrayList
 class DatabaseBridge(private val reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
+    companion object {
+        // Static singleton instance for Turbo Module access
+        @Volatile
+        private var INSTANCE: DatabaseBridge? = null
+        
+        fun getInstance(): DatabaseBridge? = INSTANCE
+        
+        private fun setInstance(instance: DatabaseBridge) {
+            synchronized(this) {
+                if (INSTANCE != null) {
+                    // Log warning if we're replacing an existing instance
+                    android.util.Log.w("WatermelonDB", "DatabaseBridge singleton being replaced. This may indicate multiple DatabaseBridge instances.")
+                }
+                INSTANCE = instance
+            }
+        }
+    }
+
+    init {
+        // Store this instance as the singleton when created
+        setInstance(this)
+    }
+
     private val connections: MutableMap<ConnectionTag, Connection> = mutableMapOf()
 
     override fun getName(): String = "DatabaseBridge"

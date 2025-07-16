@@ -71,6 +71,14 @@ const dispatcherMethods = [
 const supportedHybridJSIMethods = new Set(['query', 'execSqlQuery'])
 const supportedTurboModuleMethods = new Set(['query', 'execSqlQuery'])
 
+const turboModuleEnabled = () => {
+  if (NativeWatermelonDBModule) {
+    return true
+  }
+
+  return false
+}
+
 export const makeDispatcher = (
   type: DispatcherType,
   tag: ConnectionTag,
@@ -80,7 +88,8 @@ export const makeDispatcher = (
   // @ts-ignore
   const jsiDb = type === 'jsi' && global.nativeWatermelonCreateAdapter(dbName)
 
-  if (useHybridJSI) {
+  if (useHybridJSI && !turboModuleEnabled()) {
+    // initialize legacy JSI bridge
     DatabaseBridge.initializeJSIBridge()
   }
 

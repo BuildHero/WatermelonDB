@@ -10,7 +10,7 @@ public class JSIAndroidBridgeInstaller {
     private native void installBinding(long javaScriptContextHolder, DatabaseBridge bridge);
 
     static {
-        System.loadLibrary("watermelondb-jsi-android-bridge");
+        System.loadLibrary("watermelon-jsi-android-bridge");
     }
 }
 

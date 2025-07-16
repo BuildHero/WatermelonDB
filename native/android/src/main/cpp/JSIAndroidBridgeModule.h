@@ -23,6 +23,7 @@ private:
     
     JNIEnv* getEnv();
     jobject getDatabaseBridge();
+    jobject findDatabaseBridgeFromContext();
 };
 
 } // namespace facebook::react

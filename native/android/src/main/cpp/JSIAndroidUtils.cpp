@@ -1,6 +1,7 @@
 #include "JSIAndroidUtils.h"
 #include "../../../../shared/DatabaseUtils.h"
 #include <string>
+#include <fbjni/fbjni.h>
 #include <sqlite3.h>
 #include <android/log.h>
 
@@ -45,30 +46,8 @@ namespace watermelondb {
         }
     }
 
-    static JavaVM *jvm;
-
     JNIEnv* getEnv() {
-        JNIEnv *env;
-
-        assert(jvm);
-
-        if (jvm->AttachCurrentThread(&env, NULL) != JNI_OK) {
-            throw std::runtime_error("Unable to resolve db path - JVM thread attach failed");
-        }
-
-        assert(env);
-
-        return env;
-    }
-
-    void configureJNI(JNIEnv *env) {
-        assert(env);
-
-        if (env->GetJavaVM(&jvm) != JNI_OK) {
-            std::abort();
-        }
-
-        assert(jvm);
+        return facebook::jni::Environment::current();
     }
 
     jsi::Value execSqlQuery(jobject bridge, jsi::Runtime &rt, const jsi::Value &tag, const jsi::String &sql, const jsi::Array &arguments) {
