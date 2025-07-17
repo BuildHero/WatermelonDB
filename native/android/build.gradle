@@ -1,10 +1,13 @@
 apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
+apply plugin: 'com.facebook.react'
 
 def DEFAULT_COMPILE_SDK_VERSION = 28
 def DEFAULT_BUILD_TOOLS_VERSION = "28.0.3"
 def DEFAULT_MIN_SDK_VERSION = 16
 def DEFAULT_TARGET_SDK_VERSION = 28
+
+def newArchEnabled = project.hasProperty("newArchEnabled") && project.newArchEnabled == "true"
 
 android {
     compileSdkVersion rootProject.hasProperty('compileSdkVersion') ? rootProject.compileSdkVersion : DEFAULT_COMPILE_SDK_VERSION
@@ -17,7 +20,7 @@ android {
         versionName "1.0"
         externalNativeBuild {
             cmake {
-                arguments "-DANDROID_STL=c++_shared"
+                arguments "-DANDROID_STL=c++_shared", "-DREACT_NATIVE_NEW_ARCH_ENABLED=${newArchEnabled ? 1 : 0}"
                 cppFlags '-std=c++17 -O2'
             }
         }
@@ -39,6 +42,22 @@ android {
         pickFirst '**/libfbjni.so'
         pickFirst '**/libsqlite3x.so'
     }
+
+    sourceSets {
+        main {
+            java.srcDirs += [
+                "${project.buildDir}/generated/java",
+                "${project.buildDir}/generated/jni"
+            ]
+        }
+    }
+}
+
+react {
+    codegenDir = file("$rootDir/../node_modules/react-native-codegen")
+    jsRootDir = file("../specs")
+    libraryName = "WatermelonDBSpec"
+    codegenJavaPackageName = "com.watermelondb.specs"
 }
 
 dependencies {
@@ -47,6 +66,7 @@ dependencies {
 
     //noinspection GradleDynamicVersion
     implementation 'com.facebook.react:react-native:+'
+    implementation "com.facebook.react:react-android"
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlin_version"
 
 }
@@ -57,4 +77,3 @@ repositories {
         dirs 'libs'
     }
 }
-

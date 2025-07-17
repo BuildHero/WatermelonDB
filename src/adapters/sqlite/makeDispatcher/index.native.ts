@@ -1,7 +1,7 @@
 /* eslint-disable global-require */
 
 // @ts-ignore
-import {NativeModules} from 'react-native';
+import { NativeModules, TurboModuleRegistry } from 'react-native'
 
 import { fromPairs } from 'rambdax'
 
@@ -18,14 +18,35 @@ import type {
 
 import { syncReturnToResult } from '../common'
 
+// Local type definition for the Turbo Module
+type NativeWatermelonDBModuleSpec = {
+  query(tag: number, table: string, query: string): Record<string, any>[]
+  execSqlQuery(tag: number, sql: string, args: Record<string, any>[]): Record<string, any>[]
+}
+
 // @ts-ignore
 const {
   DatabaseBridge,
 }: {
-  DatabaseBridge: NativeBridgeType;
+  DatabaseBridge: NativeBridgeType
 } = NativeModules
 
 export { DatabaseBridge }
+
+// Try to get the Turbo Module if available
+let NativeWatermelonDBModule: NativeWatermelonDBModuleSpec | null = null
+try {
+  // @ts-ignore
+  NativeWatermelonDBModule = TurboModuleRegistry.get<NativeWatermelonDBModuleSpec>(
+    'NativeWatermelonDBModule',
+  )
+  if (NativeWatermelonDBModule) {
+    logger.log('[WatermelonDB][SQLite] Turbo Module available, will use for supported methods')
+  }
+} catch (e) {
+  // Turbo Modules not available
+  NativeWatermelonDBModule = null
+}
 
 const dispatcherMethods = [
   'copyTables',
@@ -48,6 +69,15 @@ const dispatcherMethods = [
 ]
 
 const supportedHybridJSIMethods = new Set(['query', 'execSqlQuery'])
+const supportedTurboModuleMethods = new Set(['query', 'execSqlQuery'])
+
+const turboModuleEnabled = () => {
+  if (NativeWatermelonDBModule) {
+    return true
+  }
+
+  return false
+}
 
 export const makeDispatcher = (
   type: DispatcherType,
@@ -58,11 +88,12 @@ export const makeDispatcher = (
   // @ts-ignore
   const jsiDb = type === 'jsi' && global.nativeWatermelonCreateAdapter(dbName)
 
-  if (useHybridJSI) {
+  if (useHybridJSI && !turboModuleEnabled()) {
+    // initialize legacy JSI bridge
     DatabaseBridge.initializeJSIBridge()
   }
 
-  const methods = dispatcherMethods.map(methodName => {
+  const methods = dispatcherMethods.map((methodName) => {
     // batchJSON is missing on Android
     // @ts-ignore
     if (!DatabaseBridge[methodName] || (methodName === 'batchJSON' && jsiDb)) {
@@ -90,6 +121,28 @@ export const makeDispatcher = (
           return
         }
 
+        // Use Turbo Module if available for supported methods
+        if (NativeWatermelonDBModule && supportedTurboModuleMethods.has(methodName)) {
+          try {
+            let returnValue: any
+            if (methodName === 'query') {
+              // For query method: query(tag, table, query)
+              const [table, query] = otherArgs
+              returnValue = NativeWatermelonDBModule.query(tag, table, query)
+            } else if (methodName === 'execSqlQuery') {
+              // For execSqlQuery method: execSqlQuery(tag, sql, args)
+              const [sql, args] = otherArgs
+              returnValue = NativeWatermelonDBModule.execSqlQuery(tag, sql, args)
+            }
+            callback({
+              value: returnValue,
+            })
+          } catch (error: any) {
+            callback({ error })
+          }
+          return
+        }
+
         if (useHybridJSI && supportedHybridJSIMethods.has(methodName)) {
           try {
             // @ts-ignore
@@ -109,15 +162,15 @@ export const makeDispatcher = (
         }
 
         // @ts-ignore
-        const returnValue = DatabaseBridge[name](tag, ...otherArgs);
+        const returnValue = DatabaseBridge[name](tag, ...otherArgs)
 
         if (type === 'synchronous') {
-          callback(syncReturnToResult((returnValue as any)))
+          callback(syncReturnToResult(returnValue as any))
         } else {
           fromPromise(returnValue, callback)
         }
       },
-    ];
+    ]
   })
 
   // @ts-ignore

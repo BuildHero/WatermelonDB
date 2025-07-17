@@ -6,7 +6,12 @@ import invariant from '../utils/common/invariant'
 import type { ColumnName } from '../Schema'
 
 // eslint-disable-next-line
-export function ensureDecoratorUsedProperly(columnName: ColumnName, target: any, key: string, descriptor: any): void {
+export function ensureDecoratorUsedProperly(
+  columnName: ColumnName,
+  target: any,
+  key: string,
+  descriptor: any,
+): void {
   invariant(
     columnName,
     `Pass column name (raw field name) to the decorator - error in ${target.constructor.name}.prototype.${key} given.`,

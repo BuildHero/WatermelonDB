@@ -9,6 +9,9 @@
 /* Begin PBXBuildFile section */
 		2C105C882CAB05BC0033B38D /* JSISwiftBridgeInstaller.mm in Sources */ = {isa = PBXBuildFile; fileRef = 2C105C822CAB05BC0033B38D /* JSISwiftBridgeInstaller.mm */; };
 		2C105C892CAB05BC0033B38D /* JSISwiftWrapper.mm in Sources */ = {isa = PBXBuildFile; fileRef = 2C105C842CAB05BC0033B38D /* JSISwiftWrapper.mm */; };
+		2CBB00F22E21A49B00679153 /* JSISwiftWrapperModule.mm in Sources */ = {isa = PBXBuildFile; fileRef = 2CBB00EF2E21A49B00679153 /* JSISwiftWrapperModule.mm */; };
+		2CBB00F32E21A49B00679153 /* JSIWrapperUtils.mm in Sources */ = {isa = PBXBuildFile; fileRef = 2CBB00F12E21A49B00679153 /* JSIWrapperUtils.mm */; };
+		2CBF36552E2872430025391A /* OnLoad.mm in Sources */ = {isa = PBXBuildFile; fileRef = 2CBF36542E2872400025391A /* OnLoad.mm */; };
 		2CEDD6782CB094B400E0899B /* DatabaseUtils.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2CEDD6772CB094B400E0899B /* DatabaseUtils.cpp */; };
 		6E41F87D251C9183001C250B /* DatabaseDeleteHelper.m in Sources */ = {isa = PBXBuildFile; fileRef = 6E41F87C251C9183001C250B /* DatabaseDeleteHelper.m */; };
 		6E5E6259246C1F61003DBEF4 /* DatabasePlatformIOS.mm in Sources */ = {isa = PBXBuildFile; fileRef = 6E5E6257246C1F61003DBEF4 /* DatabasePlatformIOS.mm */; };
@@ -48,6 +51,11 @@
 		2C105C822CAB05BC0033B38D /* JSISwiftBridgeInstaller.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = JSISwiftBridgeInstaller.mm; sourceTree = "<group>"; };
 		2C105C832CAB05BC0033B38D /* JSISwiftWrapper.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = JSISwiftWrapper.h; sourceTree = "<group>"; };
 		2C105C842CAB05BC0033B38D /* JSISwiftWrapper.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = JSISwiftWrapper.mm; sourceTree = "<group>"; };
+		2CBB00EE2E21A49B00679153 /* JSISwiftWrapperModule.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = JSISwiftWrapperModule.h; sourceTree = "<group>"; };
+		2CBB00EF2E21A49B00679153 /* JSISwiftWrapperModule.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = JSISwiftWrapperModule.mm; sourceTree = "<group>"; };
+		2CBB00F02E21A49B00679153 /* JSIWrapperUtils.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = JSIWrapperUtils.h; sourceTree = "<group>"; };
+		2CBB00F12E21A49B00679153 /* JSIWrapperUtils.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = JSIWrapperUtils.mm; sourceTree = "<group>"; };
+		2CBF36542E2872400025391A /* OnLoad.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = OnLoad.mm; sourceTree = "<group>"; };
 		2CEDD6762CB094B400E0899B /* DatabaseUtils.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = DatabaseUtils.h; path = ../../shared/DatabaseUtils.h; sourceTree = "<group>"; };
 		2CEDD6772CB094B400E0899B /* DatabaseUtils.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = DatabaseUtils.cpp; path = ../../shared/DatabaseUtils.cpp; sourceTree = "<group>"; };
 		6E41F87C251C9183001C250B /* DatabaseDeleteHelper.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = DatabaseDeleteHelper.m; sourceTree = "<group>"; };
@@ -100,10 +108,15 @@
 		2C105C872CAB05BC0033B38D /* JSISwiftWrapper */ = {
 			isa = PBXGroup;
 			children = (
+				2CBF36542E2872400025391A /* OnLoad.mm */,
 				2C105C812CAB05BC0033B38D /* JSISwiftBridgeInstaller.h */,
 				2C105C822CAB05BC0033B38D /* JSISwiftBridgeInstaller.mm */,
 				2C105C832CAB05BC0033B38D /* JSISwiftWrapper.h */,
 				2C105C842CAB05BC0033B38D /* JSISwiftWrapper.mm */,
+				2CBB00EE2E21A49B00679153 /* JSISwiftWrapperModule.h */,
+				2CBB00EF2E21A49B00679153 /* JSISwiftWrapperModule.mm */,
+				2CBB00F02E21A49B00679153 /* JSIWrapperUtils.h */,
+				2CBB00F12E21A49B00679153 /* JSIWrapperUtils.mm */,
 			);
 			path = JSISwiftWrapper;
 			sourceTree = "<group>";
@@ -280,6 +293,7 @@
 				2CEDD6782CB094B400E0899B /* DatabaseUtils.cpp in Sources */,
 				6EBBB7182472BDD000E43F26 /* DatabaseInstallation.cpp in Sources */,
 				6E9477F0213BDF8A0077EDFB /* DatabaseDriver.swift in Sources */,
+				2CBF36552E2872430025391A /* OnLoad.mm in Sources */,
 				6EBBB7162472B4A200E43F26 /* Sqlite.cpp in Sources */,
 				6EF7F86223630D6D0041E1F6 /* JSIInstaller.mm in Sources */,
 				6E9477F1213BDF8A0077EDFB /* DatabaseBridge.swift in Sources */,
@@ -296,6 +310,8 @@
 				6E9477D4213BDE2E0077EDFB /* FMDatabaseQueue.m in Sources */,
 				6E41F87D251C9183001C250B /* DatabaseDeleteHelper.m in Sources */,
 				6E9477D6213BDE2E0077EDFB /* FMDatabase.m in Sources */,
+				2CBB00F22E21A49B00679153 /* JSISwiftWrapperModule.mm in Sources */,
+				2CBB00F32E21A49B00679153 /* JSIWrapperUtils.mm in Sources */,
 				6EF7F8602362E9100041E1F6 /* Database.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
