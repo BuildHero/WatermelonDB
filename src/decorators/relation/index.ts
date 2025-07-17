@@ -22,7 +22,7 @@ function relation(
   relationIdColumn: ColumnName,
   options?: Options | null,
 ) {
-  return (target: any, key: string, descriptor?: any) => {
+  return ((target: any, key: string, descriptor?: any) => {
     ensureDecoratorUsedProperly(relationIdColumn, target, key, descriptor)
 
     return {
@@ -47,7 +47,7 @@ function relation(
         throw new Error(`Don't set relation directly. Use relation.set() instead`)
       },
     }
-  }
+  }) as any
 }
 
 export default relation
