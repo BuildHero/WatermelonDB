@@ -69,16 +69,13 @@ add_library(watermelon-jsi-android-bridge
         ${LIB_TYPE}
         ${SOURCE_FILES})
 
-
-# Expose the include directory for autolinking
-if(REACT_NATIVE_NEW_ARCH_ENABLED)
+# Expose the include directory for autolinking - ALWAYS needed regardless of architecture
 target_include_directories(watermelon-jsi-android-bridge
         PUBLIC
         .
         ../../../../shared
         INTERFACE
         ${CMAKE_CURRENT_SOURCE_DIR})
-endif()
 
 # Specifies libraries CMake should link to your target library. You
 # can link libraries from various origins, such as libraries defined in this
