@@ -9,7 +9,26 @@
 namespace facebook::react {
 
 JSIAndroidBridgeModule::JSIAndroidBridgeModule(std::shared_ptr<CallInvoker> jsInvoker)
-: NativeWatermelonDBModuleCxxSpec(std::move(jsInvoker)) {}
+: NativeWatermelonDBModuleCxxSpec(std::move(jsInvoker)) {
+    JNIEnv* env = getEnv();
+    
+    jobject localBridge = findDatabaseBridgeFromContext();
+  
+    if (localBridge == nullptr) {
+        throw std::runtime_error("DatabaseBridge instance not available. Make sure the DatabaseBridge native module is initialized.");
+    }
+    
+    globalDatabaseBridge_ = env->NewGlobalRef(localBridge);
+
+    env->DeleteLocalRef(localBridge);
+}
+
+JSIAndroidBridgeModule::~JSIAndroidBridgeModule() {
+    if (globalDatabaseBridge_ != nullptr) {
+        getEnv()->DeleteGlobalRef(globalDatabaseBridge_);
+        globalDatabaseBridge_ = nullptr;
+    }
+}
 
 JNIEnv* JSIAndroidBridgeModule::getEnv() {
     return facebook::jni::Environment::current();
@@ -87,7 +106,7 @@ jobject JSIAndroidBridgeModule::findDatabaseBridgeFromContext() {
 }
 
 jobject JSIAndroidBridgeModule::getDatabaseBridge() {
-    return findDatabaseBridgeFromContext();
+    return globalDatabaseBridge_;
 }
 
 jsi::Array JSIAndroidBridgeModule::query(jsi::Runtime &rt, double tag, jsi::String table, jsi::String query) {
