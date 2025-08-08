@@ -2,7 +2,7 @@
 import Query from '../../../Query'
 import Model from '../../../Model'
 import * as Q from '../../../QueryDescription'
-import encodeQuery from './index'
+import encodeQuery, { encodeOrderBy } from './index'
 
 // TODO: Standardize these mocks (same as in sqlite encodeQuery, query test)
 
@@ -25,7 +25,7 @@ class MockProject extends Model {
 
 const mockCollection = Object.freeze({
   modelClass: MockTask,
-  db: { get: table => (table === 'projects' ? { modelClass: MockProject } : {}) },
+  db: { get: (table) => (table === 'projects' ? { modelClass: MockProject } : {}) },
 })
 
 const encoded = (clauses, countMode) => encodeQuery(new Query(mockCollection, clauses), countMode)
@@ -65,7 +65,7 @@ describe('SQLite encodeQuery', () => {
         Q.where('col5', Q.lte(5)),
         Q.where('col6', Q.notEq(null)),
         Q.where('col7', Q.oneOf([1, 2, 3])),
-        Q.where('col8', Q.notIn(['"a"', '\'b\'', 'c'])),
+        Q.where('col8', Q.notIn(['"a"', "'b'", 'c'])),
         Q.where('col9', Q.between(10, 11)),
         Q.where('col10', Q.like('%abc')),
         Q.where('col11', Q.notLike('def%')),
@@ -269,5 +269,145 @@ describe('SQLite encodeQuery', () => {
   it(`does not encode loki-specific syntax`, () => {
     expect(() => encoded([Q.unsafeLokiExpr({ hi: true })])).toThrow('Unknown clause')
     expect(() => encoded([Q.unsafeLokiFilter(() => {})])).toThrow('not supported')
+  })
+})
+
+describe('encodeOrderBy', () => {
+  const mockTable = 'tasks'
+
+  it('returns empty string for empty sortBy array', () => {
+    expect(encodeOrderBy(mockTable, [])).toBe('')
+  })
+
+  it('encodes single sortBy with ascending order', () => {
+    const sortBys = [
+      {
+        type: 'sortBy',
+        sortColumn: 'name',
+        sortOrder: 'asc',
+      },
+    ]
+    expect(encodeOrderBy(mockTable, sortBys)).toBe(' order by "tasks"."name" asc')
+  })
+
+  it('encodes single sortBy with descending order', () => {
+    const sortBys = [
+      {
+        type: 'sortBy',
+        sortColumn: 'created_at',
+        sortOrder: 'desc',
+      },
+    ]
+    expect(encodeOrderBy(mockTable, sortBys)).toBe(' order by "tasks"."created_at" desc')
+  })
+
+  it('encodes multiple sortBy clauses', () => {
+    const sortBys = [
+      {
+        type: 'sortBy',
+        sortColumn: 'priority',
+        sortOrder: 'desc',
+      },
+      {
+        type: 'sortBy',
+        sortColumn: 'name',
+        sortOrder: 'asc',
+      },
+      {
+        type: 'sortBy',
+        sortColumn: 'created_at',
+        sortOrder: 'desc',
+      },
+    ]
+    expect(encodeOrderBy(mockTable, sortBys)).toBe(
+      ' order by "tasks"."priority" desc, "tasks"."name" asc, "tasks"."created_at" desc',
+    )
+  })
+
+  it('uses sortTable when provided', () => {
+    const sortBys = [
+      {
+        type: 'sortBy',
+        sortTable: 'projects',
+        sortColumn: 'deadline',
+        sortOrder: 'asc',
+      },
+    ]
+    expect(encodeOrderBy(mockTable, sortBys)).toBe(' order by "projects"."deadline" asc')
+  })
+
+  it('falls back to main table when sortTable is not provided', () => {
+    const sortBys = [
+      {
+        type: 'sortBy',
+        sortColumn: 'status',
+        sortOrder: 'desc',
+      },
+    ]
+    expect(encodeOrderBy(mockTable, sortBys)).toBe(' order by "tasks"."status" desc')
+  })
+
+  it('handles mix of sortTable and main table columns', () => {
+    const sortBys = [
+      {
+        type: 'sortBy',
+        sortTable: 'projects',
+        sortColumn: 'deadline',
+        sortOrder: 'asc',
+      },
+      {
+        type: 'sortBy',
+        sortColumn: 'priority',
+        sortOrder: 'desc',
+      },
+      {
+        type: 'sortBy',
+        sortTable: 'users',
+        sortColumn: 'name',
+        sortOrder: 'asc',
+      },
+    ]
+    expect(encodeOrderBy(mockTable, sortBys)).toBe(
+      ' order by "projects"."deadline" asc, "tasks"."priority" desc, "users"."name" asc',
+    )
+  })
+
+  it('properly escapes column names with special characters', () => {
+    const sortBys = [
+      {
+        type: 'sortBy',
+        sortColumn: 'user-name',
+        sortOrder: 'asc',
+      },
+      {
+        type: 'sortBy',
+        sortTable: 'project_data',
+        sortColumn: 'created_at_timestamp',
+        sortOrder: 'desc',
+      },
+    ]
+    expect(encodeOrderBy(mockTable, sortBys)).toBe(
+      ' order by "tasks"."user-name" asc, "project_data"."created_at_timestamp" desc',
+    )
+  })
+
+  it('handles undefined/null sortTable gracefully', () => {
+    const sortBys = [
+      {
+        type: 'sortBy',
+        sortTable: undefined,
+        sortColumn: 'name',
+        sortOrder: 'asc',
+      },
+      {
+        type: 'sortBy',
+        sortTable: null,
+        sortColumn: 'priority',
+        sortOrder: 'desc',
+      },
+    ]
+    expect(encodeOrderBy(mockTable, sortBys)).toBe(
+      ' order by "tasks"."name" asc, "tasks"."priority" desc',
+    )
   })
 })

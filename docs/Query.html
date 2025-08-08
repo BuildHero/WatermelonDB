@@ -308,6 +308,15 @@ tasksCollection.query(
   Q.on('projects', Q.on('teams', 'foo', 'bar')),
 )
 </code></pre>
+<h4><a class="header" href="#sorting-by-related-table-columns" id="sorting-by-related-table-columns">Sorting by related table columns</a></h4>
+<p>When querying with JOIN conditions, you can also sort by columns from the related tables using <code>Q.sortBy</code>:</p>
+<pre><code class="language-js">// Query comments and sort by the post's publication date, then by comment likes
+commentCollection.query(
+  Q.on('posts', 'is_published', true),
+  Q.sortBy('posts', 'published_at', Q.desc), // Sort by post publication date
+  Q.sortBy('comments', 'likes', Q.desc), // Then by comment likes
+)
+</code></pre>
 <h2><a class="header" href="#advanced-queries" id="advanced-queries">Advanced Queries</a></h2>
 <h3><a class="header" href="#advanced-observing" id="advanced-observing">Advanced observing</a></h3>
 <p>Call <code>query.observeWithColumns(['foo', 'bar'])</code> to create an Observable that emits a value not only when the list of matching records changes (new records/deleted records), but also when any of the matched records changes its <code>foo</code> or <code>bar</code> column. <a href="./Components.html">Use this for observing sorted lists</a></p>
@@ -320,13 +329,25 @@ tasksCollection.query(
 )
 </code></pre>
 <h3><a class="header" href="#sortby-take-skip" id="sortby-take-skip">sortBy, take, skip</a></h3>
-<p>When using SQLite adapter, you can use these <em>experimental</em> clauses to sort the result of the query and to limit the number of results</p>
-<pre><code class="language-js">commentCollection.query(
+<p>When using SQLite adapter, you can use these clauses to sort the result of the query and to limit the number of results</p>
+<pre><code class="language-js">// Sort by column on current table
+commentCollection.query(
   Q.experimentalSortBy('likes', Q.asc), // sorts ascending by `likes`
   Q.experimentalSkip(100),
   Q.experimentalTake(100),
 )
+
+// Sort by column on related table (JOIN queries)
+commentCollection.query(
+  Q.sortBy('posts', 'published_at', Q.desc), // sorts by `published_at` from posts table
+  Q.sortBy('users', 'name', Q.asc), // then by `name` from users table
+)
 </code></pre>
+<p><strong>Q.sortBy vs Q.experimentalSortBy:</strong></p>
+<ul>
+<li><code>Q.sortBy(table, column, order)</code> - Use when sorting by columns from related tables (JOIN queries). Specify the table name, column name, and sort order.</li>
+<li><code>Q.experimentalSortBy(column, order)</code> - Use when sorting by columns from the current table only. Just specify the column name and sort order.</li>
+</ul>
 <p><strong>NOTE</strong>: This does not currently work on web/LokiJS (please contribute!), and causes query observation to fall back to a less efficient method. We recommend using sortBy only when you absolutely need to limit queries, otherwise, it may be better to sort in JavaScript.</p>
 <h3><a class="header" href="#security" id="security">Security</a></h3>
 <p>Remember that Queries are a sensitive subject, security-wise. Never trust user input and pass it directly into queries. In particular:</p>
@@ -395,7 +416,7 @@ commentsCollection.query(
 <p><strong><code>Q.notIn</code> operator</strong>: If you query, say, posts with <code>Q.where('status', Q.notIn(['published', 'draft']))</code>, it will match posts with a status different than <code>published</code> or <code>draft</code>, however, it will NOT match posts with <code>status == null</code>. If you want to include such posts, query for that explicitly like with the example above.</p>
 <p><strong><code>Q.weakGt</code> operator</strong>: This is weakly typed version of <code>Q.gt</code> — one that allows null comparisons. So if you query <code>comments</code> with <code>Q.where('likes', Q.weakGt(Q.column('dislikes')))</code>, it WILL match comments with 5 likes and <code>null</code> dislikes. (For <code>weakGt</code>, unlike standard operators, any number is greater than <code>null</code>).</p>
 <h2><a class="header" href="#contributing-improvements-to-watermelon-query-language" id="contributing-improvements-to-watermelon-query-language">Contributing improvements to Watermelon query language</a></h2>
-<p>Here are files that are relevant. This list may look daunting, but adding new matchers is actually quite simple and multiple first-time contributors made these improvements (including like, sort, take, skip). The implementation is just split into multiple files (and their test files), but when you look at them, it'll be easy to add matchers by analogy.</p>
+<p>Here are files that are relevant. This list may look daunting, but adding new matchers is actually quite simple and multiple first-time contributors made these improvements (including like, sort, take, skip, and the new sortBy with table support). The implementation is just split into multiple files (and their test files), but when you look at them, it'll be easy to add matchers by analogy.</p>
 <p>We recommend starting from writing tests first to check expected behavior, then implement the actual behavior.</p>
 <ul>
 <li><code>src/QueryDescription/test.js</code> - Test clause builder (<code>Q.myThing</code>) output and test that it rejects bad/unsafe parameters</li>

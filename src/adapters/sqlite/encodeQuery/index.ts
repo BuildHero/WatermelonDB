@@ -240,7 +240,7 @@ const encodeOrderBy = (table: TableName<any>, sortBys: SortBy[]) => {
   }
   const orderBys = sortBys
     .map((sortBy) => {
-      return `${encodeName(table)}.${encodeName(sortBy.sortColumn)} ${sortBy.sortOrder}`
+      return `${encodeName(sortBy?.sortTable || table)}.${encodeName(sortBy.sortColumn)} ${sortBy.sortOrder}`
     })
     .join(', ')
   return ` order by ${orderBys}`
@@ -300,5 +300,8 @@ const encodeQuery = (
 
   return sql
 }
+
+// Export internal functions for testing
+export { encodeOrderBy }
 
 export default encodeQuery
