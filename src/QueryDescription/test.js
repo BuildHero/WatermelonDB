@@ -412,6 +412,16 @@ describe('buildQueryDescription', () => {
       sortBy: [{ type: 'sortBy', sortColumn: 'sortable_column', sortOrder: 'desc' }],
     })
   })
+  it('supports sorting query with sortBy function', () => {
+    const query = Q.buildQueryDescription([Q.sortBy('tasks', 'created_at', Q.desc)])
+    expect(query).toEqual({
+      where: [],
+      eagerJoinTables: [],
+      joinTables: [],
+      nestedJoinTables: [],
+      sortBy: [{ type: 'sortBy', sortTable: 'tasks', sortColumn: 'created_at', sortOrder: 'desc' }],
+    })
+  })
   it('does not support skip operator without take operator', () => {
     expect(() => {
       Q.buildQueryDescription([Q.experimentalSkip(100)])
@@ -510,6 +520,102 @@ describe('buildQueryDescription', () => {
     expect(() => Q.experimentalJoinTables(['foo', 'sqlite_master'])).toThrow(/Unsafe name/)
     expect(() => Q.experimentalNestedJoin('sqlite_master', 'foo')).toThrow(/Unsafe name/)
     expect(() => Q.experimentalNestedJoin('foo', 'sqlite_master')).toThrow(/Unsafe name/)
+  })
+})
+
+describe('sortBy', () => {
+  it('creates sortBy clause with table, column and ascending order', () => {
+    const result = Q.sortBy('users', 'name', Q.asc)
+    expect(result).toEqual({
+      type: 'sortBy',
+      sortTable: 'users',
+      sortColumn: 'name',
+      sortOrder: 'asc',
+    })
+  })
+
+  it('creates sortBy clause with table, column and descending order', () => {
+    const result = Q.sortBy('tasks', 'created_at', Q.desc)
+    expect(result).toEqual({
+      type: 'sortBy',
+      sortTable: 'tasks',
+      sortColumn: 'created_at',
+      sortOrder: 'desc',
+    })
+  })
+
+  it('defaults to ascending order when no sortOrder is provided', () => {
+    const result = Q.sortBy('projects', 'deadline')
+    expect(result).toEqual({
+      type: 'sortBy',
+      sortTable: 'projects',
+      sortColumn: 'deadline',
+      sortOrder: 'asc',
+    })
+  })
+
+  it('validates table names through checkName', () => {
+    expect(() => Q.sortBy('sqlite_master', 'name', Q.asc)).toThrow(/Unsafe name/)
+    expect(() => Q.sortBy('table` or --', 'name', Q.asc)).toThrow(/Unsafe name/)
+  })
+
+  it('validates column names through checkName', () => {
+    expect(() => Q.sortBy('users', 'sqlite_master', Q.asc)).toThrow(/Unsafe name/)
+    expect(() => Q.sortBy('users', 'column` or --', Q.asc)).toThrow(/Unsafe name/)
+  })
+
+  it('handles various valid table and column name formats', () => {
+    const result1 = Q.sortBy('user_profiles', 'first_name', Q.asc)
+    expect(result1.sortTable).toBe('user_profiles')
+    expect(result1.sortColumn).toBe('first_name')
+
+    const result2 = Q.sortBy('CamelCaseTable', 'CamelCaseColumn', Q.desc)
+    expect(result2.sortTable).toBe('CamelCaseTable')
+    expect(result2.sortColumn).toBe('CamelCaseColumn')
+
+    const result3 = Q.sortBy('table123', 'column456', Q.asc)
+    expect(result3.sortTable).toBe('table123')
+    expect(result3.sortColumn).toBe('column456')
+  })
+
+  it('preserves the exact sortOrder value passed', () => {
+    const result1 = Q.sortBy('users', 'name', 'asc')
+    expect(result1.sortOrder).toBe('asc')
+
+    const result2 = Q.sortBy('users', 'name', 'desc')
+    expect(result2.sortOrder).toBe('desc')
+  })
+
+  it('works with Q.asc and Q.desc constants', () => {
+    const result1 = Q.sortBy('users', 'name', Q.asc)
+    expect(result1.sortOrder).toBe(Q.asc)
+    expect(result1.sortOrder).toBe('asc')
+
+    const result2 = Q.sortBy('users', 'name', Q.desc)
+    expect(result2.sortOrder).toBe(Q.desc)
+    expect(result2.sortOrder).toBe('desc')
+  })
+
+  it('integrates correctly with buildQueryDescription', () => {
+    const query = Q.buildQueryDescription([
+      Q.sortBy('users', 'name', Q.asc),
+      Q.sortBy('users', 'created_at', Q.desc),
+    ])
+    expect(query.sortBy).toEqual([
+      { type: 'sortBy', sortTable: 'users', sortColumn: 'name', sortOrder: 'asc' },
+      { type: 'sortBy', sortTable: 'users', sortColumn: 'created_at', sortOrder: 'desc' },
+    ])
+  })
+
+  it('can be mixed with experimentalSortBy in buildQueryDescription', () => {
+    const query = Q.buildQueryDescription([
+      Q.sortBy('users', 'name', Q.asc),
+      Q.experimentalSortBy('priority', Q.desc),
+    ])
+    expect(query.sortBy).toEqual([
+      { type: 'sortBy', sortTable: 'users', sortColumn: 'name', sortOrder: 'asc' },
+      { type: 'sortBy', sortColumn: 'priority', sortOrder: 'desc' },
+    ])
   })
 })
 

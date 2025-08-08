@@ -82,6 +82,7 @@ export const asc: SortOrder = 'asc'
 export const desc: SortOrder = 'desc'
 export type SortBy = $RE<{
   type: 'sortBy'
+  sortTable?: TableName
   sortColumn: ColumnName
   sortOrder: SortOrder
 }>
@@ -350,6 +351,19 @@ export function experimentalSortBy(sortColumn: ColumnName, sortOrder: SortOrder 
     `Invalid sortOrder argument received in Q.sortBy (valid: asc, desc)`,
   )
   return { type: 'sortBy', sortColumn: checkName(sortColumn), sortOrder }
+}
+
+export function sortBy(
+  table: TableName,
+  sortColumn: ColumnName,
+  sortOrder: SortOrder = asc,
+): SortBy {
+  return {
+    type: 'sortBy',
+    sortTable: checkName(table),
+    sortColumn: checkName(sortColumn),
+    sortOrder,
+  }
 }
 
 export function experimentalTake(count: number): Take {
