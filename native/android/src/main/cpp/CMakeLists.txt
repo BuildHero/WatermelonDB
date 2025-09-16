@@ -8,14 +8,14 @@ project(watermelon-jsi-android-bridge)
 # Sets the minimum CMake version required for this project.
 cmake_minimum_required(VERSION 3.22.1)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(NOT DEFINED REACT_NATIVE_NEW_ARCH_ENABLED)
     set(REACT_NATIVE_NEW_ARCH_ENABLED 0)
 endif()
 
-add_compile_options(-fexceptions -frtti -std=c++17)
+add_compile_options(-fexceptions -frtti -std=c++20)
 
 include_directories(
         .
