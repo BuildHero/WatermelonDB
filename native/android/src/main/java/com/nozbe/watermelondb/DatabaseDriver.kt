@@ -90,7 +90,7 @@ class DatabaseDriver(context: Context, dbName: String) {
 
     fun execSqlQuery(query: SQL, params: ReadableArray = WritableNativeArray()): WritableArray {
         val resultArray = Arguments.createArray()
-        val sqlParams = mutableListOf<String>()
+        val sqlParams = mutableListOf<String?>()
 
         for (i in 0 until params.size()) {
             sqlParams.add(params.getString(i))
@@ -181,30 +181,30 @@ class DatabaseDriver(context: Context, dbName: String) {
     
         database.transaction {
             for (i in 0 until tables.size()) {
-                val table = tables.getString(i)
-            
-                // Get the list of columns in the destination database
-                val destColumns = getColumnNames(table, database)
-            
-                // Get the list of columns in the source database
-                val srcColumns = getColumnNames(table, database, "other")
-            
-                // Find the intersection of the column names
-                val commonColumns = destColumns.intersect(srcColumns)
-            
-                if (commonColumns.isNotEmpty()) {
-                    // Escape the common column names for use in SQL query
-                    val escapedColumns = commonColumns.joinToString(", ") { columnName ->
-                        "\"$columnName\""
-                    }
-            
-                    // Perform the data import using the escaped common columns
-                    database.execute(
-                        """
+                tables.getString(i)?.let { table ->
+                    // Get the list of columns in the destination database
+                    val destColumns = getColumnNames(table, database)
+                    
+                    // Get the list of columns in the source database
+                    val srcColumns = getColumnNames(table, database, "other")
+                    
+                    // Find the intersection of the column names
+                    val commonColumns = destColumns.intersect(srcColumns)
+                    
+                    if (commonColumns.isNotEmpty()) {
+                        // Escape the common column names for use in SQL query
+                        val escapedColumns = commonColumns.joinToString(", ") { columnName ->
+                            "\"$columnName\""
+                        }
+                        
+                        // Perform the data import using the escaped common columns
+                        database.execute(
+                            """
                         INSERT OR IGNORE INTO $table ($escapedColumns)
                         SELECT $escapedColumns FROM other.$table
                         """.trimIndent()
-                    )
+                        )
+                    }
                 }
             }
         }

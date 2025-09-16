@@ -83,3 +83,14 @@ target_include_directories(watermelon-jsi-android-bridge
 
 target_link_libraries(watermelon-jsi-android-bridge
         ${LINKED_LIBRARIES})
+        
+# --- Optional: Include codegen-generated JNI if it exists (RN 0.80+ compatibility) ---
+set(WATERMELON_CODEGEN_JNI_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/build/generated/source/codegen/jni")
+
+if(EXISTS "${WATERMELON_CODEGEN_JNI_DIR}/CMakeLists.txt")
+  message(STATUS "Including WatermelonDB codegen JNI from ${WATERMELON_CODEGEN_JNI_DIR}")
+  add_subdirectory("${WATERMELON_CODEGEN_JNI_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/watermelondb_codegen")
+else()
+  message(STATUS "No WatermelonDB codegen JNI directory found, skipping")
+endif()

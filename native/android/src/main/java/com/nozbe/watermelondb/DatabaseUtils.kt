@@ -7,7 +7,7 @@ typealias SQL = String
 typealias RecordID = String
 typealias TableName = String
 typealias QueryArgs = Array<Any>
-typealias RawQueryArgs = Array<String>
+typealias RawQueryArgs = Array<String?>
 typealias ConnectionTag = Int
 typealias SchemaVersion = Int
 data class Schema(val version: SchemaVersion, val sql: SQL)
