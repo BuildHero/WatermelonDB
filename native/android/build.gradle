@@ -51,13 +51,6 @@ android {
             ]
         }
     }
-
-    publishing {
-        singleVariant("release") {
-            withSourcesJar()
-        }
-        singleVariant("debug") // optional if you want debug variant consumable too
-    }
 }
 
 react {
