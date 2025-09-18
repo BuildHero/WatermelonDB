@@ -141,16 +141,6 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
         }
     }
 
-    @ReactMethod(isBlockingSynchronousMethod = true)
-    fun initializeJSIBridge() {
-        val jsRuntime = reactContext.catalystInstance.javaScriptContextHolder.get()
-
-        JSIAndroidBridgeInstaller.install(
-            jsRuntime,
-            this
-        )
-    }
-
     @ReactMethod
     fun setUpWithSchema(
         tag: ConnectionTag,

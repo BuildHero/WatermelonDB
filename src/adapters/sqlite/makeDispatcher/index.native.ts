@@ -88,11 +88,6 @@ export const makeDispatcher = (
   // @ts-ignore
   const jsiDb = type === 'jsi' && global.nativeWatermelonCreateAdapter(dbName)
 
-  if (useHybridJSI && !turboModuleEnabled()) {
-    // initialize legacy JSI bridge
-    DatabaseBridge.initializeJSIBridge()
-  }
-
   const methods = dispatcherMethods.map((methodName) => {
     // batchJSON is missing on Android
     // @ts-ignore
@@ -178,26 +173,6 @@ export const makeDispatcher = (
   return dispatcher
 }
 
-const initializeJSI = () => {
-  // @ts-ignore
-  if (global.nativeWatermelonCreateAdapter) {
-    return true
-  }
-
-  if (DatabaseBridge.initializeJSI) {
-    try {
-      DatabaseBridge.initializeJSI()
-      // @ts-ignore
-      return !!global.nativeWatermelonCreateAdapter
-    } catch (e: any) {
-      logger.error('[WatermelonDB][SQLite] Failed to initialize JSI')
-      logger.error(e)
-    }
-  }
-
-  return false
-}
-
 export function getDispatcherType(options: SQLiteAdapterOptions): DispatcherType {
   invariant(
     !(options.synchronous && options.experimentalUseJSI),
@@ -211,14 +186,6 @@ export function getDispatcherType(options: SQLiteAdapterOptions): DispatcherType
 
     logger.warn(
       `Synchronous SQLiteAdapter not available… falling back to asynchronous operation. This will happen if you're using remote debugger, and may happen if you forgot to recompile native app after WatermelonDB update`,
-    )
-  } else if (options.experimentalUseJSI) {
-    if (initializeJSI()) {
-      return 'jsi'
-    }
-
-    logger.warn(
-      `JSI SQLiteAdapter not available… falling back to asynchronous operation. This will happen if you're using remote debugger, and may happen if you forgot to recompile native app after WatermelonDB update`,
     )
   }
 

@@ -98,9 +98,5 @@ RCT_EXTERN_METHOD(enableNativeCDC:(nonnull NSNumber *)connectionTag
 
 RCT_EXTERN__BLOCKING_SYNCHRONOUS_METHOD(WMELON_CONCAT(enableNativeCDC, Synchronous):(nonnull NSNumber *)connectionTag)
 
-RCT_EXTERN__BLOCKING_SYNCHRONOUS_METHOD(initializeJSI)
-
-RCT_EXTERN__BLOCKING_SYNCHRONOUS_METHOD(initializeJSIBridge)
-
 
 @end

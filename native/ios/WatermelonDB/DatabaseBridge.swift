@@ -188,23 +188,6 @@ extension DatabaseBridge {
 // MARK: - Synchronous connections
 
 extension DatabaseBridge {
-    @objc(initializeJSI)
-    func initializeJSI() -> NSDictionary {
-        return synchronously {
-            // swiftlint:disable all
-            installWatermelonJSI(bridge as? RCTCxxBridge)
-        }
-    }
-    
-    @objc(initializeJSIBridge)
-    func initializeJSIBridge() -> NSDictionary {
-        return synchronously {
-            let selfPtr = UnsafeMutablePointer(mutating: Unmanaged.passUnretained(self).toOpaque().assumingMemoryBound(to: DatabaseBridge.self))
-            
-            return installWatermelonJSISwiftBridge(bridge as? RCTCxxBridge, selfPtr)
-        }
-    }
-    
     @objc(initializeSynchronous:databaseName:schemaVersion:)
     func initializeSynchronous(tag: ConnectionTag,
                                databaseName: String,
