@@ -30,19 +30,21 @@ include_directories(
 # Note: This replaces find_package(sqlite-android REQUIRED CONFIG) to work around
 # missing Prefab metadata in the AAR when using custom sqlite-android builds
 
-# Check if we can find sqlite-android AAR in the expected location
-find_file(SQLITE_ANDROID_AAR
-    NAMES sqlite-android.aar sqlite-android-release.aar sqlite-android-debug.aar
-    PATHS 
-        "${CMAKE_CURRENT_LIST_DIR}/../../libs"
-        "${CMAKE_CURRENT_LIST_DIR}/../../../../../../../node_modules/@BuildHero/watermelondb/native/android/libs"
-        # Also check build output directories
-        "${CMAKE_CURRENT_LIST_DIR}/../../../../../../../sqlite-android/sqlite-android/build/outputs/aar"
-        "${CMAKE_CURRENT_LIST_DIR}/../../../../../../sqlite-android/sqlite-android/build/outputs/aar"
-    NO_DEFAULT_PATH
-)
+# Use direct path construction instead of find_file to avoid CMake search issues
+set(SQLITE_ANDROID_AAR "${CMAKE_CURRENT_LIST_DIR}/../../../libs/sqlite-android.aar")
 
-if(SQLITE_ANDROID_AAR)
+# Verify the file exists
+if(NOT EXISTS "${SQLITE_ANDROID_AAR}")
+    # Try alternative locations
+    set(SQLITE_ANDROID_AAR_ALT "${CMAKE_CURRENT_LIST_DIR}/../../../../../../../node_modules/@BuildHero/watermelondb/native/android/libs/sqlite-android.aar")
+    if(EXISTS "${SQLITE_ANDROID_AAR_ALT}")
+        set(SQLITE_ANDROID_AAR "${SQLITE_ANDROID_AAR_ALT}")
+    endif()
+endif()
+
+message(STATUS "Using sqlite-android AAR: ${SQLITE_ANDROID_AAR}")
+
+if(EXISTS "${SQLITE_ANDROID_AAR}")
     # Extract AAR if not already extracted
     get_filename_component(SQLITE_AAR_DIR "${SQLITE_ANDROID_AAR}" DIRECTORY)
     set(SQLITE_ANDROID_EXTRACTED_DIR "${SQLITE_AAR_DIR}/sqlite-android-extracted")
@@ -77,19 +79,26 @@ if(SQLITE_ANDROID_AAR)
             IMPORTED_LOCATION "${SQLITE_ANDROID_EXTRACTED_DIR}/jni/x86_64/libsqlite3x.so")
     endif()
     
-    # Look for headers in common locations
-    find_path(SQLITE_HEADERS_DIR
-        NAMES sqlite3.h
-        PATHS
-            "${SQLITE_AAR_DIR}/sqlite-headers"
-            "${CMAKE_CURRENT_LIST_DIR}/../../libs/sqlite-headers"
-            # Also check sqlite-android source directories
-            "${CMAKE_CURRENT_LIST_DIR}/../../../../../../../sqlite-android/sqlite-android/src/main/include"
-            "${CMAKE_CURRENT_LIST_DIR}/../../../../../../sqlite-android/sqlite-android/src/main/include"
-        NO_DEFAULT_PATH
-    )
+    # Use direct path construction for headers too
+    set(SQLITE_HEADERS_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../libs/sqlite-headers")
     
-    if(SQLITE_HEADERS_DIR)
+    # Verify headers exist
+    if(NOT EXISTS "${SQLITE_HEADERS_DIR}/sqlite3.h")
+        # Try alternative locations
+        set(SQLITE_HEADERS_ALT "${SQLITE_AAR_DIR}/sqlite-headers")
+        if(EXISTS "${SQLITE_HEADERS_ALT}/sqlite3.h")
+            set(SQLITE_HEADERS_DIR "${SQLITE_HEADERS_ALT}")
+        else()
+            # Check extracted AAR location
+            if(EXISTS "${SQLITE_ANDROID_EXTRACTED_DIR}/../sqlite-headers/sqlite3.h")
+                set(SQLITE_HEADERS_DIR "${SQLITE_ANDROID_EXTRACTED_DIR}/../sqlite-headers")
+            endif()
+        endif()
+    endif()
+
+    message(STATUS "Using sqlite headers: ${SQLITE_HEADERS_DIR}")
+    
+    if(EXISTS "${SQLITE_HEADERS_DIR}/sqlite3.h")
         set_target_properties(sqlite-android::sqlite3x PROPERTIES
             INTERFACE_INCLUDE_DIRECTORIES "${SQLITE_HEADERS_DIR}")
         message(STATUS "Configured sqlite-android from AAR: ${SQLITE_ANDROID_AAR}")
