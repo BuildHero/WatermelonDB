@@ -118,7 +118,6 @@ set(LIB_TYPE STATIC)
 set(SOURCE_FILES
     ../../../../shared/Sqlite.cpp
     ../../../../shared/DatabaseUtils.cpp
-    ../../../../../../../react-native/ReactCommon/jsi/jsi/jsi.cpp
     # List C/C++ source files with relative paths to this CMakeLists.txt.
     JSIAndroidUtils.cpp
     JSIAndroidBridgeWrapper.cpp
