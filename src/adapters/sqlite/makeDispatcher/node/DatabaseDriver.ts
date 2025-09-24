@@ -129,10 +129,9 @@ class DatabaseDriver {
   count = (query: string) => this.database.count(query)
 
   getColumnNames = (table: string, schema: string = 'main'): Set<string> => {
-    const query = schema === 'main' 
-      ? `PRAGMA table_info('${table}')`
-      : `PRAGMA other.table_info('${table}')`
-    
+    const query =
+      schema === 'main' ? `PRAGMA table_info('${table}')` : `PRAGMA other.table_info('${table}')`
+
     const results = this.database.queryRaw(query)
     return new Set(results.map((row: any) => row.name))
   }
@@ -141,30 +140,30 @@ class DatabaseDriver {
     this.database.execute(`ATTACH DATABASE '${srcDB}' as 'other'`)
 
     this.database.inTransaction(() => {
-      tables.forEach(table => {
+      tables.forEach((table) => {
         // Get the list of columns in the destination database
         const destColumns = this.getColumnNames(table, 'main')
-        
+
         // Get the list of columns in the source database
         const srcColumns = this.getColumnNames(table, 'other')
-        
+
         // Find the intersection of the column names
-        const commonColumns = new Set([...destColumns].filter(x => srcColumns.has(x)))
-        
+        const commonColumns = new Set([...destColumns].filter((x) => srcColumns.has(x)))
+
         if (commonColumns.size > 0) {
           // Convert the set of common columns into a comma-separated string with quotes
-          const escapedColumns = Array.from(commonColumns).map(col => `"${col}"`)
+          const escapedColumns = Array.from(commonColumns).map((col) => `"${col}"`)
           const columnsString = escapedColumns.join(', ')
 
           // Perform the data import using the common columns
           const sql = `INSERT OR IGNORE INTO "${table}" (${columnsString}) SELECT ${columnsString} FROM other."${table}"`
-          
+
           this.database.execute(sql)
         }
       })
     })
 
-    this.database.execute('DETACH DATABASE \'other\'')
+    this.database.execute("DETACH DATABASE 'other'")
   }
 
   batch = (operations: any[]) => {
