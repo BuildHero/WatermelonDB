@@ -71,6 +71,15 @@ namespace watermelondb {
         );
 
         SQLiteConnection* connection = reinterpret_cast<SQLiteConnection*>(env->CallLongMethod(bridge, getConnectionMethod, jTag));
+        
+        if (!connection) {
+            throw jsi::JSError(rt, "Failed to get SQLite connection - connection is null");
+        }
+        
+        if (!connection->db) {
+            env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
+            throw jsi::JSError(rt, "Failed to get SQLite connection - database handle is null");
+        }
 
         sqlite3* db = connection->db;
 
@@ -118,6 +127,15 @@ namespace watermelondb {
         );
 
         SQLiteConnection* connection = reinterpret_cast<SQLiteConnection*>(env->CallLongMethod(bridge, getConnectionMethod, jTag));
+        
+        if (!connection) {
+            throw jsi::JSError(rt, "Failed to get SQLite connection - connection is null");
+        }
+        
+        if (!connection->db) {
+            env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
+            throw jsi::JSError(rt, "Failed to get SQLite connection - database handle is null");
+        }
 
         sqlite3* db = connection->db;
 
@@ -130,7 +148,13 @@ namespace watermelondb {
                 break;
             }
 
-            assert(std::string(sqlite3_column_name(stmt, 0)) == "id");
+            // Validate first column is 'id' before proceeding
+            const char* firstColumnName = sqlite3_column_name(stmt, 0);
+            if (!firstColumnName || std::string(firstColumnName) != "id") {
+                finalizeStmt(stmt);
+                env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
+                throw jsi::JSError(rt, "Query result does not have 'id' as first column");
+            }
 
             const char *id = (const char *)sqlite3_column_text(stmt, 0);
 
