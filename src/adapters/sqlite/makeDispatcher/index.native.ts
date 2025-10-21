@@ -48,6 +48,12 @@ try {
   NativeWatermelonDBModule = null
 }
 
+// @ts-ignore
+if (NativeWatermelonDBModule) {
+  // @ts-ignore
+  global.WatermelonDB = NativeWatermelonDBModule
+}
+
 const dispatcherMethods = [
   'copyTables',
   'initialize',
@@ -70,14 +76,6 @@ const dispatcherMethods = [
 
 const supportedHybridJSIMethods = new Set(['query', 'execSqlQuery'])
 const supportedTurboModuleMethods = new Set(['query', 'execSqlQuery'])
-
-const turboModuleEnabled = () => {
-  if (NativeWatermelonDBModule) {
-    return true
-  }
-
-  return false
-}
 
 export const makeDispatcher = (
   type: DispatcherType,
