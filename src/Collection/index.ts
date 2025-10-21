@@ -1,4 +1,4 @@
-import {Observable, Subject} from '../utils/rx';
+import { Observable, Subject } from '../utils/rx'
 import invariant from '../utils/common/invariant'
 import noop from '../utils/fp/noop'
 import { ResultCallback, toPromise, mapValue, Result } from '../utils/fp/Result'
@@ -18,34 +18,36 @@ import logger from '../utils/common/logger'
 import encodeQuery from '../adapters/sqlite/encodeQuery'
 // @ts-ignore
 import { mapToGraph } from './helpers'
-import { CachedFindResult } from 'adapters/type';
+import { CachedFindResult } from 'adapters/type'
 
-type CollectionChangeType = 'created' | 'updated' | 'destroyed';
+type CollectionChangeType = 'created' | 'updated' | 'destroyed'
 
 export type CollectionChange<T extends Model> = {
-  record: T;
-  type: CollectionChangeType;
-};
-export type CollectionChangeSet<T extends Model> = CollectionChange<T>[];
+  record: T
+  type: CollectionChangeType
+}
+export type CollectionChangeSet<T extends Model> = CollectionChange<T>[]
 
-export type ModelClass<Record extends Model> = (new (...args: any[]) => Record) & { table: TableName<Record> };
+export type ModelClass<Record extends Model> = (new (...args: any[]) => Record) & {
+  table: TableName<Record>
+}
 
 export default class Collection<Record extends Model> {
-  database: Database;
+  database: Database
 
-  modelClass: ModelClass<Record>;
+  modelClass: ModelClass<Record>
 
   // Emits event every time a record inside Collection changes or is deleted
   // (Use Query API to observe collection changes)
-  changes: Subject<CollectionChangeSet<Record>> = new Subject();
+  changes: Subject<CollectionChangeSet<Record>> = new Subject()
 
-  _cache: RecordCache<Record>;
+  _cache: RecordCache<Record>
 
   constructor(database: Database, ModelClass: ModelClass<Record>) {
     this.database = database
     this.modelClass = ModelClass
     this._cache = new RecordCache(
-      ModelClass.table, 
+      ModelClass.table,
       (raw: RawRecord) => new ModelClass(this, raw),
       this._onCacheMiss.bind(this),
     )
@@ -56,18 +58,28 @@ export default class Collection<Record extends Model> {
     const tag = this.database.adapter?.underlyingAdapter?._tag
 
     if (!hasHybridJSI) {
+      invariant(id, `Record ID ${this.table}#${id} was sent over the bridge, but it's not cached`)
+    }
+
+    logger.log(
+      `Record ID ${this.table}#${id} was sent over the bridge, but it's not cached. Refetching...`,
+    )
+
+    // @ts-ignore
+    if (!global.WatermelonDB) {
       invariant(
-        id,
-        `Record ID ${this.table}#${id} was sent over the bridge, but it's not cached`,
+        false,
+        `WatermelonDB Turbo Module not available for cache miss on ${this.table}#${id}`,
       )
     }
 
-    logger.log(`Record ID ${this.table}#${id} was sent over the bridge, but it's not cached. Refetching...`)
-
     // @ts-ignore
-    return global.WatermelonDB.execSqlQuery(tag, `SELECT * FROM ${this.table} WHERE id = ? LIMIT 1`, [id])?.[0]
+    return global.WatermelonDB.execSqlQuery(
+      tag,
+      `SELECT * FROM ${this.table} WHERE id = ? LIMIT 1`,
+      [id],
+    )?.[0]
   }
-
 
   get db(): Database {
     return this.database
@@ -76,7 +88,7 @@ export default class Collection<Record extends Model> {
   // Finds a record with the given ID
   // Promise will reject if not found
   async find(id: RecordId): Promise<Record> {
-    return toPromise(callback => this._fetchRecord(id, callback))
+    return toPromise((callback) => this._fetchRecord(id, callback))
   }
 
   // Finds the given record and starts observing it
@@ -85,7 +97,7 @@ export default class Collection<Record extends Model> {
     return Observable.create((observer: any) => {
       let unsubscribe = null as any
       let unsubscribed = false
-      this._fetchRecord(id, result => {
+      this._fetchRecord(id, (result) => {
         if ((result as any).value) {
           const record = (result as any).value
           observer.next(record)
@@ -175,14 +187,25 @@ export default class Collection<Record extends Model> {
 
     if (description?.eagerJoinTables?.length) {
       return this.database.adapter.underlyingAdapter.execSqlQuery(
-        encodeQuery(serializedQuery, false, this.database.schema), 
+        encodeQuery(serializedQuery, false, this.database.schema),
         [],
-        result => callback(mapValue(rawRecords => mapToGraph(rawRecords, associations, this) as Record[], result)),
+        (result) =>
+          callback(
+            mapValue(
+              (rawRecords) => mapToGraph(rawRecords, associations, this) as Record[],
+              result,
+            ),
+          ),
       )
     }
 
-    return this.database.adapter.underlyingAdapter.query(query.serialize(), result =>
-      callback(mapValue(rawRecords => this._cache.recordsFromQueryResult(rawRecords) as Record[], result)),
+    return this.database.adapter.underlyingAdapter.query(query.serialize(), (result) =>
+      callback(
+        mapValue(
+          (rawRecords) => this._cache.recordsFromQueryResult(rawRecords) as Record[],
+          result,
+        ),
+      ),
     )
   }
 
@@ -205,29 +228,33 @@ export default class Collection<Record extends Model> {
       return
     }
 
-    const mapQueryResult = (id: RecordId, result: Result<CachedFindResult> | {
-      value: CachedFindResult;
-    }) => {
-      return mapValue(rawRecord => {
+    const mapQueryResult = (
+      id: RecordId,
+      result:
+        | Result<CachedFindResult>
+        | {
+            value: CachedFindResult
+          },
+    ) => {
+      return mapValue((rawRecord) => {
         invariant(rawRecord, `Record ${this.table}#${id} not found`)
         return this._cache.recordFromQueryResult(rawRecord as any)
       }, result)
     }
 
-    this.database.adapter.underlyingAdapter.find(this.table, id, result => {
+    this.database.adapter.underlyingAdapter.find(this.table, id, (result) => {
       if (!result || !(result as any).value) {
         logger.log(`Record ${this.table}#${id} not found`)
         // @ts-ignore
-        this.modelClass.fetchFromRemote(this.modelClass.table, id)
-          .then((_: void) => {
-            this.database.adapter.underlyingAdapter.find(this.table, id, result => {
-              callback(mapQueryResult(id, result) as Result<Record>)
-            })
+        this.modelClass.fetchFromRemote(this.modelClass.table, id).then((_: void) => {
+          this.database.adapter.underlyingAdapter.find(this.table, id, (result) => {
+            callback(mapQueryResult(id, result) as Result<Record>)
           })
+        })
       } else {
         callback(mapQueryResult(id, result) as Result<Record>)
       }
-    })    
+    })
   }
 
   _applyChangesToCache(operations: CollectionChangeSet<Record>): void {
@@ -250,7 +277,13 @@ export default class Collection<Record extends Model> {
     this._subscribers.forEach(collectionChangeNotifySubscribers)
     this.changes.next(operations)
 
-    const collectionChangeNotifyModels = ({ record, type }: { record: Record, type: CollectionChangeType }): void => {
+    const collectionChangeNotifyModels = ({
+      record,
+      type,
+    }: {
+      record: Record
+      type: CollectionChangeType
+    }): void => {
       // @ts-ignore
       if (type === CollectionChangeTypes.updated || type === CollectionChangeTypes.upserted) {
         record._notifyChanged()
@@ -261,9 +294,12 @@ export default class Collection<Record extends Model> {
     operations.forEach(collectionChangeNotifyModels)
   }
 
-  _subscribers: [(arg1: CollectionChangeSet<Record>) => void, any][] = [];
+  _subscribers: [(arg1: CollectionChangeSet<Record>) => void, any][] = []
 
-  experimentalSubscribe(subscriber: (arg1: CollectionChangeSet<Record>) => void, debugInfo?: any): Unsubscribe {
+  experimentalSubscribe(
+    subscriber: (arg1: CollectionChangeSet<Record>) => void,
+    debugInfo?: any,
+  ): Unsubscribe {
     const entry = [subscriber, debugInfo]
     this._subscribers.push(entry as any)
 
