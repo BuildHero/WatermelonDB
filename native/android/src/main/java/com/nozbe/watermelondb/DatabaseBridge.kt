@@ -46,6 +46,13 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
     }
 
     private val connections: MutableMap<ConnectionTag, Connection> = mutableMapOf()
+    
+    data class ConnectionMetadata(
+        val databaseName: String,
+        val schemaVersion: Int
+    )
+    
+    private val connectionMetadata: MutableMap<ConnectionTag, ConnectionMetadata> = mutableMapOf()
 
     override fun getName(): String = "DatabaseBridge"
 
@@ -118,6 +125,7 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
         val promiseMap = Arguments.createMap()
 
         try {
+            connectionMetadata[tag] = ConnectionMetadata(databaseName, schemaVersion)
             connections[tag] = Connection.Connected(
                 driver = DatabaseDriver(
                     context = reactContext,
@@ -148,18 +156,21 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
         schema: SQL,
         schemaVersion: SchemaVersion,
         promise: Promise
-    ) = connectDriver(
-        connectionTag = tag,
-        driver = DatabaseDriver(
-            context = reactContext,
-            dbName = databaseName,
-            schema = Schema(
-                version = schemaVersion,
-                sql = schema
-            )
-        ),
-        promise = promise
-    )
+    ) {
+        connectionMetadata[tag] = ConnectionMetadata(databaseName, schemaVersion)
+        connectDriver(
+            connectionTag = tag,
+            driver = DatabaseDriver(
+                context = reactContext,
+                dbName = databaseName,
+                schema = Schema(
+                    version = schemaVersion,
+                    sql = schema
+                )
+            ),
+            promise = promise
+        )
+    }
 
     @ReactMethod
     fun setUpWithMigrations(
@@ -171,6 +182,7 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
         promise: Promise
     ) {
         try {
+            connectionMetadata[tag] = ConnectionMetadata(databaseName, toVersion)
             connectDriver(
                 connectionTag = tag,
                 driver = DatabaseDriver(
@@ -259,15 +271,22 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
         withDriver(tag, promise) { it.setUpdateHook(sqliteUpdateHook) }
 
     fun getSQLiteConnection(tag: ConnectionTag): Long {
-        val driver = getDriver(tag)
-
-        return driver.getDatabase().acquireSqliteConnection()
+        try {
+            val driver = getDriver(tag)
+            return driver.getDatabase().acquireSqliteConnection()
+        } catch (e: Exception) {
+            android.util.Log.e("WatermelonDB", "getSQLiteConnection failed for tag $tag", e)
+            throw Exception("Failed to get SQLite connection for tag $tag: ${e.message}", e)
+        }
     }
 
     fun releaseSQLiteConnection(tag: ConnectionTag) {
-        val driver = getDriver(tag)
-
-        driver.getDatabase().releaseSQLiteConnection()
+        try {
+            val driver = getDriver(tag)
+            driver.getDatabase().releaseSQLiteConnection()
+        } catch (e: Exception) {
+            android.util.Log.e("WatermelonDB", "releaseSQLiteConnection failed for tag $tag", e)
+        }
     }
 
     fun isCached(tag: ConnectionTag, table: TableName, id: RecordID): Boolean {
@@ -283,11 +302,38 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
     }
 
     private fun getDriver(tag: ConnectionTag): DatabaseDriver {
-        val connection = connections[tag] ?: throw Exception("No driver with tag $tag available")
+        val connection = connections[tag]
+        
+        if (connection == null) {
+            val metadata = connectionMetadata[tag]
+            if (metadata != null) {
+                android.util.Log.i("WatermelonDB", "Connection lost for tag $tag. Attempting auto-recovery with database: ${metadata.databaseName}")
+                try {
+                    val driver = DatabaseDriver(
+                        context = reactContext,
+                        dbName = metadata.databaseName,
+                        schemaVersion = metadata.schemaVersion
+                    )
+                    connections[tag] = Connection.Connected(driver)
+                    android.util.Log.i("WatermelonDB", "Successfully recovered connection for tag $tag")
+                    return driver
+                } catch (e: Exception) {
+                    android.util.Log.e("WatermelonDB", "Failed to recover connection for tag $tag", e)
+                    connectionMetadata.remove(tag)
+                    throw Exception("Failed to recover connection for tag $tag: ${e.message}. Connection may not be initialized or was disconnected.", e)
+                }
+            }
+            
+            android.util.Log.w("WatermelonDB", "No driver with tag $tag available. Connection may not be initialized or was disconnected. Available tags: ${connections.keys.joinToString()}")
+            throw Exception("No driver with tag $tag available. Connection may not be initialized or was disconnected.")
+        }
 
         return when (connection) {
             is Connection.Connected -> connection.driver
-            is Connection.Waiting -> throw Exception("Driver with tag $tag is not ready")
+            is Connection.Waiting -> {
+                android.util.Log.w("WatermelonDB", "Driver with tag $tag is not ready - still initializing")
+                throw Exception("Driver with tag $tag is not ready - still initializing")
+            }
         }
     }
 
@@ -296,11 +342,19 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
         tag: ConnectionTag,
         function: (DatabaseDriver) -> Any?
     ): Any? {
-        val connection = connections[tag] ?: throw Exception("No driver with tag $tag available")
+        val connection = connections[tag]
+        
+        if (connection == null) {
+            android.util.Log.w("WatermelonDB", "No driver with tag $tag available. Connection may not be initialized or was disconnected. Available tags: ${connections.keys.joinToString()}")
+            throw Exception("No driver with tag $tag available. Connection may not be initialized or was disconnected.")
+        }
 
         return when (connection) {
             is Connection.Connected -> function(connection.driver)
-            is Connection.Waiting -> throw Exception("Driver with tag $tag is not ready")
+            is Connection.Waiting -> {
+                android.util.Log.w("WatermelonDB", "Driver with tag $tag is not ready - still initializing")
+                throw Exception("Driver with tag $tag is not ready - still initializing")
+            }
         }
     }
 
@@ -313,9 +367,19 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
         val functionName = function.javaClass.enclosingMethod?.name
         try {
             Trace.beginSection("DatabaseBridge.$functionName")
-            when (val connection =
-                connections[tag] ?: promise.reject(
-                    Exception("No driver with tag $tag available"))) {
+            val connection = connections[tag]
+            
+            if (connection == null) {
+                android.util.Log.w("WatermelonDB", "No driver with tag $tag available for $functionName. Connection may not be initialized or was disconnected. Available tags: ${connections.keys.joinToString()}")
+                promise.reject(
+                    "ConnectionNotFound",
+                    "No driver with tag $tag available. Connection may not be initialized or was disconnected.",
+                    null
+                )
+                return
+            }
+            
+            when (connection) {
                 is Connection.Connected -> {
                     val result = function(connection.driver)
                     promise.resolve(if (result === Unit) {
@@ -354,6 +418,7 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
     private fun disconnectDriver(connectionTag: ConnectionTag) {
         val queue = connections[connectionTag]?.queue ?: arrayListOf()
         connections.remove(connectionTag)
+        connectionMetadata.remove(connectionTag)
 
         for (operation in queue) {
             operation()

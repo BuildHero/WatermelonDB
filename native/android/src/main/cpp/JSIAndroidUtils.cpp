@@ -72,6 +72,29 @@ namespace watermelondb {
 
         SQLiteConnection* connection = reinterpret_cast<SQLiteConnection*>(env->CallLongMethod(bridge, getConnectionMethod, jTag));
         
+        // Check if a Java exception occurred (e.g., "No driver with tag X available")
+        if (env->ExceptionCheck()) {
+            jthrowable exception = env->ExceptionOccurred();
+            env->ExceptionClear();
+            
+            // Get the exception message
+            jclass exceptionClass = env->GetObjectClass(exception);
+            jmethodID getMessageMethod = env->GetMethodID(exceptionClass, "getMessage", "()Ljava/lang/String;");
+            jstring messageObj = (jstring)env->CallObjectMethod(exception, getMessageMethod);
+            
+            std::string message = "Database connection error for tag " + std::to_string(jTag);
+            if (messageObj) {
+                const char* messageChars = env->GetStringUTFChars(messageObj, nullptr);
+                message = std::string(messageChars);
+                env->ReleaseStringUTFChars(messageObj, messageChars);
+            }
+            
+            env->DeleteLocalRef(exception);
+            env->DeleteLocalRef(exceptionClass);
+            
+            throw jsi::JSError(rt, message);
+        }
+        
         if (!connection) {
             throw jsi::JSError(rt, "Failed to get SQLite connection - connection is null");
         }
@@ -127,6 +150,29 @@ namespace watermelondb {
         );
 
         SQLiteConnection* connection = reinterpret_cast<SQLiteConnection*>(env->CallLongMethod(bridge, getConnectionMethod, jTag));
+        
+        // Check if a Java exception occurred (e.g., "No driver with tag X available")
+        if (env->ExceptionCheck()) {
+            jthrowable exception = env->ExceptionOccurred();
+            env->ExceptionClear();
+            
+            // Get the exception message
+            jclass exceptionClass = env->GetObjectClass(exception);
+            jmethodID getMessageMethod = env->GetMethodID(exceptionClass, "getMessage", "()Ljava/lang/String;");
+            jstring messageObj = (jstring)env->CallObjectMethod(exception, getMessageMethod);
+            
+            std::string message = "Database connection error for tag " + std::to_string(jTag);
+            if (messageObj) {
+                const char* messageChars = env->GetStringUTFChars(messageObj, nullptr);
+                message = std::string(messageChars);
+                env->ReleaseStringUTFChars(messageObj, messageChars);
+            }
+            
+            env->DeleteLocalRef(exception);
+            env->DeleteLocalRef(exceptionClass);
+            
+            throw jsi::JSError(rt, message);
+        }
         
         if (!connection) {
             throw jsi::JSError(rt, "Failed to get SQLite connection - connection is null");
