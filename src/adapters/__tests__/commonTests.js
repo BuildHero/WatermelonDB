@@ -7,7 +7,7 @@ import Query from '../../Query'
 import { sanitizedRaw } from '../../RawRecord'
 import * as Q from '../../QueryDescription'
 import { appSchema, tableSchema } from '../../Schema'
-import { schemaMigrations, createTable, addColumns } from '../../Schema/migrations'
+import { schemaMigrations, createTable, addColumns, setDefaultValue } from '../../Schema/migrations'
 
 import { matchTests, naughtyMatchTests, joinTests } from '../../__tests__/databaseTests'
 import DatabaseAdapterCompat from '../compat'
@@ -34,9 +34,9 @@ export default () => [
     async (_adapter, AdapterClass, extraAdapterOptions) => {
       const schema = { ...testSchema, version: 10 }
 
-      const makeAdapter = options =>
+      const makeAdapter = (options) =>
         new AdapterClass({ schema, ...options, ...extraAdapterOptions })
-      const adapterWithMigrations = migrations => makeAdapter({ migrations })
+      const adapterWithMigrations = (migrations) => makeAdapter({ migrations })
 
       // expect(() => makeAdapter({})).toThrowError(/missing migrations/)
 
@@ -53,12 +53,15 @@ export default () => [
       expect(() => adapterWithMigrations({ migrations: [] })).toThrow(/use schemaMigrations()/)
 
       // OK migrations passed
-      const adapterWithRealMigrations = migrations =>
+      const adapterWithRealMigrations = (migrations) =>
         adapterWithMigrations(schemaMigrations({ migrations }))
 
       expect(() => adapterWithRealMigrations([{ toVersion: 10, steps: [] }])).not.toThrow()
       expect(() =>
-        adapterWithRealMigrations([{ toVersion: 10, steps: [] }, { toVersion: 9, steps: [] }]),
+        adapterWithRealMigrations([
+          { toVersion: 10, steps: [] },
+          { toVersion: 9, steps: [] },
+        ]),
       ).not.toThrow()
 
       // Empty migrations only allowed if version 1
@@ -78,13 +81,16 @@ export default () => [
       )
       // Migration to latest version must be present
       expect(() =>
-        adapterWithRealMigrations([{ toVersion: 9, steps: [] }, { toVersion: 8, steps: [] }]),
+        adapterWithRealMigrations([
+          { toVersion: 9, steps: [] },
+          { toVersion: 8, steps: [] },
+        ]),
       ).toThrow(/Missing migration/)
     },
   ],
   [
     'can query and count on empty db',
-    async adapter => {
+    async (adapter) => {
       const query = taskQuery()
       expect(await adapter.query(query)).toEqual([])
       expect(await adapter.count(query)).toBe(0)
@@ -92,7 +98,7 @@ export default () => [
   ],
   [
     'can create and find records (sanity test)',
-    async adapter => {
+    async (adapter) => {
       const record = mockTaskRaw({ id: 'abc', text1: 'bar', order: 1 })
       await adapter.batch([['create', 'tasks', record]])
       expect(await adapter.find('tasks', 'abc')).toBe('abc')
@@ -100,7 +106,7 @@ export default () => [
   ],
   [
     'can find records by ID',
-    async _adapter => {
+    async (_adapter) => {
       let adapter = _adapter
 
       // add a record
@@ -113,7 +119,10 @@ export default () => [
       // add more, restart app
       const s2 = mockTaskRaw({ id: 's2', bool1: true, order: 2 })
       const s3 = mockTaskRaw({ id: 's3', text1: 'baz' })
-      await adapter.batch([['create', 'tasks', s2], ['create', 'tasks', s3]])
+      await adapter.batch([
+        ['create', 'tasks', s2],
+        ['create', 'tasks', s3],
+      ])
       adapter = await adapter.testClone()
 
       // returns raw if not cached
@@ -129,7 +138,7 @@ export default () => [
   ],
   [
     'can cache non-global IDs on find',
-    async _adapter => {
+    async (_adapter) => {
       let adapter = _adapter
 
       // add a record
@@ -164,7 +173,7 @@ export default () => [
   ],
   [
     'can cache non-global IDs on query',
-    async _adapter => {
+    async (_adapter) => {
       let adapter = _adapter
 
       // add a record
@@ -199,7 +208,7 @@ export default () => [
   ],
   [
     'sanitizes records on find',
-    async _adapter => {
+    async (_adapter) => {
       let adapter = _adapter
       const tt1 = { id: 'tt1', task_id: 'abcdef' } // Unsanitized raw!
 
@@ -213,7 +222,7 @@ export default () => [
   ],
   [
     'can query and count records',
-    async adapter => {
+    async (adapter) => {
       const record1 = mockTaskRaw({ id: 't1', text1: 'bar', bool1: false, order: 1 })
       const record2 = mockTaskRaw({ id: 't2', text1: 'baz', bool1: true, order: 2 })
       const record3 = mockTaskRaw({ id: 't3', text1: 'abc', bool1: false, order: 3 })
@@ -288,14 +297,17 @@ export default () => [
   ],
   [
     'compacts query results',
-    async _adapter => {
+    async (_adapter) => {
       let adapter = _adapter
       const queryAll = () => adapter.query(taskQuery())
 
       // add records, restart app
       const s1 = mockTaskRaw({ id: 's1', order: 1 })
       const s2 = mockTaskRaw({ id: 's2', order: 2 })
-      await adapter.batch([['create', 'tasks', s1], ['create', 'tasks', s2]])
+      await adapter.batch([
+        ['create', 'tasks', s1],
+        ['create', 'tasks', s2],
+      ])
       adapter = await adapter.testClone()
 
       // first time we see it, get full object
@@ -328,13 +340,16 @@ export default () => [
   ],
   [
     'sanitizes records on query',
-    async _adapter => {
+    async (_adapter) => {
       let adapter = _adapter
       // Unsanitized raw!
       const t1 = { id: 't1', text1: 'foo', order: 1 }
       const t2 = { id: 't2', text2: 'bar', order: 2 }
 
-      await adapter.batch([['create', 'tasks', t1], ['create', 'tasks', t2]])
+      await adapter.batch([
+        ['create', 'tasks', t1],
+        ['create', 'tasks', t2],
+      ])
       adapter = await adapter.testClone()
 
       expectSortedEqual(await adapter.query(taskQuery()), [
@@ -345,7 +360,7 @@ export default () => [
   ],
   [
     'returns a COPY of the data',
-    async _adapter => {
+    async (_adapter) => {
       let adapter = _adapter
       const raw = mockTaskRaw({ id: 't1', text1: 'bar' })
       const originalRaw = { ...raw }
@@ -368,7 +383,7 @@ export default () => [
   ],
   [
     'can update records',
-    async _adapter => {
+    async (_adapter) => {
       let adapter = _adapter
       const raw = mockTaskRaw({ id: 't1', text1: 'bar' })
       await adapter.batch([['create', 'tasks', raw]])
@@ -388,7 +403,7 @@ export default () => [
   ],
   [
     'can mark records as deleted',
-    async adapter => {
+    async (adapter) => {
       const m1 = mockTaskRaw({ id: 't1', text1: 'bar1' })
       await adapter.batch([['create', 'tasks', m1]])
       expect(await adapter.query(taskQuery())).toEqual(['t1'])
@@ -405,7 +420,7 @@ export default () => [
   ],
   [
     'can get deleted record ids',
-    async adapter => {
+    async (adapter) => {
       const m1 = mockTaskRaw({ id: 't1', text1: 'bar1', order: 1 })
       const m2 = mockTaskRaw({ id: 't2', text1: 'bar2', order: 2 })
       await adapter.batch([
@@ -420,7 +435,7 @@ export default () => [
   ],
   [
     'can destroy deleted records',
-    async adapter => {
+    async (adapter) => {
       const m1 = mockTaskRaw({ id: 't1', text1: 'bar1', order: 1 })
       const m2 = mockTaskRaw({ id: 't2', text1: 'bar2', order: 2 })
       const m3 = mockTaskRaw({ id: 't3', text1: 'bar3', order: 3 })
@@ -445,7 +460,7 @@ export default () => [
   ],
   [
     'destroyDeletedRecords can handle unsafe strings',
-    async adapter => {
+    async (adapter) => {
       const m1 = mockTaskRaw({ id: 't1', text1: 'bar1', order: 1 })
       const m2 = mockTaskRaw({ id: 't2', text1: 'bar2', order: 2 })
       const m3 = mockTaskRaw({ id: 't3', text1: 'bar3', order: 3 })
@@ -460,17 +475,17 @@ export default () => [
         ['markAsDeleted', 'tasks', m3.id],
       ])
 
-      await adapter.destroyDeletedRecords('tasks', ['\') or 1=1 --'])
+      await adapter.destroyDeletedRecords('tasks', ["') or 1=1 --"])
       expectSortedEqual(await adapter.getDeletedRecords('tasks'), ['t1', 't2', 't3'])
       expectSortedEqual(await adapter.query(taskQuery()), [])
 
-      await adapter.destroyDeletedRecords('tasks', ['\'); insert into tasks (id) values (\'t4\') --'])
+      await adapter.destroyDeletedRecords('tasks', ["'); insert into tasks (id) values ('t4') --"])
       expectSortedEqual(await adapter.query(taskQuery()), [])
     },
   ],
   [
     'can run mixed batches',
-    async _adapter => {
+    async (_adapter) => {
       let adapter = _adapter
       const m1 = mockTaskRaw({ id: 't1', text1: 'bar' })
       const m3 = mockTaskRaw({ id: 't3' })
@@ -518,7 +533,7 @@ export default () => [
   ],
   [
     'can run sync-like flow',
-    async adapter => {
+    async (adapter) => {
       const queryAll = () => adapter.query(taskQuery())
 
       const m1 = mockTaskRaw({ id: 't1', text1: 'bar1', order: 1 })
@@ -552,7 +567,7 @@ export default () => [
   ],
   [
     'can unsafely reset database',
-    async adapter => {
+    async (adapter) => {
       await adapter.batch([['create', 'tasks', mockTaskRaw({ id: 't1', text1: 'bar', order: 1 })]])
       await adapter.unsafeResetDatabase()
       await expect(await adapter.count(taskQuery())).toBe(0)
@@ -564,15 +579,15 @@ export default () => [
   ],
   [
     'queues actions correctly',
-    async adapter => {
+    async (adapter) => {
       function queryable(promise) {
         let isSettled = false
         const result = promise.then(
-          value => {
+          (value) => {
             isSettled = true
             return value
           },
-          e => {
+          (e) => {
             isSettled = true
             throw e
           },
@@ -613,7 +628,7 @@ export default () => [
   ],
   [
     'fails on bad queries, creates, updates, deletes',
-    async adapter => {
+    async (adapter) => {
       const badQuery = new Query({ modelClass: BadModel }, []).serialize()
       await expect(adapter.query(badQuery)).rejects.toBeInstanceOf(Error)
       await expect(adapter.count(badQuery)).rejects.toBeInstanceOf(Error)
@@ -638,7 +653,7 @@ export default () => [
   ],
   [
     'supports LocalStorage',
-    async adapter => {
+    async (adapter) => {
       // non-existent fields return undefined
       expect(await adapter.getLocal('nonexisting')).toBeNull()
 
@@ -702,9 +717,9 @@ export default () => [
   ],
   [
     'does not fail on (weirdly named) table named that are SQLite keywords',
-    async adapter => {
+    async (adapter) => {
       await Promise.all(
-        ['where', 'values', 'set', 'drop', 'update'].map(async tableName => {
+        ['where', 'values', 'set', 'drop', 'update'].map(async (tableName) => {
           await adapter.batch([['create', tableName, { id: 'i1' }]])
           await adapter.batch([['update', tableName, { id: 'i1' }]])
           await adapter.batch([['markAsDeleted', tableName, 'i1']])
@@ -763,7 +778,7 @@ export default () => [
         }),
       )
       // TODO: Remove me. Temporary workaround for the race condition - wait until next macrotask to ensure that database has set up
-      await new Promise(resolve => setTimeout(resolve, 0))
+      await new Promise((resolve) => setTimeout(resolve, 0))
       // add data
       await adapter.batch([
         ['create', 'tasks', { id: 't1', num1: 10 }],
@@ -889,7 +904,7 @@ export default () => [
         }),
       )
       // TODO: Remove me. Temporary workaround for the race condition - wait until next macrotask to ensure that database has set up
-      await new Promise(resolve => setTimeout(resolve, 0))
+      await new Promise((resolve) => setTimeout(resolve, 0))
       await adapter.batch([['create', 'tasks', mockTaskRaw({ id: 't1', text1: 'foo' })]])
       expect(await adapter.count(taskQuery())).toBe(1)
 
@@ -905,6 +920,162 @@ export default () => [
     },
   ],
   [
+    `sets default value for existing column via migration`,
+    async (_adapter, AdapterClass, extraAdapterOptions) => {
+      if (AdapterClass.name !== 'SQLiteAdapter') {
+        return
+      }
+
+      const testSchemaV2 = appSchema({
+        version: 2,
+        tables: [
+          tableSchema({
+            name: 'tasks',
+            columns: [{ name: 'priority', type: 'number' }],
+          }),
+        ],
+      })
+
+      let adapter = new DatabaseAdapterCompat(
+        new AdapterClass({
+          schema: testSchemaV2,
+          migrations: schemaMigrations({ migrations: [{ toVersion: 2, steps: [] }] }),
+          ...extraAdapterOptions,
+        }),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      await adapter.batch([
+        ['create', 'tasks', { id: 't1', priority: 10 }],
+        ['create', 'tasks', { id: 't2', priority: 5 }],
+        ['create', 'tasks', { id: 't3', priority: null }],
+      ])
+
+      const testSchemaV3 = appSchema({
+        version: 3,
+        tables: [
+          tableSchema({
+            name: 'tasks',
+            columns: [{ name: 'priority', type: 'number', defaultValue: 0 }],
+          }),
+        ],
+      })
+
+      const migrationsV3 = schemaMigrations({
+        migrations: [
+          {
+            toVersion: 3,
+            steps: [setDefaultValue({ table: 'tasks', column: 'priority', value: 0 })],
+          },
+        ],
+      })
+
+      adapter = await adapter.testClone({
+        schema: testSchemaV3,
+        migrations: migrationsV3,
+      })
+
+      const t1 = await adapter.find('tasks', 't1')
+      const t2 = await adapter.find('tasks', 't2')
+      const t3 = await adapter.find('tasks', 't3')
+
+      expect(t1.priority).toBe(0)
+      expect(t2.priority).toBe(0)
+      expect(t3.priority).toBe(0)
+
+      await adapter.batch([['create', 'tasks', { id: 't4' }]])
+
+      const t4 = await adapter.find('tasks', 't4')
+      expect(t4.priority).toBe(0)
+    },
+  ],
+  [
+    `sets default value for different value types`,
+    async (_adapter, AdapterClass, extraAdapterOptions) => {
+      if (AdapterClass.name !== 'SQLiteAdapter') {
+        return
+      }
+
+      const testSchemaV2 = appSchema({
+        version: 2,
+        tables: [
+          tableSchema({
+            name: 'posts',
+            columns: [
+              { name: 'title', type: 'string' },
+              { name: 'is_published', type: 'boolean' },
+              { name: 'view_count', type: 'number' },
+            ],
+          }),
+        ],
+      })
+
+      let adapter = new DatabaseAdapterCompat(
+        new AdapterClass({
+          schema: testSchemaV2,
+          migrations: schemaMigrations({ migrations: [{ toVersion: 2, steps: [] }] }),
+          ...extraAdapterOptions,
+        }),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      await adapter.batch([
+        ['create', 'posts', { id: 'p1', title: 'Old Title', is_published: true, view_count: 100 }],
+        ['create', 'posts', { id: 'p2' }],
+      ])
+
+      const testSchemaV3 = appSchema({
+        version: 3,
+        tables: [
+          tableSchema({
+            name: 'posts',
+            columns: [
+              { name: 'title', type: 'string', defaultValue: 'Untitled' },
+              { name: 'is_published', type: 'boolean', defaultValue: false },
+              { name: 'view_count', type: 'number', defaultValue: 0 },
+            ],
+          }),
+        ],
+      })
+
+      const migrationsV3 = schemaMigrations({
+        migrations: [
+          {
+            toVersion: 3,
+            steps: [
+              setDefaultValue({ table: 'posts', column: 'title', value: 'Untitled' }),
+              setDefaultValue({ table: 'posts', column: 'is_published', value: false }),
+              setDefaultValue({ table: 'posts', column: 'view_count', value: 0 }),
+            ],
+          },
+        ],
+      })
+
+      adapter = await adapter.testClone({
+        schema: testSchemaV3,
+        migrations: migrationsV3,
+      })
+
+      const p1 = await adapter.find('posts', 'p1')
+      const p2 = await adapter.find('posts', 'p2')
+
+      expect(p1.title).toBe('Untitled')
+      expect(p1.is_published).toBe(false)
+      expect(p1.view_count).toBe(0)
+
+      expect(p2.title).toBe('Untitled')
+      expect(p2.is_published).toBe(false)
+      expect(p2.view_count).toBe(0)
+
+      await adapter.batch([['create', 'posts', { id: 'p3' }]])
+
+      const p3 = await adapter.find('posts', 'p3')
+      expect(p3.title).toBe('Untitled')
+      expect(p3.is_published).toBe(false)
+      expect(p3.view_count).toBe(0)
+    },
+  ],
+  [
     `resets database when it's newer than app schema`,
     async (_adapter, AdapterClass, extraAdapterOptions) => {
       // launch newer version of the app
@@ -916,7 +1087,7 @@ export default () => [
         }),
       )
       // TODO: Remove me. Temporary workaround for the race condition - wait until next macrotask to ensure that database has set up
-      await new Promise(resolve => setTimeout(resolve, 0))
+      await new Promise((resolve) => setTimeout(resolve, 0))
 
       await adapter.batch([['create', 'tasks', mockTaskRaw({})]])
       expect(await adapter.count(taskQuery())).toBe(1)
@@ -944,7 +1115,7 @@ export default () => [
         }),
       )
       // TODO: Remove me. Temporary workaround for the race condition - wait until next macrotask to ensure that database has set up
-      await new Promise(resolve => setTimeout(resolve, 0))
+      await new Promise((resolve) => setTimeout(resolve, 0))
 
       await adapter.batch([['create', 'tasks', mockTaskRaw({})]])
       expect(await adapter.count(taskQuery())).toBe(1)
@@ -972,7 +1143,7 @@ export default () => [
         }),
       )
       // TODO: Remove me. Temporary workaround for the race condition - wait until next macrotask to ensure that database has set up
-      await new Promise(resolve => setTimeout(resolve, 0))
+      await new Promise((resolve) => setTimeout(resolve, 0))
 
       await adapter.batch([['create', 'tasks', mockTaskRaw({})]])
       expect(await adapter.count(taskQuery())).toBe(1)
@@ -1024,7 +1195,7 @@ export default () => [
         }),
       )
       // TODO: Remove me. Temporary workaround for the race condition - wait until next macrotask to ensure that database has set up
-      await new Promise(resolve => setTimeout(resolve, 0))
+      await new Promise((resolve) => setTimeout(resolve, 0))
 
       // sanity check
       expect(await adapter.count(taskQuery())).toBe(0)
@@ -1040,7 +1211,7 @@ export default () => [
         }),
       )
       // TODO: Remove me. Temporary workaround for the race condition - wait until next macrotask to ensure that database has set up
-      await new Promise(resolve => setTimeout(resolve, 0))
+      await new Promise((resolve) => setTimeout(resolve, 0))
       expect(await adapter2.count(taskQuery())).toBe(1)
 
       // reset
@@ -1056,12 +1227,12 @@ export default () => [
         }),
       )
       // TODO: Remove me. Temporary workaround for the race condition - wait until next macrotask to ensure that database has set up
-      await new Promise(resolve => setTimeout(resolve, 0))
+      await new Promise((resolve) => setTimeout(resolve, 0))
 
       expect(await adapter3.count(taskQuery())).toBe(0)
     },
   ],
-  ...matchTests.map(testCase => [
+  ...matchTests.map((testCase) => [
     `[shared match test] ${testCase.name}`,
     async (adapter, AdapterClass) => {
       const perform = () => performMatchTest(adapter, testCase)
@@ -1075,7 +1246,7 @@ export default () => [
       }
     },
   ]),
-  ...joinTests.map(testCase => [
+  ...joinTests.map((testCase) => [
     `[shared join test] ${testCase.name}`,
     async (adapter, AdapterClass) => {
       const perform = () => performJoinTest(adapter, testCase)
@@ -1114,7 +1285,7 @@ export default () => [
   ],
   [
     'can store and retrieve large numbers (regression test)',
-    async _adapter => {
+    async (_adapter) => {
       // NOTE: matcher test didn't catch it because both insert and query has the same bug
       let adapter = _adapter
       const number = 1590485104033
@@ -1139,7 +1310,7 @@ export default () => [
       const allRecords = await adapter.query(taskQuery())
 
       indexedNaughtyStrings.forEach(([id, string]) => {
-        const record = allRecords.find(model => model.id === id)
+        const record = allRecords.find((model) => model.id === id)
         // console.log(string, record)
         // KNOWN ISSUE: non-JSI adapter implementation gets confused by this (it's a BOM mark)
         if (

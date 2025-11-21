@@ -1,4 +1,4 @@
-import {keys, values} from 'rambdax';
+import { keys, values } from 'rambdax'
 import type {
   FTS5TableSchema,
   TableSchema,
@@ -17,6 +17,7 @@ import type {
   RemoveIndexMigrationStep,
   DropFTS5TableMigrationStep,
   CreateFTS5TableMigrationStep,
+  SetDefaultValueMigrationStep,
 } from '../../../Schema/migrations'
 import type { SQL } from '../index'
 
@@ -28,13 +29,18 @@ const standardColumns = `"id" primary key, "_changed", "_status"`
 
 const encodeCreateTable: (arg1: TableSchema) => SQL = ({ name, columns }) => {
   const columnsSQL = [standardColumns]
-    .concat(keys(columns).map(column => encodeName(column)))
+    .concat(
+      keys(columns).map(
+        (column) =>
+          `${encodeName(column)}${columns[column ?? '']?.defaultValue !== undefined ? ` DEFAULT ${encodeValue(columns[column ?? '']?.defaultValue)}` : ''}`,
+      ),
+    )
     .join(', ')
   return `create table ${encodeName(name)} (${columnsSQL});`
 }
 
 const encodeCreateFTS5Table: (arg1: FTS5TableSchema) => SQL = ({ name, columns, contentTable }) => {
-  const columnsSQL = columns.map(column => encodeName(column)).join(', ')
+  const columnsSQL = columns.map((column) => encodeName(column)).join(', ')
 
   return `
     create virtual table ${encodeName(name)} using fts5(id, ${columnsSQL}, prefix ='2 3 4');
@@ -44,10 +50,18 @@ const encodeCreateFTS5Table: (arg1: FTS5TableSchema) => SQL = ({ name, columns, 
   `
 }
 
-const encodeFTS5SyncProcedures = ({ name, columns, contentTable }: { name: string, columns: string[], contentTable: string }) => {
-  const columnsSQL = columns.map(column => encodeName(column)).join(', ')
+const encodeFTS5SyncProcedures = ({
+  name,
+  columns,
+  contentTable,
+}: {
+  name: string
+  columns: string[]
+  contentTable: string
+}) => {
+  const columnsSQL = columns.map((column) => encodeName(column)).join(', ')
 
-  const newColumnsSQL = columns.map(column => `new.${encodeName(column)}`).join(', ')
+  const newColumnsSQL = columns.map((column) => `new.${encodeName(column)}`).join(', ')
 
   return `
     create trigger ${encodeName(`${name}_ai`)} after insert on ${encodeName(contentTable)} begin
@@ -79,7 +93,7 @@ const encodeDropFTS5SyncProcedures = ({ name }: { name: string }) => {
   `
 }
 
-const encodeFTS5Table: (arg1: FTS5TableSchema) => SQL = tableSchema =>
+const encodeFTS5Table: (arg1: FTS5TableSchema) => SQL = (tableSchema) =>
   encodeCreateFTS5Table(tableSchema) +
   encodeFTS5SyncProcedures(tableSchema)
     .replaceAll(/[\r\n\t]/g, '')
@@ -95,14 +109,14 @@ const encodeIndex: (arg1: ColumnSchema, arg2: TableName<any>) => SQL = (column, 
 
 const encodeTableIndicies: (arg1: TableSchema) => SQL = ({ name: tableName, columns }) =>
   values(columns)
-    .map(column => encodeIndex((column as any), tableName))
+    .map((column) => encodeIndex(column as any, tableName))
     .concat([`create index "${tableName}__status" on ${encodeName(tableName)} ("_status");`])
     .join('')
 
 const transform = (sql: string, transformer?: ((arg1: string) => string) | null) =>
   transformer ? transformer(sql) : sql
 
-const encodeTable: (arg1: TableSchema) => SQL = table =>
+const encodeTable: (arg1: TableSchema) => SQL = (table) =>
   transform(encodeCreateTable(table) + encodeTableIndicies(table), table.unsafeSql)
 
 export const encodeSchema: (arg1: AppSchema) => SQL = ({ tables, fts5Tables, unsafeSql }) => {
@@ -112,7 +126,7 @@ export const encodeSchema: (arg1: AppSchema) => SQL = ({ tables, fts5Tables, uns
 
   const fts5Sql = values(fts5Tables as any)
     .map(encodeFTS5Table)
-    .join('');
+    .join('')
 
   return transform(sql + fts5Sql, unsafeSql)
 }
@@ -120,11 +134,16 @@ export const encodeSchema: (arg1: AppSchema) => SQL = ({ tables, fts5Tables, uns
 const encodeDropFTS5TableMigrationStep: (arg1: DropFTS5TableMigrationStep) => SQL = ({ name }) => {
   const tableNameTyped = tableName(name)
   // @ts-ignore
-  return (encodeDropFTS5Table({ name: tableNameTyped }) + encodeDropFTS5SyncProcedures({ name: tableNameTyped }));
-};
+  return (
+    // @ts-ignore
+    encodeDropFTS5Table({ name: tableNameTyped }) +
+    encodeDropFTS5SyncProcedures({ name: tableNameTyped })
+  )
+}
 
-const encodeCreateFTS5TableMigrationStep: (arg1: CreateFTS5TableMigrationStep) => SQL = ({ schema }) =>
-  encodeFTS5Table(schema)
+const encodeCreateFTS5TableMigrationStep: (arg1: CreateFTS5TableMigrationStep) => SQL = ({
+  schema,
+}) => encodeFTS5Table(schema)
 
 const encodeCreateTableMigrationStep: (arg1: CreateTableMigrationStep) => SQL = ({ schema }) =>
   encodeTable(schema)
@@ -135,7 +154,7 @@ const encodeAddColumnsMigrationStep: (arg1: AddColumnsMigrationStep) => SQL = ({
   unsafeSql,
 }) =>
   columns
-    .map(column => {
+    .map((column) => {
       const addColumn = `alter table ${encodeName(table)} add ${encodeName(column.name)};`
       const setDefaultValue = `update ${encodeName(table)} set ${encodeName(
         column.name,
@@ -146,7 +165,10 @@ const encodeAddColumnsMigrationStep: (arg1: AddColumnsMigrationStep) => SQL = ({
     })
     .join('')
 
-const encodeDropTableMigrationStep: (arg1: DropTableMigrationStep) => SQL = ({ table, unsafeSql }) => {
+const encodeDropTableMigrationStep: (arg1: DropTableMigrationStep) => SQL = ({
+  table,
+  unsafeSql,
+}) => {
   const sql = `drop table if exists ${encodeName(table)};`
   return transform(sql, unsafeSql)
 }
@@ -158,7 +180,7 @@ const encodeDropColumnsMigrationStep: (arg1: DropColumnsMigrationStep) => SQL = 
 }) => {
   // SQLite 3.35.0+ supports DROP COLUMN
   const sql = columns
-    .map(column => `alter table ${encodeName(table)} drop column ${encodeName(column)};`)
+    .map((column) => `alter table ${encodeName(table)} drop column ${encodeName(column)};`)
     .join('')
   return transform(sql, unsafeSql)
 }
@@ -183,9 +205,24 @@ const encodeRemoveIndexMigrationStep: (arg1: RemoveIndexMigrationStep) => SQL = 
   return transform(sql, unsafeSql)
 }
 
-export const encodeMigrationSteps: (arg1: MigrationStep[]) => SQL = steps =>
+const encodeSetDefaultValueMigrationStep: (arg1: SetDefaultValueMigrationStep) => SQL = ({
+  table,
+  column,
+  value,
+}) => {
+  const randomColumnName = `_${Math.random().toString(36).substring(2, 15)}`
+  const sql = `
+    alter table ${encodeName(table)} rename column ${encodeName(column)} to ${encodeName(randomColumnName)};
+    alter table ${encodeName(table)} add column ${encodeName(column)} DEFAULT ${encodeValue(value)};
+    update ${encodeName(table)} set ${encodeName(column)} = ${encodeValue(value)};
+    alter table ${encodeName(table)} drop column ${encodeName(randomColumnName)};
+  `
+  return transform(sql)
+}
+
+export const encodeMigrationSteps: (arg1: MigrationStep[]) => SQL = (steps) =>
   steps
-    .map(step => {
+    .map((step) => {
       if (step.type === 'create_table') {
         return encodeCreateTableMigrationStep(step)
       }
@@ -205,6 +242,8 @@ export const encodeMigrationSteps: (arg1: MigrationStep[]) => SQL = steps =>
         return encodeAddIndexMigrationStep(step)
       } else if (step.type === 'remove_index') {
         return encodeRemoveIndexMigrationStep(step)
+      } else if (step.type === 'set_default_value') {
+        return encodeSetDefaultValueMigrationStep(step)
       }
 
       throw new Error(`Unsupported migration step ${(step as any).type}`)

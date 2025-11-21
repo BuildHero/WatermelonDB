@@ -1,5 +1,5 @@
 // @ts-nocheck
-import Loki, {LokiCollection} from 'lokijs';
+import Loki, { LokiCollection } from 'lokijs'
 import { prop, forEach, values } from 'rambdax'
 import { logger } from '../../../utils/common'
 
@@ -28,15 +28,15 @@ import type { LokiAdapterOptions } from '../index'
 const SCHEMA_VERSION_KEY = '_loki_schema_version'
 
 export default class LokiExecutor {
-  options: LokiAdapterOptions;
+  options: LokiAdapterOptions
 
-  schema: AppSchema;
+  schema: AppSchema
 
-  migrations: SchemaMigrations | null | undefined;
+  migrations: SchemaMigrations | null | undefined
 
-  loki: Loki;
+  loki: Loki
 
-  cachedRecords: Map<TableName<any>, Set<RecordId>> = new Map();
+  cachedRecords: Map<TableName<any>, Set<RecordId>> = new Map()
 
   constructor(options: LokiAdapterOptions) {
     const { schema, migrations } = options
@@ -136,9 +136,9 @@ export default class LokiExecutor {
     // TODO: Only add to cached records if all is successful
     // TODO: Transactionality
 
-    const recordsToCreate: Partial<Record<TableName<any>, RawRecord[]>> = {};
+    const recordsToCreate: Partial<Record<TableName<any>, RawRecord[]>> = {}
 
-    operations.forEach(operation => {
+    operations.forEach((operation) => {
       const [type, table, raw] = operation
       switch (type) {
         case 'create':
@@ -160,12 +160,12 @@ export default class LokiExecutor {
       this.loki.getCollection(table).insert(raws, shouldRebuildIndexAfterIndex)
 
       const cache = this.getCache(table)
-      raws.forEach(raw => {
+      raws.forEach((raw) => {
         cache.add(raw.id)
       })
     })
 
-    operations.forEach(operation => {
+    operations.forEach((operation) => {
       const [type, table, rawOrId] = operation
       switch (type) {
         case 'update':
@@ -192,7 +192,7 @@ export default class LokiExecutor {
 
   destroyDeletedRecords(table: TableName<any>, records: RecordId[]): void {
     const collection = this.loki.getCollection(table)
-    forEach(recordId => {
+    forEach((recordId) => {
       const record = collection.by('id', recordId)
 
       record && collection.remove(record)
@@ -250,7 +250,7 @@ export default class LokiExecutor {
     logger.log('[WatermelonDB][Loki] Setting up schema')
 
     // Add collections
-    values(this.schema.tables).forEach(tableSchema => {
+    values(this.schema.tables).forEach((tableSchema) => {
       this._addCollection(tableSchema)
     })
 
@@ -269,7 +269,7 @@ export default class LokiExecutor {
   _addCollection(tableSchema: TableSchema): void {
     const { name, columns } = tableSchema
     const indexedColumns = values(columns).reduce<Array<any>>(
-      (indexes, column) => (column.isIndexed ? indexes.concat([(column.name as string)]) : indexes),
+      (indexes, column) => (column.isIndexed ? indexes.concat([column.name as string]) : indexes),
       [],
     )
 
@@ -341,7 +341,7 @@ export default class LokiExecutor {
   }
 
   async _migrate(steps: MigrationStep[]): Promise<void> {
-    steps.forEach(step => {
+    steps.forEach((step) => {
       if (step.type === 'create_table') {
         this._executeCreateTableMigration(step)
       } else if (step.type === 'add_columns') {
@@ -367,42 +367,29 @@ export default class LokiExecutor {
     logger.log(`[WatermelonDB][Loki] Migration successful`)
   }
 
-  _executeCreateTableMigration(
-    {
-      schema,
-    }: CreateTableMigrationStep,
-  ): void {
+  _executeCreateTableMigration({ schema }: CreateTableMigrationStep): void {
     this._addCollection(schema)
   }
 
-  _executeAddColumnsMigration(
-    {
-      table,
-      columns,
-    }: AddColumnsMigrationStep,
-  ): void {
+  _executeAddColumnsMigration({ table, columns }: AddColumnsMigrationStep): void {
     const collection = this.loki.getCollection(table)
 
     // update ALL records in the collection, adding new fields
-    collection.findAndUpdate({}, record => {
-      columns.forEach(column => {
+    collection.findAndUpdate({}, (record) => {
+      columns.forEach((column) => {
         setRawSanitized(record, column.name, null, column)
       })
     })
 
     // add indexes, if needed
-    columns.forEach(column => {
+    columns.forEach((column) => {
       if (column.isIndexed) {
         collection.ensureIndex(column.name)
       }
     })
   }
 
-  _executeDropTableMigration(
-    {
-      table,
-    }: DropTableMigrationStep,
-  ): void {
+  _executeDropTableMigration({ table }: DropTableMigrationStep): void {
     // Remove the collection from LokiJS
     const collection = this.loki.getCollection(table)
     if (collection) {
@@ -410,31 +397,21 @@ export default class LokiExecutor {
     }
   }
 
-  _executeDropColumnsMigration(
-    {
-      table,
-      columns,
-    }: DropColumnsMigrationStep,
-  ): void {
+  _executeDropColumnsMigration({ table, columns }: DropColumnsMigrationStep): void {
     const collection = this.loki.getCollection(table)
     if (!collection) {
       return
     }
 
     // Remove the specified columns from all records
-    collection.findAndUpdate({}, record => {
-      columns.forEach(column => {
+    collection.findAndUpdate({}, (record) => {
+      columns.forEach((column) => {
         delete record[column]
       })
     })
   }
 
-  _executeAddIndexMigration(
-    {
-      table,
-      column,
-    }: AddIndexMigrationStep,
-  ): void {
+  _executeAddIndexMigration({ table, column }: AddIndexMigrationStep): void {
     const collection = this.loki.getCollection(table)
     if (!collection) {
       return
@@ -444,12 +421,7 @@ export default class LokiExecutor {
     collection.ensureIndex(column)
   }
 
-  _executeRemoveIndexMigration(
-    {
-      table,
-      column,
-    }: RemoveIndexMigrationStep,
-  ): void {
+  _executeRemoveIndexMigration({ table, column }: RemoveIndexMigrationStep): void {
     const collection = this.loki.getCollection(table)
     if (!collection) {
       return
@@ -466,7 +438,7 @@ export default class LokiExecutor {
   // Maps records to their IDs if the record is already cached on JS side
   _compactQueryResults(records: DirtyRaw[], table: TableName<any>): CachedQueryResult {
     const cache = this.getCache(table)
-    return records.map(raw => {
+    return records.map((raw) => {
       const { id } = raw
 
       if (cache.has(id)) {
@@ -482,9 +454,12 @@ export default class LokiExecutor {
     return this.loki.getCollection('local_storage')
   }
 
-  _findLocal(key: string): {
-    value: string;
-  } | null | undefined {
+  _findLocal(key: string):
+    | {
+        value: string
+      }
+    | null
+    | undefined {
     const localStorage = this._localStorage
     return localStorage && localStorage.by('key', key)
   }
