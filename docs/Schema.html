@@ -179,6 +179,12 @@ export const mySchema = appSchema({
 <p>Columns have one of three types: <code>string</code>, <code>number</code>, or <code>boolean</code>.</p>
 <p>Fields of those types will default to <code>''</code>, <code>0</code>, or <code>false</code> respectively, if you create a record with a missing field.</p>
 <p>To allow fields to be <code>null</code>, mark the column as <code>isOptional: true</code>.</p>
+<p>To set a custom default value for a column, use <code>defaultValue</code>. This is useful when you want a specific default value other than the type defaults. For example:</p>
+<pre><code class="language-js">{ name: 'priority', type: 'number', defaultValue: 5 },
+{ name: 'title', type: 'string', defaultValue: 'Untitled' },
+{ name: 'is_published', type: 'boolean', defaultValue: false },
+</code></pre>
+<p>When creating new records, if a field is not provided, it will use the <code>defaultValue</code> if specified, otherwise it will use the type defaults (<code>''</code>, <code>0</code>, or <code>false</code>). Note that <code>defaultValue</code> is only supported with SQLiteAdapter.</p>
 <h3><a class="header" href="#naming-conventions" id="naming-conventions">Naming conventions</a></h3>
 <p>To add a relation to a table (e.g. <code>Post</code> where a <code>Comment</code> was published, or author of a comment), add a string column ending with <code>_id</code>:</p>
 <pre><code class="language-js">{ name: 'post_id', type: 'string' },

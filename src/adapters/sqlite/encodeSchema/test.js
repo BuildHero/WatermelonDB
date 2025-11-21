@@ -7,6 +7,7 @@ import {
   dropColumns,
   addIndex,
   removeIndex,
+  setDefaultValue,
 } from '../../../Schema/migrations'
 
 import { encodeSchema, encodeMigrationSteps } from './index'
@@ -194,5 +195,89 @@ describe('encodeSchema', () => {
       'drop index if exists "posts_unused_index";'
 
     expect(encodeMigrationSteps(migrationSteps)).toBe(expectedSQL)
+  })
+  it('encodes setDefaultValue migration step', () => {
+    const migrationSteps = [
+      setDefaultValue({
+        table: 'tasks',
+        column: 'priority',
+        value: 5,
+      }),
+    ]
+
+    const sql = encodeMigrationSteps(migrationSteps)
+    const randomColumnPattern = /"_[\da-z]+"/
+
+    expect(sql).toMatch(
+      new RegExp(
+        `alter table "tasks" rename column "priority" to ${randomColumnPattern.source};` +
+          `\\s+alter table "tasks" add column "priority" DEFAULT 5;` +
+          `\\s+update "tasks" set "priority" = 5;` +
+          `\\s+alter table "tasks" drop column ${randomColumnPattern.source};`,
+      ),
+    )
+  })
+  it('encodes setDefaultValue migration step with different value types', () => {
+    const migrationSteps = [
+      setDefaultValue({
+        table: 'posts',
+        column: 'title',
+        value: 'Untitled',
+      }),
+      setDefaultValue({
+        table: 'posts',
+        column: 'is_published',
+        value: true,
+      }),
+      setDefaultValue({
+        table: 'posts',
+        column: 'view_count',
+        value: 0,
+      }),
+      setDefaultValue({
+        table: 'posts',
+        column: 'deleted_at',
+        value: null,
+      }),
+    ]
+
+    const sql = encodeMigrationSteps(migrationSteps)
+    const randomColumnPattern = /"_[\da-z]+"/
+
+    expect(sql).toMatch(
+      new RegExp(
+        `alter table "posts" rename column "title" to ${randomColumnPattern.source};` +
+          `\\s+alter table "posts" add column "title" DEFAULT 'Untitled';` +
+          `\\s+update "posts" set "title" = 'Untitled';` +
+          `\\s+alter table "posts" drop column ${randomColumnPattern.source};`,
+      ),
+    )
+
+    expect(sql).toMatch(
+      new RegExp(
+        `alter table "posts" rename column "is_published" to ${randomColumnPattern.source};` +
+          `\\s+alter table "posts" add column "is_published" DEFAULT 1;` +
+          `\\s+update "posts" set "is_published" = 1;` +
+          `\\s+alter table "posts" drop column ${randomColumnPattern.source};`,
+      ),
+    )
+
+    expect(sql).toMatch(
+      new RegExp(
+        `alter table "posts" rename column "view_count" to ${randomColumnPattern.source};` +
+          `\\s+alter table "posts" add column "view_count" DEFAULT 0;` +
+          `\\s+update "posts" set "view_count" = 0;` +
+          `\\s+alter table "posts" drop column ${randomColumnPattern.source};`,
+      ),
+    )
+
+    expect(sql).toMatch(
+      new RegExp(
+        `alter table "posts" rename column "deleted_at" to ${randomColumnPattern.source};` +
+          `\\s+alter table "posts" add column "deleted_at" DEFAULT null;` +
+          `\\s+update "posts" set "deleted_at" = null;` +
+          `\\s+alter table "posts" drop column ${randomColumnPattern.source};`,
+      ),
+    )
   })
 })

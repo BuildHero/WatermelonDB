@@ -17,6 +17,7 @@ import type {
   RemoveIndexMigrationStep,
   DropFTS5TableMigrationStep,
   CreateFTS5TableMigrationStep,
+  SetDefaultValueMigrationStep,
 } from '../../../Schema/migrations'
 import type { SQL } from '../index'
 
@@ -204,6 +205,21 @@ const encodeRemoveIndexMigrationStep: (arg1: RemoveIndexMigrationStep) => SQL = 
   return transform(sql, unsafeSql)
 }
 
+const encodeSetDefaultValueMigrationStep: (arg1: SetDefaultValueMigrationStep) => SQL = ({
+  table,
+  column,
+  value,
+}) => {
+  const randomColumnName = `_${Math.random().toString(36).substring(2, 15)}`
+  const sql = `
+    alter table ${encodeName(table)} rename column ${encodeName(column)} to ${encodeName(randomColumnName)};
+    alter table ${encodeName(table)} add column ${encodeName(column)} DEFAULT ${encodeValue(value)};
+    update ${encodeName(table)} set ${encodeName(column)} = ${encodeValue(value)};
+    alter table ${encodeName(table)} drop column ${encodeName(randomColumnName)};
+  `
+  return transform(sql)
+}
+
 export const encodeMigrationSteps: (arg1: MigrationStep[]) => SQL = (steps) =>
   steps
     .map((step) => {
@@ -226,6 +242,8 @@ export const encodeMigrationSteps: (arg1: MigrationStep[]) => SQL = (steps) =>
         return encodeAddIndexMigrationStep(step)
       } else if (step.type === 'remove_index') {
         return encodeRemoveIndexMigrationStep(step)
+      } else if (step.type === 'set_default_value') {
+        return encodeSetDefaultValueMigrationStep(step)
       }
 
       throw new Error(`Unsupported migration step ${(step as any).type}`)

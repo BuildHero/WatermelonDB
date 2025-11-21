@@ -288,6 +288,11 @@ export default appSchema({
           table: 'posts',
           column: 'author_id',
         }),
+        setDefaultValue({
+          table: 'posts',
+          column: 'priority',
+          value: 0,
+        }),
       ],
     },
     {
@@ -317,6 +322,7 @@ export default appSchema({
 <li><code>dropColumns({ table: 'table_name', columns: ['column1', 'column2'] })</code> - drops one or multiple columns from an existing table (requires SQLite 3.35.0+)</li>
 <li><code>addIndex({ table: 'table_name', column: 'column_name' })</code> - adds an index to a specific column</li>
 <li><code>removeIndex({ table: 'table_name', column: 'column_name' })</code> - removes an index from a specific column</li>
+<li><code>setDefaultValue({ table: 'table_name', column: 'column_name', value: defaultValue })</code> - sets a default value for an existing column. This will update all existing records to have the default value, and new records will automatically get this default value. Only supported with SQLiteAdapter. Example: <code>setDefaultValue({ table: 'posts', column: 'priority', value: 0 })</code></li>
 <li>Other types of migrations (e.g. renaming tables and columns) are not yet implemented. See <a href="https://github.com/Nozbe/WatermelonDB/blob/master/src/Schema/migrations/index.js"><code>migrations/index.js</code></a>. Please contribute!</li>
 </ul>
 <h2><a class="header" href="#database-reseting-and-other-edge-cases" id="database-reseting-and-other-edge-cases">Database reseting and other edge cases</a></h2>

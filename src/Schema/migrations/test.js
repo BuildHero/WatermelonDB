@@ -6,6 +6,7 @@ import {
   dropColumns,
   addIndex,
   removeIndex,
+  setDefaultValue,
 } from './index'
 import { stepsForMigration } from './stepsForMigration'
 
@@ -229,6 +230,30 @@ describe('migration step functions', () => {
       table: 'posts',
       column: 'unused_index',
     })
+    expect(setDefaultValue({ table: 'posts', column: 'priority', value: 5 })).toEqual({
+      type: 'set_default_value',
+      table: 'posts',
+      column: 'priority',
+      value: 5,
+    })
+    expect(setDefaultValue({ table: 'tasks', column: 'title', value: 'Untitled' })).toEqual({
+      type: 'set_default_value',
+      table: 'tasks',
+      column: 'title',
+      value: 'Untitled',
+    })
+    expect(setDefaultValue({ table: 'posts', column: 'is_published', value: true })).toEqual({
+      type: 'set_default_value',
+      table: 'posts',
+      column: 'is_published',
+      value: true,
+    })
+    expect(setDefaultValue({ table: 'posts', column: 'deleted_at', value: null })).toEqual({
+      type: 'set_default_value',
+      table: 'posts',
+      column: 'deleted_at',
+      value: null,
+    })
   })
 })
 
@@ -285,5 +310,28 @@ describe('stepsForMigration', () => {
     expect(stepsForMigration({ migrations, fromVersion: 1, toVersion: 5 })).toEqual(null)
     expect(stepsForMigration({ migrations, fromVersion: 3, toVersion: 6 })).toEqual(null)
     expect(stepsForMigration({ migrations, fromVersion: 5, toVersion: 6 })).toEqual(null)
+  })
+  it('finds setDefaultValue migration steps', () => {
+    const step1 = setDefaultValue({
+      table: 'posts',
+      column: 'priority',
+      value: 5,
+    })
+    const step2 = setDefaultValue({
+      table: 'tasks',
+      column: 'title',
+      value: 'Untitled',
+    })
+
+    const migrations = schemaMigrations({
+      migrations: [
+        { toVersion: 3, steps: [step2] },
+        { toVersion: 2, steps: [step1] },
+      ],
+    })
+
+    expect(stepsForMigration({ migrations, fromVersion: 1, toVersion: 2 })).toEqual([step1])
+    expect(stepsForMigration({ migrations, fromVersion: 1, toVersion: 3 })).toEqual([step1, step2])
+    expect(stepsForMigration({ migrations, fromVersion: 2, toVersion: 3 })).toEqual([step2])
   })
 })
