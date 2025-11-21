@@ -13,6 +13,7 @@ export type ColumnSchema = $RE<{
   type: ColumnType
   isOptional?: boolean
   isIndexed?: boolean
+  defaultValue?: any
 }>
 
 export type ColumnMap = Partial<Record<ColumnName, ColumnSchema>>

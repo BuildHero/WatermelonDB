@@ -26,7 +26,10 @@ describe('encodeSchema', () => {
         }),
         tableSchema({
           name: 'comments',
-          columns: [{ name: 'is_ended', type: 'boolean' }, { name: 'reactions', type: 'number' }],
+          columns: [
+            { name: 'is_ended', type: 'boolean' },
+            { name: 'reactions', type: 'number' },
+          ],
         }),
       ],
     })
@@ -41,6 +44,28 @@ describe('encodeSchema', () => {
 
     expect(encodeSchema(testSchema)).toBe(expectedSchema)
   })
+  it('encodes schema with defaultValue', () => {
+    const testSchema = appSchema({
+      version: 1,
+      tables: [
+        tableSchema({
+          name: 'tasks',
+          columns: [
+            { name: 'title', type: 'string', defaultValue: 'Untitled' },
+            { name: 'priority', type: 'number', defaultValue: 0 },
+            { name: 'is_completed', type: 'boolean', defaultValue: false },
+            { name: 'status', type: 'string', defaultValue: null },
+          ],
+        }),
+      ],
+    })
+
+    const expectedSchema =
+      'create table "tasks" ("id" primary key, "_changed", "_status", "title" DEFAULT \'Untitled\', "priority" DEFAULT 0, "is_completed" DEFAULT 0, "status" DEFAULT null);' +
+      'create index "tasks__status" on "tasks" ("_status");'
+
+    expect(encodeSchema(testSchema)).toBe(expectedSchema)
+  })
   it(`encodes schema with unsafe SQL`, () => {
     const testSchema = appSchema({
       version: 1,
@@ -48,10 +73,10 @@ describe('encodeSchema', () => {
         tableSchema({
           name: 'tasks',
           columns: [{ name: 'author_id', type: 'string', isIndexed: true }],
-          unsafeSql: sql => sql.replace(/create table "tasks" [^)]+\)/, '$& without rowid'),
+          unsafeSql: (sql) => sql.replace(/create table "tasks" [^)]+\)/, '$& without rowid'),
         }),
       ],
-      unsafeSql: sql => `create blabla;${sql}`,
+      unsafeSql: (sql) => `create blabla;${sql}`,
     })
 
     const expectedSchema =
@@ -99,17 +124,35 @@ describe('encodeSchema', () => {
 
     expect(encodeMigrationSteps(migrationSteps)).toBe(expectedSQL)
   })
+  it('encodes migrations with defaultValue', () => {
+    const migrationSteps = [
+      createTable({
+        name: 'tasks',
+        columns: [
+          { name: 'title', type: 'string', defaultValue: 'New Task' },
+          { name: 'priority', type: 'number', defaultValue: 1 },
+          { name: 'is_completed', type: 'boolean', defaultValue: true },
+        ],
+      }),
+    ]
+
+    const expectedSQL =
+      `create table "tasks" ("id" primary key, "_changed", "_status", "title" DEFAULT 'New Task', "priority" DEFAULT 1, "is_completed" DEFAULT 1);` +
+      `create index "tasks__status" on "tasks" ("_status");`
+
+    expect(encodeMigrationSteps(migrationSteps)).toBe(expectedSQL)
+  })
   it(`encodes migrations with unsafe SQL`, () => {
     const migrationSteps = [
       addColumns({
         table: 'posts',
         columns: [{ name: 'subtitle', type: 'string', isOptional: true }],
-        unsafeSql: sql => `${sql}bla;`,
+        unsafeSql: (sql) => `${sql}bla;`,
       }),
       createTable({
         name: 'comments',
         columns: [{ name: 'body', type: 'string' }],
-        unsafeSql: sql => sql.replace(/create table [^)]+\)/, '$& without rowid'),
+        unsafeSql: (sql) => sql.replace(/create table [^)]+\)/, '$& without rowid'),
       }),
       unsafeExecuteSql('boop;'),
     ]
