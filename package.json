@@ -26,7 +26,7 @@
   "codegenConfig": {
     "name": "WatermelonDBSpec",
     "type": "all",
-    "jsSrcsDir": "native/specs",
+    "jsSrcsDir": "specs",
     "android": {
       "javaPackageName": "com.watermelondb.specs"
     }
