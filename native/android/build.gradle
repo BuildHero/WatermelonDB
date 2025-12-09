@@ -54,9 +54,8 @@ android {
 }
 
 react {
-    root = file("../../")
     codegenDir = file("$rootDir/../node_modules/react-native-codegen")
-    jsRootDir = file("${root}/native/specs")
+    jsRootDir = file("../specs")
     libraryName = "WatermelonDBSpec"
     codegenJavaPackageName = "com.watermelondb.specs"
 }
