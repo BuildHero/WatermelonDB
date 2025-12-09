@@ -53,6 +53,13 @@ android {
     }
 }
 
+react {
+    codegenDir = file("$rootDir/../node_modules/react-native-codegen")
+    jsRootDir = file("../specs")
+    libraryName = "WatermelonDBSpec"
+    codegenJavaPackageName = "com.watermelondb.specs"
+}
+
 dependencies {
     api("androidx.sqlite:sqlite-ktx:2.4.0")
     compileOnly files('libs/sqlite-android.aar')
