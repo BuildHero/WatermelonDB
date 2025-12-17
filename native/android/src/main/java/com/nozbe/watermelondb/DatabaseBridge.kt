@@ -119,7 +119,15 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
         schemaVersion: Int,
         promise: Promise
     ) {
-        assert(connections[tag] == null) { "A driver with tag $tag already set up" }
+        val existingConnection = connections[tag]
+        if (existingConnection != null) {
+            android.util.Log.i("WatermelonDB", "Connection with tag $tag already exists. Reusing existing connection.")
+            val promiseMap = Arguments.createMap()
+            promiseMap.putString("code", "ok")
+            promise.resolve(promiseMap)
+            return
+        }
+        
         val promiseMap = Arguments.createMap()
 
         try {
