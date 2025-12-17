@@ -23,17 +23,35 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
     companion object {
-        // Static singleton instance for Turbo Module access
         @Volatile
         private var INSTANCE: DatabaseBridge? = null
+        
+        sealed class Connection {
+            class Connected(val driver: DatabaseDriver) : Connection()
+            class Waiting(val queueInWaiting: ArrayList<(() -> Unit)>) : Connection()
+
+            val queue: ArrayList<(() -> Unit)>
+                get() = when (this) {
+                    is Connected -> arrayListOf()
+                    is Waiting -> this.queueInWaiting
+                }
+        }
+        
+        private val connections: MutableMap<ConnectionTag, Connection> = mutableMapOf()
+        
+        data class ConnectionMetadata(
+            val databaseName: String,
+            val schemaVersion: Int
+        )
+        
+        private val connectionMetadata: MutableMap<ConnectionTag, ConnectionMetadata> = mutableMapOf()
         
         fun getInstance(): DatabaseBridge? = INSTANCE
         
         private fun setInstance(instance: DatabaseBridge) {
             synchronized(this) {
                 if (INSTANCE != null) {
-                    // Log warning if we're replacing an existing instance
-                    android.util.Log.w("WatermelonDB", "DatabaseBridge singleton being replaced. This may indicate multiple DatabaseBridge instances.")
+                    android.util.Log.i("WatermelonDB", "DatabaseBridge instance being replaced. Preserving ${connections.size} existing connections.")
                 }
                 INSTANCE = instance
             }
@@ -41,31 +59,11 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
     }
 
     init {
-        // Store this instance as the singleton when created
         setInstance(this)
+        android.util.Log.i("WatermelonDB", "DatabaseBridge initialized with ${connections.size} existing connections")
     }
-
-    private val connections: MutableMap<ConnectionTag, Connection> = mutableMapOf()
-    
-    data class ConnectionMetadata(
-        val databaseName: String,
-        val schemaVersion: Int
-    )
-    
-    private val connectionMetadata: MutableMap<ConnectionTag, ConnectionMetadata> = mutableMapOf()
 
     override fun getName(): String = "DatabaseBridge"
-
-    sealed class Connection {
-        class Connected(val driver: DatabaseDriver) : Connection()
-        class Waiting(val queueInWaiting: ArrayList<(() -> Unit)>) : Connection()
-
-        val queue: ArrayList<(() -> Unit)>
-            get() = when (this) {
-                is Connected -> arrayListOf()
-                is Waiting -> this.queueInWaiting
-            }
-    }
 
     private val affectedTables = mutableSetOf<String>()
     private var batchTimer: Timer? = null
@@ -311,8 +309,7 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
                 try {
                     val driver = DatabaseDriver(
                         context = reactContext,
-                        dbName = metadata.databaseName,
-                        schemaVersion = metadata.schemaVersion
+                        dbName = metadata.databaseName
                     )
                     connections[tag] = Connection.Connected(driver)
                     android.util.Log.i("WatermelonDB", "Successfully recovered connection for tag $tag")
