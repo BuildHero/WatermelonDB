@@ -43,6 +43,8 @@ export default class Collection<Record extends Model> {
 
   _cache: RecordCache<Record>
 
+  _cacheVersion: number = 0
+
   constructor(database: Database, ModelClass: ModelClass<Record>) {
     this.database = database
     this.modelClass = ModelClass
@@ -50,6 +52,7 @@ export default class Collection<Record extends Model> {
       ModelClass.table,
       (raw: RawRecord) => new ModelClass(this, raw),
       this._onCacheMiss.bind(this),
+      0,
     )
   }
 
@@ -292,6 +295,18 @@ export default class Collection<Record extends Model> {
       }
     }
     operations.forEach(collectionChangeNotifyModels)
+  }
+
+  _notifyExternalChange(): void {
+    this._subscribers.forEach(([subscriber]) => {
+      subscriber([])
+    })
+    this.changes.next([])
+  }
+
+  _invalidateCacheVersion(): void {
+    this._cacheVersion++
+    this._cache.version = this._cacheVersion
   }
 
   _subscribers: [(arg1: CollectionChangeSet<Record>) => void, any][] = []

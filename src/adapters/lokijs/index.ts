@@ -29,48 +29,48 @@ const {
 } = actions
 
 type LokiIDBSerializer = {
-  serializeChunk: (arg1: TableName<any>, arg2: DirtyRaw[]) => any;
-  deserializeChunk: (arg1: TableName<any>, arg2?: any) => DirtyRaw[];
-};
+  serializeChunk: (arg1: TableName<any>, arg2: DirtyRaw[]) => any
+  deserializeChunk: (arg1: TableName<any>, arg2?: any) => DirtyRaw[]
+}
 
 export type LokiAdapterOptions = {
-  dbName?: string | null | undefined;
-  autosave?: boolean;
-  schema: AppSchema;
-  migrations?: SchemaMigrations;
+  dbName?: string | null | undefined
+  autosave?: boolean
+  schema: AppSchema
+  migrations?: SchemaMigrations
   // (true by default) Although web workers may have some throughput benefits, disabling them
   // may lead to lower memory consumption, lower latency, and easier debugging
-  useWebWorker?: boolean;
-  useIncrementalIndexedDB?: boolean;
+  useWebWorker?: boolean
+  useIncrementalIndexedDB?: boolean
   // Called when internal IndexedDB version changed (most likely the database was deleted in another browser tab)
   // Pass a callback to force log out in this copy of the app as well
   // Note that this only works when using incrementalIDB and not using web workers
-  onIndexedDBVersionChange?: () => void;
+  onIndexedDBVersionChange?: () => void
   // Called when underlying IndexedDB encountered a quota exceeded error (ran out of allotted disk space for app)
   // This means that app can't save more data or that it will fall back to using in-memory database only
   // Note that this only works when `useWebWorker: false`
-  onQuotaExceededError?: (error: Error) => void;
+  onQuotaExceededError?: (error: Error) => void
   // Called when IndexedDB fetch has begun. Use this as an opportunity to execute code concurrently
   // while IDB does work on a separate thread.
   // Note that this only works when using incrementalIDB and not using web workers
-  onIndexedDBFetchStart?: () => void;
+  onIndexedDBFetchStart?: () => void
   // Called with a chunk (array of Loki documents) before it's saved to IndexedDB/loaded from IDB. You can use it to
   // manually compress on-disk representation for faster database loads.
   // Hint: Hand-written conversion of objects to arrays is very profitable for performance.
   // Note that this only works when using incrementalIDB and not using web workers
-  indexedDBSerializer?: LokiIDBSerializer;
+  indexedDBSerializer?: LokiIDBSerializer
   // -- internal --
-  _testLokiAdapter?: LokiMemoryAdapter;
-};
+  _testLokiAdapter?: LokiMemoryAdapter
+}
 
 export default class LokiJSAdapter implements DatabaseAdapter {
-  workerBridge: WorkerBridge;
+  workerBridge: WorkerBridge
 
-  schema: AppSchema;
+  schema: AppSchema
 
-  migrations: SchemaMigrations | null | undefined;
+  migrations: SchemaMigrations | null | undefined
 
-  _dbName: string | null | undefined;
+  _dbName: string | null | undefined
 
   constructor(options: LokiAdapterOptions) {
     const { schema, migrations, dbName } = options
@@ -110,7 +110,7 @@ export default class LokiJSAdapter implements DatabaseAdapter {
   async testClone(options: Partial<LokiAdapterOptions> = {}): Promise<LokiJSAdapter> {
     // Ensure data is saved to memory
     // @ts-ignore
-    const { executor } = this.workerBridge._worker._worker;
+    const { executor } = this.workerBridge._worker._worker
     executor.loki.close()
 
     // Copy
@@ -122,14 +122,10 @@ export default class LokiJSAdapter implements DatabaseAdapter {
       ...(this.migrations ? { migrations: this.migrations } : {}),
       _testLokiAdapter: lokiAdapter,
       ...options,
-    });
+    })
   }
 
-  find(
-    table: TableName<any>,
-    id: RecordId,
-    callback: ResultCallback<CachedFindResult>,
-  ): void {
+  find(table: TableName<any>, id: RecordId, callback: ResultCallback<CachedFindResult>): void {
     validateTable(table, this.schema)
     this.workerBridge.send(FIND, [table, id], callback, 'immutable', 'shallowCloneDeepObjects')
   }
@@ -189,11 +185,7 @@ export default class LokiJSAdapter implements DatabaseAdapter {
   }
 
   // Executes multiple prepared operations
-  batchImport(
-    _operations: BatchOperation[],
-    _srcDB: any,
-    _callback: ResultCallback<undefined>,
-  ): void {
+  batchImport(_tables: TableName<any>[], _srcDB: any, _callback: ResultCallback<undefined>): void {
     throw new Error('batchImport not implemented in LOKIJS')
   }
 
@@ -204,9 +196,11 @@ export default class LokiJSAdapter implements DatabaseAdapter {
   execSqlQuery(
     _sql: string,
     _params: any[],
-    _callback: ResultCallback<{
-      [key: string]: any;
-    }[]>,
+    _callback: ResultCallback<
+      {
+        [key: string]: any
+      }[]
+    >,
   ): void {
     throw new Error('execSqlQuery not implemented in LOKIJS')
   }

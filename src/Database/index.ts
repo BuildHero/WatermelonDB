@@ -49,14 +49,24 @@ export default class Database {
     this.schema = adapter.schema
     this.collections = new CollectionMap(this, modelClasses)
     this._actionsEnabled = actionsEnabled
+
+    if (this.adapter.underlyingAdapter && 'setDatabase' in this.adapter.underlyingAdapter) {
+      ;(this.adapter.underlyingAdapter as any).setDatabase(this)
+    }
   }
 
   get<T extends Model>(tableName: TableName<T>): Collection<T> {
     return this.collections.get(tableName)
   }
 
-  copyTables = async (tables: any, srcDB: any) => {
-    return this.adapter.batchImport(tables, srcDB)
+  copyTables = async (tables: TableName<any>[], srcDB: any) => {
+    await this.adapter.batchImport(tables, srcDB)
+
+    tables.forEach((table) => {
+      this.collections.get(table)._invalidateCacheVersion()
+    })
+
+    this.notify(tables)
   }
 
   enableNativeCDC = async () => {
@@ -131,25 +141,7 @@ export default class Database {
       batchOperations.length = 0
     }
 
-    // NOTE: We must make two passes to ensure all changes to caches are applied before subscribers are called
-    Object.entries(changeNotifications).forEach((notification) => {
-      const [table, changeSet]: [TableName<any>, CollectionChangeSet<any>] = notification as any
-      this.collections.get(table)._applyChangesToCache(changeSet)
-    })
-
-    Object.entries(changeNotifications).forEach((notification) => {
-      const [table, changeSet]: [TableName<any>, CollectionChangeSet<any>] = notification as any
-      this.collections.get(table)._notify(changeSet)
-    })
-
-    const affectedTables = Object.keys(changeNotifications)
-    const databaseChangeNotifySubscribers = ([tables, subscriber]: [any, any]): void => {
-      if (tables.some((table: any) => affectedTables.includes(table))) {
-        subscriber()
-      }
-    }
-    // @ts-ignore
-    this._subscribers.forEach(databaseChangeNotifySubscribers)
+    this.notify(changeNotifications)
     return undefined // shuts up flow
   }
 
@@ -189,6 +181,58 @@ export default class Database {
     const changesSignals = tables.map((table) => this.collections.get(table).changes)
 
     return merge$(...changesSignals).pipe(startWith(null))
+  }
+
+  notify(
+    input:
+      | Partial<Record<TableName<any>, CollectionChangeSet<any>>>
+      | TableName<any>[]
+      | TableName<any>,
+  ): void {
+    const tableChanges = this._normalizeNotifyInput(input)
+
+    // First pass: Apply all changes to cache
+    Object.entries(tableChanges).forEach(([table, changeSet]) => {
+      const collection = this.collections.get(table)
+      if (changeSet) {
+        collection._applyChangesToCache(changeSet)
+      }
+    })
+
+    // Second pass: Notify collection subscribers
+    Object.entries(tableChanges).forEach(([table, changeSet]) => {
+      const collection = this.collections.get(table)
+      if (changeSet) {
+        collection._notify(changeSet)
+      } else {
+        collection._notifyExternalChange()
+      }
+    })
+
+    // Third pass: Notify database subscribers (after all caches are populated)
+    const affectedTables = Object.keys(tableChanges)
+    this._subscribers.forEach(([tables, subscriber]) => {
+      if (tables.some((t) => affectedTables.includes(t))) {
+        subscriber()
+      }
+    })
+  }
+
+  _normalizeNotifyInput(
+    input:
+      | Partial<Record<TableName<any>, CollectionChangeSet<any>>>
+      | TableName<any>[]
+      | TableName<any>,
+  ): Record<TableName<any>, CollectionChangeSet<any> | null> {
+    if (typeof input === 'string') {
+      return { [input]: null }
+    }
+
+    if (Array.isArray(input)) {
+      return Object.fromEntries(input.map((table) => [table, null]))
+    }
+
+    return input as Record<TableName<any>, CollectionChangeSet<any>>
   }
 
   _subscribers: [TableName<any>[], () => void, any][] = []
