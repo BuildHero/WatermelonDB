@@ -1,6 +1,6 @@
 /* eslint-disable global-require */
 
-import {connectionTag, ConnectionTag, logger, invariant} from '../../utils/common';
+import { connectionTag, ConnectionTag, logger, invariant } from '../../utils/common'
 import { ResultCallback, mapValue, toPromise, fromPromise } from '../../utils/fp/Result'
 
 import type { RecordId } from '../../Model'
@@ -39,61 +39,80 @@ let makeDispatcher: any = null
 let DatabaseBridge: any = null
 let getDispatcherType: any = null
 
-export type { SQL, SQLiteArg, SQLiteQuery }
+export type { SQL, SQLiteArg, SQLiteQuery, NativeDispatcher, SQLiteAdapterOptions }
 
 // Hacky-ish way to create an object with NativeModule-like shape, but that can dispatch method
 // calls to async, synch NativeModule, or JSI implementation w/ type safety in rest of the impl
 
 export default class SQLiteAdapter implements DatabaseAdapter, SQLDatabaseAdapter {
-  schema: AppSchema;
+  schema: AppSchema
 
-  migrations: SchemaMigrations | null | undefined;
+  migrations: SchemaMigrations | null | undefined
 
-  _tag: ConnectionTag = connectionTag();
+  _tag: ConnectionTag = connectionTag()
 
-  _dbName: string;
+  _dbName: string
 
-  _dispatcherType: DispatcherType;
+  _dispatcherType: DispatcherType
 
-  _dispatcher: NativeDispatcher;
+  _dispatcher: NativeDispatcher
 
-  _initPromise: Promise<undefined>;
+  _initPromise: Promise<undefined>
 
-  _hybridJSIEnabled: boolean = false;
+  _hybridJSIEnabled: boolean = false
 
   constructor(options: SQLiteAdapterOptions) {
-    const dispatcher = require('./makeDispatcher')
-
-    makeDispatcher = dispatcher.makeDispatcher
-    DatabaseBridge = dispatcher.DatabaseBridge
-    getDispatcherType = dispatcher.getDispatcherType
-
-    // console.log(`---> Initializing new adapter (${this._tag})`)
-    const { dbName, schema, migrations } = options
+    const { dbName, schema, migrations, customDispatcher } = options
     this.schema = schema
     this.migrations = migrations
     this._dbName = this._getName(dbName)
 
-    this._dispatcherType = getDispatcherType(options)
-    this._dispatcher = makeDispatcher(this._dispatcherType, this._tag, this._dbName)
+    const useCustomDispatcher = customDispatcher && process.env.NODE_ENV !== 'test'
 
-    if (process.env.NODE_ENV !== 'production') {
-      invariant(
-        !('migrationsExperimental' in options),
-        'SQLiteAdapter `migrationsExperimental` option has been renamed to `migrations`',
-      )
-      invariant(
-        DatabaseBridge,
-        `NativeModules.DatabaseBridge is not defined! This means that you haven't properly linked WatermelonDB native module. Refer to docs for more details`,
-      )
-      // @ts-ignore
-      validateAdapter(this)
+    if (useCustomDispatcher) {
+      this._dispatcherType = 'asynchronous'
+      this._dispatcher = customDispatcher(this._tag, this._dbName, options)
+
+      if (process.env.NODE_ENV !== 'production') {
+        invariant(
+          typeof this._dispatcher === 'object' && this._dispatcher !== null,
+          'customDispatcher must return a valid NativeDispatcher object',
+        )
+        invariant(
+          !('migrationsExperimental' in options),
+          'SQLiteAdapter `migrationsExperimental` option has been renamed to `migrations`',
+        )
+        // @ts-ignore
+        validateAdapter(this)
+      }
+    } else {
+      const dispatcher = require('./makeDispatcher')
+
+      makeDispatcher = dispatcher.makeDispatcher
+      DatabaseBridge = dispatcher.DatabaseBridge
+      getDispatcherType = dispatcher.getDispatcherType
+
+      this._dispatcherType = getDispatcherType(options)
+      this._dispatcher = makeDispatcher(this._dispatcherType, this._tag, this._dbName)
+
+      if (process.env.NODE_ENV !== 'production') {
+        invariant(
+          !('migrationsExperimental' in options),
+          'SQLiteAdapter `migrationsExperimental` option has been renamed to `migrations`',
+        )
+        invariant(
+          DatabaseBridge,
+          `NativeModules.DatabaseBridge is not defined! This means that you haven't properly linked WatermelonDB native module. Refer to docs for more details`,
+        )
+        // @ts-ignore
+        validateAdapter(this)
+      }
     }
 
     // @ts-ignore
     this._initPromise = this._init().then(() => {
       if ('onReady' in options) {
-        const {onReady} = options
+        const { onReady } = options
 
         if (typeof onReady === 'function') {
           onReady()
@@ -118,10 +137,12 @@ export default class SQLiteAdapter implements DatabaseAdapter, SQLDatabaseAdapte
       ...options,
     })
 
-    invariant(
-      clone._dispatcherType === this._dispatcherType,
-      'testCloned adapter has bad dispatcher type',
-    )
+    if (!options.customDispatcher) {
+      invariant(
+        clone._dispatcherType === this._dispatcherType,
+        'testCloned adapter has bad dispatcher type',
+      )
+    }
     await clone._initPromise
     return clone
   }
@@ -139,7 +160,7 @@ export default class SQLiteAdapter implements DatabaseAdapter, SQLDatabaseAdapte
     // we're good. If not, we try again, this time sending the compiled schema or a migration set
     // This is to speed up the launch (less to do and pass through bridge), and avoid repeating
     // migration logic inside native code
-    const status = await toPromise(callback =>
+    const status = await toPromise((callback) =>
       this._dispatcher.initialize(this._dbName, this.schema.version, callback),
     )
 
@@ -168,7 +189,7 @@ export default class SQLiteAdapter implements DatabaseAdapter, SQLDatabaseAdapte
       )
 
       try {
-        await toPromise(callback =>
+        await toPromise((callback) =>
           this._dispatcher.setUpWithMigrations(
             this._dbName,
             this._encodeMigrations(migrationSteps),
@@ -194,7 +215,7 @@ export default class SQLiteAdapter implements DatabaseAdapter, SQLDatabaseAdapte
     logger.log(
       `[WatermelonDB][SQLite] Setting up database with schema version ${this.schema.version}`,
     )
-    await toPromise(callback =>
+    await toPromise((callback) =>
       this._dispatcher.setUpWithSchema(
         this._dbName,
         this._encodedSchema(),
@@ -205,15 +226,14 @@ export default class SQLiteAdapter implements DatabaseAdapter, SQLDatabaseAdapte
     logger.log(`[WatermelonDB][SQLite] Schema set up successfully`)
   }
 
-  find(
-    table: TableName<any>,
-    id: RecordId,
-    callback: ResultCallback<CachedFindResult>,
-  ): void {
+  find(table: TableName<any>, id: RecordId, callback: ResultCallback<CachedFindResult>): void {
     validateTable(table, this.schema)
-    this._dispatcher.find(table, id, result =>
+    this._dispatcher.find(table, id, (result) =>
       callback(
-        mapValue(rawRecord => sanitizeFindResult(rawRecord, this.schema.tables[table] as any), result),
+        mapValue(
+          (rawRecord) => sanitizeFindResult(rawRecord, this.schema.tables[table] as any),
+          result,
+        ),
       ),
     )
   }
@@ -234,7 +254,11 @@ export default class SQLiteAdapter implements DatabaseAdapter, SQLDatabaseAdapte
 
   // @ts-ignore
   execSqlQuery(sql: string, params: any[], callback: ResultCallback<CachedQueryResult>): void {
-    this._dispatcher.execSqlQuery(sql, params?.map((param: any) => `${param}`), result => callback(result))
+    this._dispatcher.execSqlQuery(
+      sql,
+      params?.map((param: any) => `${param}`),
+      (result) => callback(result),
+    )
   }
 
   unsafeSqlQuery(
@@ -243,9 +267,12 @@ export default class SQLiteAdapter implements DatabaseAdapter, SQLDatabaseAdapte
     callback: ResultCallback<CachedQueryResult>,
   ): void {
     validateTable(table, this.schema)
-    this._dispatcher.query(table, sql, result =>
+    this._dispatcher.query(table, sql, (result) =>
       callback(
-        mapValue((rawRecords: any) => sanitizeQueryResult(rawRecords, this.schema.tables[table] as any), result),
+        mapValue(
+          (rawRecords: any) => sanitizeQueryResult(rawRecords, this.schema.tables[table] as any),
+          result,
+        ),
       ),
     )
   }
@@ -262,21 +289,21 @@ export default class SQLiteAdapter implements DatabaseAdapter, SQLDatabaseAdapte
 
   batch(operations: BatchOperation[], callback: ResultCallback<undefined>): void {
     // @ts-ignore
-    const batchOperations: NativeBridgeBatchOperation[] = operations.map(operation => {
+    const batchOperations: NativeBridgeBatchOperation[] = operations.map((operation) => {
       const [type, table, rawOrId] = operation
       validateTable(table, this.schema)
       switch (type) {
         case 'create': {
           // @ts-ignore
-          return ['create', table, rawOrId.id].concat(encodeInsert(table, rawOrId));
+          return ['create', table, rawOrId.id].concat(encodeInsert(table, rawOrId))
         }
         case 'update': {
           // @ts-ignore
-          return ['execute', table].concat(encodeUpdate(table, rawOrId));
+          return ['execute', table].concat(encodeUpdate(table, rawOrId))
         }
         case 'markAsDeleted':
         case 'destroyPermanently':
-          return operation; // same format, no need to repack
+          return operation // same format, no need to repack
         default:
           throw new Error('unknown batch operation type')
       }
@@ -304,12 +331,16 @@ export default class SQLiteAdapter implements DatabaseAdapter, SQLDatabaseAdapte
   }
 
   unsafeResetDatabase(callback: ResultCallback<undefined>): void {
-    this._dispatcher.unsafeResetDatabase(this._encodedSchema(), this.schema.version, (result: any) => {
-      if (result.value) {
-        logger.log('[WatermelonDB][SQLite] Database is now reset')
-      }
-      callback(result)
-    })
+    this._dispatcher.unsafeResetDatabase(
+      this._encodedSchema(),
+      this.schema.version,
+      (result: any) => {
+        if (result.value) {
+          logger.log('[WatermelonDB][SQLite] Database is now reset')
+        }
+        callback(result)
+      },
+    )
   }
 
   obliterateDatabase(callback: ResultCallback<undefined>): void {

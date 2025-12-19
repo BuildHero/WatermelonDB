@@ -16,7 +16,8 @@ export type SQLiteAdapterOptions = {
   schema: AppSchema
   migrations?: SchemaMigrations
   synchronous?: boolean
-  experimentalUseJSI?: boolean // don't use this one, its fake;
+  experimentalUseJSI?: boolean
+  customDispatcher?: (tag: ConnectionTag, dbName: string, options: SQLiteAdapterOptions) => NativeDispatcher
   onReady?: () => void
 }
 
