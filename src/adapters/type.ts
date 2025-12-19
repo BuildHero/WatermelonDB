@@ -44,7 +44,7 @@ export interface DatabaseAdapter {
   removeLocal(key: string, callback: ResultCallback<undefined>): void;
   // Executes multiple prepared operations
   batchImport(
-    operations: BatchOperation[],
+    tables: TableName<any>[],
     srcDB: any,
     callback: ResultCallback<undefined>,
   ): void;

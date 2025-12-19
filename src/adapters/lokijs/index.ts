@@ -190,7 +190,7 @@ export default class LokiJSAdapter implements DatabaseAdapter {
 
   // Executes multiple prepared operations
   batchImport(
-    _operations: BatchOperation[],
+    _tables: TableName<any>[],
     _srcDB: any,
     _callback: ResultCallback<undefined>,
   ): void {
