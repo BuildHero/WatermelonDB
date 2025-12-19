@@ -61,6 +61,12 @@ export default class SQLiteAdapter implements DatabaseAdapter, SQLDatabaseAdapte
 
   _hybridJSIEnabled: boolean = false
 
+  _database: any = null
+
+  setDatabase(database: any): void {
+    this._database = database
+  }
+
   constructor(options: SQLiteAdapterOptions) {
     const { dbName, schema, migrations, customDispatcher } = options
     this.schema = schema

@@ -10,29 +10,41 @@ import type { RawRecord } from '../RawRecord'
 type Instantiator<T> = (arg1: RawRecord) => T;
 
 export default class RecordCache<Record extends Model> {
-  map: Map<RecordId, Record> = new Map();
+  map: Map<RecordId, Record> = new Map()
 
-  tableName: TableName<Record>;
+  tableName: TableName<Record>
 
-  recordInsantiator: Instantiator<Record>;
+  recordInsantiator: Instantiator<Record>
 
-  queryFunc: (arg1: RecordId) => void;
+  queryFunc: (arg1: RecordId) => void
+
+  version: number
 
   constructor(
     tableName: TableName<Record>,
     recordInsantiator: Instantiator<Record>,
     queryFunc: (arg1: RecordId) => void,
+    initialVersion: number = 0,
   ) {
     this.tableName = tableName
     this.recordInsantiator = recordInsantiator
-    this.queryFunc = queryFunc;
+    this.queryFunc = queryFunc
+    this.version = initialVersion
   }
 
   get(id: RecordId): Record | null | undefined {
-    return this.map.get(id)
+    const record = this.map.get(id)
+
+    if (record && (record as any)._cacheVersion < this.version) {
+      this.map.delete(id)
+      return undefined
+    }
+
+    return record
   }
 
   add(record: Record): void {
+    ;(record as any)._cacheVersion = this.version
     this.map.set(record.id, record)
   }
 
