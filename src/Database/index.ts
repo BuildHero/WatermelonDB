@@ -191,17 +191,25 @@ export default class Database {
   ): void {
     const tableChanges = this._normalizeNotifyInput(input)
 
+    // First pass: Apply all changes to cache
     Object.entries(tableChanges).forEach(([table, changeSet]) => {
       const collection = this.collections.get(table)
-
       if (changeSet) {
         collection._applyChangesToCache(changeSet)
+      }
+    })
+
+    // Second pass: Notify collection subscribers
+    Object.entries(tableChanges).forEach(([table, changeSet]) => {
+      const collection = this.collections.get(table)
+      if (changeSet) {
         collection._notify(changeSet)
       } else {
         collection._notifyExternalChange()
       }
     })
 
+    // Third pass: Notify database subscribers (after all caches are populated)
     const affectedTables = Object.keys(tableChanges)
     this._subscribers.forEach(([tables, subscriber]) => {
       if (tables.some((t) => affectedTables.includes(t))) {
