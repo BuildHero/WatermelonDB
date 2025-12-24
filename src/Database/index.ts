@@ -63,7 +63,10 @@ export default class Database {
     await this.adapter.batchImport(tables, srcDB)
 
     tables.forEach((table) => {
-      this.collections.get(table)._invalidateCacheVersion()
+      const collection = this.collections.get(table)
+      if (collection) {
+        collection._invalidateCacheVersion()
+      }
     })
 
     this.notify(tables)
@@ -178,7 +181,10 @@ export default class Database {
 
   // Emits a signal immediately, and on change in any of the passed tables
   withChangesForTables(tables: TableName<any>[]): Observable<CollectionChangeSet<any> | null> {
-    const changesSignals = tables.map((table) => this.collections.get(table).changes)
+    const changesSignals = tables
+      .map((table) => this.collections.get(table))
+      .filter((collection) => collection !== null)
+      .map((collection) => collection!.changes)
 
     return merge$(...changesSignals).pipe(startWith(null))
   }
@@ -194,7 +200,7 @@ export default class Database {
     // First pass: Apply all changes to cache
     Object.entries(tableChanges).forEach(([table, changeSet]) => {
       const collection = this.collections.get(table)
-      if (changeSet) {
+      if (collection && changeSet) {
         collection._applyChangesToCache(changeSet)
       }
     })
@@ -202,10 +208,12 @@ export default class Database {
     // Second pass: Notify collection subscribers
     Object.entries(tableChanges).forEach(([table, changeSet]) => {
       const collection = this.collections.get(table)
-      if (changeSet) {
-        collection._notify(changeSet)
-      } else {
-        collection._notifyExternalChange()
+      if (collection) {
+        if (changeSet) {
+          collection._notify(changeSet)
+        } else {
+          collection._notifyExternalChange()
+        }
       }
     })
 

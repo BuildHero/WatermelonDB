@@ -418,6 +418,39 @@ describe('database.notify()', () => {
       expect(subscriber).not.toHaveBeenCalled()
     })
 
+    it('handles non-existent tables gracefully', () => {
+      const { database } = mockDatabase({ actionsEnabled: true })
+
+      // Should not throw when notifying about a table that doesn't exist
+      expect(() => {
+        database.notify('non_existent_table')
+      }).not.toThrow()
+
+      expect(() => {
+        database.notify(['non_existent_table', 'another_fake_table'])
+      }).not.toThrow()
+
+      expect(() => {
+        database.notify({
+          non_existent_table: [{ record: null, type: 'created' }],
+        })
+      }).not.toThrow()
+    })
+
+    it('handles copyTables with non-existent tables gracefully', async () => {
+      const { database } = mockDatabase({ actionsEnabled: true })
+
+      // Mock batchImport to avoid actual database operations
+      database.adapter.underlyingAdapter.batchImport = jest.fn((tables, srcDB, callback) => {
+        callback({ value: undefined })
+      })
+
+      // Should not throw when copying tables that don't exist
+      await expect(
+        database.copyTables(['non_existent_table', 'another_fake_table'], {}),
+      ).resolves.not.toThrow()
+    })
+
     it('handles multiple subscribers to same table', () => {
       const { database } = mockDatabase({ actionsEnabled: true })
 
