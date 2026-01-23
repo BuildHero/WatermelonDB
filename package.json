@@ -1,7 +1,7 @@
 {
   "name": "@BuildHero/watermelondb",
   "description": "Build powerful React Native and React web apps that scale from hundreds to tens of thousands of records and remain fast",
-  "version": "5.0.0-71",
+  "version": "5.0.0-72",
   "scripts": {
     "build": "NODE_ENV=production node ./scripts/make.js",
     "dev": "NODE_ENV=development node ./scripts/make.js",
@@ -161,7 +161,7 @@
     "prettier-eslint-cli": "^4.7.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-native": "^0.73.0",
+    "react-native": "^0.81.5",
     "react-test-renderer": "^18.2.0",
     "rimraf": "^3.0.0",
     "rxjs": "^6.5.3",
