@@ -16,12 +16,11 @@ export type SQLiteAdapterOptions = {
   schema: AppSchema
   migrations?: SchemaMigrations
   synchronous?: boolean
-  experimentalUseJSI?: boolean
   customDispatcher?: (tag: ConnectionTag, dbName: string, options: SQLiteAdapterOptions) => NativeDispatcher
   onReady?: () => void
 }
 
-export type DispatcherType = 'asynchronous' | 'synchronous' | 'jsi'
+export type DispatcherType = 'asynchronous' | 'synchronous'
 
 export type NativeBridgeBatchOperation =
   | ['execute', TableName<any>, SQL, SQLiteArg[]]

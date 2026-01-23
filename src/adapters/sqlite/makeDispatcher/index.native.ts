@@ -5,7 +5,7 @@ import { NativeModules, TurboModuleRegistry } from 'react-native'
 
 import { fromPairs } from 'rambdax'
 
-import { ConnectionTag, logger, invariant } from '../../../utils/common'
+import { ConnectionTag, logger } from '../../../utils/common'
 
 import { fromPromise } from '../../../utils/fp/Result'
 
@@ -83,13 +83,10 @@ export const makeDispatcher = (
   dbName: string,
   useHybridJSI?: boolean,
 ): NativeDispatcher => {
-  // @ts-ignore
-  const jsiDb = type === 'jsi' && global.nativeWatermelonCreateAdapter(dbName)
-
   const methods = dispatcherMethods.map((methodName) => {
-    // batchJSON is missing on Android
+    // batchJSON is missing on Android, and not available when using Hybrid JSI
     // @ts-ignore
-    if (!DatabaseBridge[methodName] || (methodName === 'batchJSON' && jsiDb)) {
+    if (!DatabaseBridge[methodName] || (methodName === 'batchJSON' && useHybridJSI)) {
       return [methodName, undefined]
     }
 
@@ -100,19 +97,6 @@ export const makeDispatcher = (
       (...args: any[]) => {
         const callback = args[args.length - 1]
         const otherArgs = args.slice(0, -1)
-
-        if (jsiDb) {
-          try {
-            const value =
-              methodName === 'query' || methodName === 'count'
-                ? jsiDb[methodName](...otherArgs, []) // FIXME: temp workaround
-                : jsiDb[methodName](...otherArgs)
-            callback({ value })
-          } catch (error: any) {
-            callback({ error })
-          }
-          return
-        }
 
         // Use Turbo Module if available for supported methods
         if (NativeWatermelonDBModule && supportedTurboModuleMethods.has(methodName)) {
@@ -172,11 +156,6 @@ export const makeDispatcher = (
 }
 
 export function getDispatcherType(options: SQLiteAdapterOptions): DispatcherType {
-  invariant(
-    !(options.synchronous && options.experimentalUseJSI),
-    '`synchronous` and `experimentalUseJSI` SQLiteAdapter options are mutually exclusive',
-  )
-
   if (options.synchronous) {
     if (DatabaseBridge.initializeSynchronous) {
       return 'synchronous'

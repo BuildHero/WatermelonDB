@@ -695,10 +695,9 @@ export default () => [
       for (const string of naughtyStrings) {
         const key = usePartialTestBecauseBuggyLoki ? `key${Math.random()}` : string
         // console.log(string)
-        // KNOWN ISSUE: non-JSI adapter implementation gets confused by this (it's a BOM mark)
+        // KNOWN ISSUE: Bridge adapter implementation gets confused by BOM marks
         if (
           AdapterClass.name === 'SQLiteAdapter' &&
-          !extraAdapterOptions.experimentalUseJSI &&
           (string === '﻿' || (string === '￾' && platform === 'android')) &&
           platform !== 'node'
         ) {
@@ -1267,11 +1266,10 @@ export default () => [
       for (const testCase of naughtyMatchTests) {
         // console.log(testCase.name)
 
-        // KNOWN ISSUE: non-JSI adapter implementation gets confused by this (it's a BOM mark)
+        // KNOWN ISSUE: Bridge adapter implementation gets confused by BOM marks
         const naughtyString = testCase.matching[0].text1
         if (
           AdapterClass.name === 'SQLiteAdapter' &&
-          !extraAdapterOptions.experimentalUseJSI &&
           (naughtyString === '﻿' || (naughtyString === '￾' && platform === 'android'))
         ) {
           // eslint-disable-next-line no-console
@@ -1312,10 +1310,9 @@ export default () => [
       indexedNaughtyStrings.forEach(([id, string]) => {
         const record = allRecords.find((model) => model.id === id)
         // console.log(string, record)
-        // KNOWN ISSUE: non-JSI adapter implementation gets confused by this (it's a BOM mark)
+        // KNOWN ISSUE: Bridge adapter implementation gets confused by BOM marks
         if (
           AdapterClass.name === 'SQLiteAdapter' &&
-          !extraAdapterOptions.experimentalUseJSI &&
           (string === '﻿' || (string === '￾' && platform === 'android')) &&
           platform !== 'node'
         ) {
