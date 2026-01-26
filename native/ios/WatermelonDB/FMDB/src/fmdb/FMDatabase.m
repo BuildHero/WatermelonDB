@@ -173,7 +173,8 @@ NS_ASSUME_NONNULL_END
     
     // now open database
 
-    int err = sqlite3_open([self sqlitePath], (sqlite3**)&_db );
+    int err = sqlite3_open_v2([self sqlitePath], (sqlite3**)&_db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, NULL);
+
     if(err != SQLITE_OK) {
         NSLog(@"error opening!: %d", err);
         return NO;
