@@ -58,11 +58,10 @@ jsi::Value JSISwiftWrapperModule::importRemoteSlice(
     return createPromiseAsJSIValue(rt, [db, tagCopy, sliceUrlUtf8, jsInvoker](jsi::Runtime &rt2, std::shared_ptr<Promise> promise) {
         
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            @autoreleasepool {                
+            @autoreleasepool {
                 auto tagNumber = [[NSNumber alloc] initWithDouble:tagCopy];
                 
                 SliceImporter *importer = [[SliceImporter alloc] initWithDatabaseBridge:db connectionTag:tagNumber];
-                
                 
                 [importer startWithURL:[NSURL URLWithString:[NSString stringWithUTF8String:sliceUrlUtf8.c_str()]]
                             completion:^(NSError * _Nullable error) {
