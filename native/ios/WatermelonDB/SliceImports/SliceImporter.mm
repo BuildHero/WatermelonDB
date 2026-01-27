@@ -22,7 +22,7 @@ static void *kSliceImporterQueueKey = &kSliceImporterQueueKey;
 @property (nonatomic, weak) DatabaseBridge *db;
 @property (nonatomic, strong) NSNumber *connectionTag;
 @property (nonatomic, strong) NSURLSession *session;
-@property (nonatomic, atomic, strong, nullable) NSURLSessionDataTask *activeTask;  // Atomic for cross-queue cancellation
+@property (atomic, strong, nullable) NSURLSessionDataTask *activeTask;  // Atomic for cross-queue cancellation
 @property (nonatomic, strong) os_log_t logger;
 @property (nonatomic, strong) dispatch_queue_t workQueue;
 @property (nonatomic, copy, nullable) SliceDownloadCompletion completion;
