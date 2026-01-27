@@ -168,6 +168,7 @@ public:
     
     // Parse next row
     ParseStatus parseRow(const std::vector<std::string>& columns, Row& row);
+    ParseStatus parseRowValues(const std::vector<std::string>& columns, std::vector<FieldValue>& rowValues);
     
     // Check if end of stream
     bool isEndOfStream() const { return streamEnded_; }
@@ -183,6 +184,25 @@ public:
     
     // Compact buffer to free memory
     void compactBuffer();
+
+#ifdef SLICE_IMPORT_PROFILE_DECODER
+    struct DecodeProfile {
+        uint64_t rows = 0;
+        uint64_t fields = 0;
+        uint64_t nullCount = 0;
+        uint64_t intCount = 0;
+        uint64_t realCount = 0;
+        uint64_t textCount = 0;
+        uint64_t blobCount = 0;
+        uint64_t textBytes = 0;
+        uint64_t blobBytes = 0;
+        uint64_t textCopyNs = 0;
+        uint64_t blobCopyNs = 0;
+    };
+
+    void resetProfile();
+    const DecodeProfile& profile() const { return profile_; }
+#endif
     
 private:
     // Decompression state
@@ -203,6 +223,10 @@ private:
     
     // Error tracking
     std::string errorMessage_;
+
+#ifdef SLICE_IMPORT_PROFILE_DECODER
+    DecodeProfile profile_;
+#endif
     
     // Internal helpers
     bool decompressChunk(const uint8_t* input, size_t inputSize);

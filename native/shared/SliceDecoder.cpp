@@ -1,6 +1,9 @@
 #include "SliceDecoder.h"
 #include <cstring>
 #include <algorithm>
+#ifdef SLICE_IMPORT_PROFILE_DECODER
+#include <chrono>
+#endif
 
 namespace watermelondb {
 
@@ -9,6 +12,14 @@ VarintDecoder::DecodeResult VarintDecoder::decodeVarint(const uint8_t* buffer, s
     DecodeResult result;
     
     if (offset >= bufferSize) {
+        return result;
+    }
+
+    uint8_t first = buffer[offset];
+    if ((first & 0x80) == 0) {
+        result.value = first;
+        result.bytesRead = 1;
+        result.success = true;
         return result;
     }
     
@@ -87,6 +98,9 @@ SliceDecoder::SliceDecoder()
     , expectedTables_(0)
     , tablesParsed_(0)
 {
+#ifdef SLICE_IMPORT_PROFILE_DECODER
+    resetProfile();
+#endif
 }
 
 SliceDecoder::~SliceDecoder() {
@@ -135,7 +149,16 @@ void SliceDecoder::reset() {
     expectedTables_ = 0;
     tablesParsed_ = 0;
     errorMessage_.clear();
+#ifdef SLICE_IMPORT_PROFILE_DECODER
+    resetProfile();
+#endif
 }
+
+#ifdef SLICE_IMPORT_PROFILE_DECODER
+void SliceDecoder::resetProfile() {
+    profile_ = DecodeProfile();
+}
+#endif
 
 void SliceDecoder::compactBuffer() {
     // If fully consumed, clear and shrink only if buffer is large
@@ -474,6 +497,23 @@ ParseStatus SliceDecoder::parseTableHeader(TableHeader& header) {
 }
 
 ParseStatus SliceDecoder::parseRow(const std::vector<std::string>& columns, Row& row) {
+    row.clear();
+    std::vector<FieldValue> rowValues;
+    rowValues.reserve(columns.size());
+    
+    ParseStatus status = parseRowValues(columns, rowValues);
+    if (status != ParseStatus::Ok) {
+        return status;
+    }
+    
+    for (size_t i = 0; i < columns.size(); i++) {
+        row[columns[i]] = std::move(rowValues[i]);
+    }
+    
+    return ParseStatus::Ok;
+}
+
+ParseStatus SliceDecoder::parseRowValues(const std::vector<std::string>& columns, std::vector<FieldValue>& rowValues) {
     size_t available = decompressedSize_ - currentOffset_;
     
     if (available == 0) {
@@ -490,10 +530,11 @@ ParseStatus SliceDecoder::parseRow(const std::vector<std::string>& columns, Row&
         return ParseStatus::EndOfTable;
     }
     
-    row.clear();
+    rowValues.clear();
+    rowValues.reserve(columns.size());
     size_t offset = currentOffset_;
     
-    for (const auto& column : columns) {
+    for (size_t i = 0; i < columns.size(); i++) {
         // Decode field size (varint)
         auto sizeResult = VarintDecoder::decodeVarint(decompressedBuffer_.data(), decompressedSize_, offset);
         if (sizeResult.invalid) {
@@ -518,7 +559,6 @@ ParseStatus SliceDecoder::parseRow(const std::vector<std::string>& columns, Row&
         
         if (fieldSize == 0) {
             // NULL field: need type tag byte
-            // Note: When size is 0, the value is NULL regardless of what the type tag says
             if (offset >= decompressedSize_) {
                 if (streamEnded_) {
                     setError("Truncated NULL field: missing type tag");
@@ -528,7 +568,7 @@ ParseStatus SliceDecoder::parseRow(const std::vector<std::string>& columns, Row&
             }
             
             // Skip type tag (don't validate - NULL regardless of tag value)
-            row[column] = FieldValue::makeNull();
+            rowValues.push_back(FieldValue::makeNull());
             offset++; // Skip type tag
             continue;
         }
@@ -548,7 +588,10 @@ ParseStatus SliceDecoder::parseRow(const std::vector<std::string>& columns, Row&
         // Read value based on type
         switch (static_cast<TypeTag>(typeTag)) {
             case TypeTag::NULL_TYPE:
-                row[column] = FieldValue::makeNull();
+                rowValues.push_back(FieldValue::makeNull());
+#ifdef SLICE_IMPORT_PROFILE_DECODER
+                profile_.nullCount++;
+#endif
                 break;
                 
             case TypeTag::INT: {
@@ -556,12 +599,14 @@ ParseStatus SliceDecoder::parseRow(const std::vector<std::string>& columns, Row&
                     setError("Invalid INT field size");
                     return ParseStatus::Error;
                 }
-                // Read as big-endian int64
                 int64_t value = 0;
                 for (size_t i = 0; i < 8; i++) {
                     value = (value << 8) | decompressedBuffer_[offset + i];
                 }
-                row[column] = FieldValue::makeInt(value);
+                rowValues.push_back(FieldValue::makeInt(value));
+#ifdef SLICE_IMPORT_PROFILE_DECODER
+                profile_.intCount++;
+#endif
                 break;
             }
                 
@@ -570,27 +615,51 @@ ParseStatus SliceDecoder::parseRow(const std::vector<std::string>& columns, Row&
                     setError("Invalid REAL field size");
                     return ParseStatus::Error;
                 }
-                // Read as big-endian double
                 uint64_t bits = 0;
                 for (size_t i = 0; i < 8; i++) {
                     bits = (bits << 8) | decompressedBuffer_[offset + i];
                 }
                 double value;
                 std::memcpy(&value, &bits, sizeof(double));
-                row[column] = FieldValue::makeReal(value);
+                rowValues.push_back(FieldValue::makeReal(value));
+#ifdef SLICE_IMPORT_PROFILE_DECODER
+                profile_.realCount++;
+#endif
                 break;
             }
                 
             case TypeTag::TEXT: {
+#ifdef SLICE_IMPORT_PROFILE_DECODER
+                auto copyStart = std::chrono::steady_clock::now();
+#endif
                 std::string text(reinterpret_cast<const char*>(decompressedBuffer_.data() + offset), fieldSize);
-                row[column] = FieldValue::makeText(text);
+#ifdef SLICE_IMPORT_PROFILE_DECODER
+                auto copyEnd = std::chrono::steady_clock::now();
+                profile_.textCopyNs += static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(copyEnd - copyStart).count()
+                );
+                profile_.textCount++;
+                profile_.textBytes += fieldSize;
+#endif
+                rowValues.push_back(FieldValue::makeText(text));
                 break;
             }
                 
             case TypeTag::BLOB: {
-                std::vector<uint8_t> blob(decompressedBuffer_.begin() + offset, 
+#ifdef SLICE_IMPORT_PROFILE_DECODER
+                auto copyStart = std::chrono::steady_clock::now();
+#endif
+                std::vector<uint8_t> blob(decompressedBuffer_.begin() + offset,
                                          decompressedBuffer_.begin() + offset + fieldSize);
-                row[column] = FieldValue::makeBlob(blob);
+#ifdef SLICE_IMPORT_PROFILE_DECODER
+                auto copyEnd = std::chrono::steady_clock::now();
+                profile_.blobCopyNs += static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(copyEnd - copyStart).count()
+                );
+                profile_.blobCount++;
+                profile_.blobBytes += fieldSize;
+#endif
+                rowValues.push_back(FieldValue::makeBlob(blob));
                 break;
             }
                 
@@ -603,6 +672,10 @@ ParseStatus SliceDecoder::parseRow(const std::vector<std::string>& columns, Row&
     }
     
     currentOffset_ = offset;
+#ifdef SLICE_IMPORT_PROFILE_DECODER
+    profile_.rows++;
+    profile_.fields += columns.size();
+#endif
     return ParseStatus::Ok;
 }
 

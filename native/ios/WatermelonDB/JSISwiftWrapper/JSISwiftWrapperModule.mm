@@ -11,6 +11,27 @@
 
 namespace facebook::react {
 
+static NSMutableSet<SliceImporter *> *activeSliceImporters() {
+    static NSMutableSet<SliceImporter *> *set = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        set = [NSMutableSet set];
+    });
+    return set;
+}
+
+static void retainSliceImporter(SliceImporter *importer) {
+    @synchronized (activeSliceImporters()) {
+        [activeSliceImporters() addObject:importer];
+    }
+}
+
+static void releaseSliceImporter(SliceImporter *importer) {
+    @synchronized (activeSliceImporters()) {
+        [activeSliceImporters() removeObject:importer];
+    }
+}
+
 JSISwiftWrapperModule::JSISwiftWrapperModule(std::shared_ptr<CallInvoker> jsInvoker)
 : NativeWatermelonDBModuleCxxSpec(std::move(jsInvoker)) {}
 
@@ -62,9 +83,11 @@ jsi::Value JSISwiftWrapperModule::importRemoteSlice(
                 auto tagNumber = [[NSNumber alloc] initWithDouble:tagCopy];
                 
                 SliceImporter *importer = [[SliceImporter alloc] initWithDatabaseBridge:db connectionTag:tagNumber];
+                retainSliceImporter(importer);
                 
                 [importer startWithURL:[NSURL URLWithString:[NSString stringWithUTF8String:sliceUrlUtf8.c_str()]]
                             completion:^(NSError * _Nullable error) {
+                    releaseSliceImporter(importer);
                     jsInvoker->invokeAsync([promise, error]() mutable {
                         if (error) {
                             promise->reject([[error localizedDescription] UTF8String]);
