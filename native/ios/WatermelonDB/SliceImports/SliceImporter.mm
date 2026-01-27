@@ -310,9 +310,6 @@ didReceiveResponse:(NSURLResponse *)response
             return;
         }
         
-        os_log_debug(self.logger, "Decompressed buffer size: %lu",
-                     (unsigned long)self.decoder->getBufferSize());
-        
         // Try to parse the decompressed data
         [self parseDecompressedDataWithTask:dataTask];
         
@@ -429,24 +426,11 @@ didReceiveResponse:(NSURLResponse *)response
                 os_log_info(self.logger, "Parsed slice header: id=%{public}s, version=%lld, priority=%{public}s, tables=%lld",
                             header.sliceId.c_str(), header.version, header.priority.c_str(), header.numberOfTables);
                 
-                // Debug: Log more info about what we parsed
-                os_log_info(self.logger, "Decompressed buffer size after header parse: %lu bytes",
-                            (unsigned long)self.decoder->remainingBytes());
-                
-                // If numberOfTables is 0 but we have remaining data, something is wrong
-                if (header.numberOfTables == 0 && self.decoder->remainingBytes() > 10) {
-                    os_log_error(self.logger, "Header claims 0 tables but %lu bytes remain - possible parsing error",
-                                 (unsigned long)self.decoder->remainingBytes());
-                    
-                    // Log first 32 bytes of remaining data
-                    if (self.decoder->remainingBytes() >= 32) {
-                        os_log_error(self.logger, "This might help debug the format issue");
-                    }
-                }
-                
                 self.headerParsed = YES;
+                
                 // Continue parsing tables
                 [self parseTablesWithTask:task];
+                
                 break;
                 
             case ParseStatus::NeedMoreData:
@@ -500,10 +484,6 @@ didReceiveResponse:(NSURLResponse *)response
         
         switch (status) {
             case ParseStatus::Ok: {
-                // Successfully parsed table header
-                os_log_info(self.logger, "Parsing table: %{public}s with %lu columns",
-                            tableHeader.tableName.c_str(), (unsigned long)tableHeader.columns.size());
-                
                 // Store current table and mark as parsing
                 self.currentTableHeader = tableHeader;
                 self.currentTableName = [NSString stringWithUTF8String:tableHeader.tableName.c_str()];  // Cache to avoid per-row conversion
@@ -617,8 +597,6 @@ didReceiveResponse:(NSURLResponse *)response
                 return ParseStatus::NeedMoreData;
                 
             case ParseStatus::EndOfTable:
-                os_log_info(self.logger, "Finished table %{public}s with %lu rows",
-                            tableHeader.tableName.c_str(), (unsigned long)rowCount);
                 return ParseStatus::EndOfTable;
                 
             case ParseStatus::Error:
@@ -1299,10 +1277,6 @@ didCompleteWithError:(nullable NSError *)error {
     // Cache it only if shouldCache (prevents cache pollution from partial chunks)
     if (shouldCache) {
         self.statementCache[cacheKey] = [NSValue valueWithPointer:stmt];
-        os_log_debug(self.logger, "Cached multi-row prepared statement for: %@ (chunk=%ld)", tableName, (long)rowsInChunk);
-    } else {
-        // Partial chunk - will be finalized immediately after use
-        os_log_debug(self.logger, "Prepared one-off multi-row statement for: %@ (partial chunk=%ld)", tableName, (long)rowsInChunk);
     }
     
     return stmt;
