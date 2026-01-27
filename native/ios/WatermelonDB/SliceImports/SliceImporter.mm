@@ -695,9 +695,6 @@ didReceiveResponse:(NSURLResponse *)response
         return NO;  // No work dispatched
     }
     
-    os_log_info(self.logger, "Flushing %ld rows across %lu tables",
-                (long)batchRowCount, (unsigned long)batchCopy.count);
-    
     // Backpressure: wait for available slot (inflight=1)
     dispatch_semaphore_wait(self.inflightSemaphore, DISPATCH_TIME_FOREVER);
     
@@ -794,7 +791,6 @@ didReceiveResponse:(NSURLResponse *)response
             self.rowsSinceSavepoint -= 10000;  // Subtract, not modulo (handles multiple thresholds)
         }
         
-        os_log_debug(self.logger, "Flushed %ld rows (total: %ld)", (long)batchRowCount, (long)self.totalRowsInserted);
         dispatch_semaphore_signal(self.inflightSemaphore);
     });
     
