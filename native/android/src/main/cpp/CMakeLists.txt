@@ -112,20 +112,75 @@ else ()
   message(FATAL_ERROR "sqlite-android.aar not found. Please build your sqlite-android fork first.")
 endif ()
 
+# Configure zstd-jni manually (similar to sqlite-android)
+set(ZSTD_JNI_AAR "${CMAKE_CURRENT_LIST_DIR}/../../../libs/zstd-jni.aar")
+
+if (EXISTS "${ZSTD_JNI_AAR}")
+  message(STATUS "Using zstd-jni AAR: ${ZSTD_JNI_AAR}")
+
+  get_filename_component(ZSTD_AAR_DIR "${ZSTD_JNI_AAR}" DIRECTORY)
+  set(ZSTD_JNI_EXTRACTED_DIR "${ZSTD_AAR_DIR}/zstd-jni-extracted")
+
+  if (NOT EXISTS "${ZSTD_JNI_EXTRACTED_DIR}")
+    file(MAKE_DIRECTORY "${ZSTD_JNI_EXTRACTED_DIR}")
+    execute_process(
+        COMMAND ${CMAKE_COMMAND} -E tar xf "${ZSTD_JNI_AAR}"
+        WORKING_DIRECTORY "${ZSTD_JNI_EXTRACTED_DIR}"
+        RESULT_VARIABLE ZSTD_EXTRACT_RESULT
+    )
+    if (NOT ZSTD_EXTRACT_RESULT EQUAL 0)
+      message(FATAL_ERROR "Failed to extract zstd-jni AAR")
+    endif ()
+  endif ()
+
+  add_library(zstd-jni::zstdjni SHARED IMPORTED)
+
+  if (CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
+    set_target_properties(zstd-jni::zstdjni PROPERTIES
+        IMPORTED_LOCATION "${ZSTD_JNI_EXTRACTED_DIR}/jni/arm64-v8a/libzstd-jni-1.5.7-6.so")
+  elseif (CMAKE_ANDROID_ARCH_ABI STREQUAL "armeabi-v7a")
+    set_target_properties(zstd-jni::zstdjni PROPERTIES
+        IMPORTED_LOCATION "${ZSTD_JNI_EXTRACTED_DIR}/jni/armeabi-v7a/libzstd-jni-1.5.7-6.so")
+  elseif (CMAKE_ANDROID_ARCH_ABI STREQUAL "x86")
+    set_target_properties(zstd-jni::zstdjni PROPERTIES
+        IMPORTED_LOCATION "${ZSTD_JNI_EXTRACTED_DIR}/jni/x86/libzstd-jni-1.5.7-6.so")
+  elseif (CMAKE_ANDROID_ARCH_ABI STREQUAL "x86_64")
+    set_target_properties(zstd-jni::zstdjni PROPERTIES
+        IMPORTED_LOCATION "${ZSTD_JNI_EXTRACTED_DIR}/jni/x86_64/libzstd-jni-1.5.7-6.so")
+  endif ()
+else ()
+  message(FATAL_ERROR "zstd-jni AAR not found at ${ZSTD_JNI_AAR}. Please vendor it in native/android/libs.")
+endif ()
+
+# zstd headers (needed by shared SliceDecoder)
+set(ZSTD_HEADERS_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../libs/zstd-headers")
+if (EXISTS "${ZSTD_HEADERS_DIR}/libzstd/zstd.h")
+  include_directories("${ZSTD_HEADERS_DIR}")
+  message(STATUS "Using zstd headers: ${ZSTD_HEADERS_DIR}")
+else ()
+  message(FATAL_ERROR "zstd headers not found. Expected ${ZSTD_HEADERS_DIR}/libzstd/zstd.h")
+endif ()
+
 # Check if new architecture is enabled to determine library type and source files
 set(LIB_TYPE STATIC)
 
 set(SOURCE_FILES
     ../../../../shared/Sqlite.cpp
     ../../../../shared/DatabaseUtils.cpp
+    ../../../../shared/SliceDecoder.cpp
+    ../../../../shared/SliceImportEngine.cpp
+    ../../../../shared/SqliteInsertHelper.cpp
     # List C/C++ source files with relative paths to this CMakeLists.txt.
     JSIAndroidUtils.cpp
     JSIAndroidBridgeWrapper.cpp
     JSIAndroidBridgeModule.cpp
-    JSIAndroidBridgeInstaller.cpp)
+    JSIAndroidBridgeInstaller.cpp
+    SlicePlatformAndroid.cpp
+    SliceImportDatabaseAdapterAndroid.cpp)
 
 set(LINKED_LIBRARIES
     sqlite-android::sqlite3x
+    zstd-jni::zstdjni
     android
     log
     ReactAndroid::reactnative

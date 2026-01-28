@@ -22,6 +22,8 @@ namespace watermelondb {
     jsi::Value query(jobject bridge, jsi::Runtime &rt, const jsi::Value &tag, const jsi::String &table, const jsi::String &query);
     
     JNIEnv* getEnv();
+    JNIEnv* attachCurrentThread();
+    bool waitForJvm(int timeoutMs);
     void configureJNI(JNIEnv *env);
 } // namespace watermelondb
 

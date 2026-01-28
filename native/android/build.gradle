@@ -41,6 +41,7 @@ android {
         pickFirst '**/libc++_shared.so'
         pickFirst '**/libfbjni.so'
         pickFirst '**/libsqlite3x.so'
+        pickFirst '**/libzstd-jni-1.5.7-6.so'
     }
 
     sourceSets {
@@ -68,7 +69,13 @@ dependencies {
     implementation 'com.facebook.react:react-native:+'
     implementation "com.facebook.react:react-android"
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlin_version"
+    implementation "com.squareup.okhttp3:okhttp:4.12.0"
+    compileOnly files('libs/zstd-jni.aar')
 
+}
+
+configurations.all {
+    exclude group: "com.github.luben", module: "zstd-jni"
 }
 repositories {
     mavenCentral()
