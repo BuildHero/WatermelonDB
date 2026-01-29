@@ -138,7 +138,6 @@ export default class SQLiteAdapter implements DatabaseAdapter, SQLDatabaseAdapte
       dbName: this._dbName,
       schema: this.schema,
       synchronous: this._dispatcherType === 'synchronous',
-      experimentalUseJSI: this._dispatcherType === 'jsi',
       ...(this.migrations ? { migrations: this.migrations } : {}),
       ...options,
     })

@@ -4,6 +4,9 @@
 #include <fbjni/fbjni.h>
 #include <sqlite3.h>
 #include <android/log.h>
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
 
 using namespace watermelondb;
 
@@ -27,7 +30,26 @@ struct SQLiteConnection {
     }
 };
 
+template <typename T>
+class LocalRef {
+public:
+    LocalRef(JNIEnv* env, T obj) : env_(env), obj_(obj) {}
+    ~LocalRef() {
+        if (obj_) {
+            env_->DeleteLocalRef(obj_);
+        }
+    }
+    T get() const { return obj_; }
+private:
+    JNIEnv* env_;
+    T obj_;
+};
+
 namespace watermelondb {
+    static JavaVM* gJvm = nullptr;
+    static std::mutex gJvmMutex;
+    static std::condition_variable gJvmCv;
+    static bool gJvmReady = false;
     namespace platform {
         void consoleLog(std::string message) {
             __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "%s\n", message.c_str());
@@ -47,25 +69,80 @@ namespace watermelondb {
     }
 
     JNIEnv* getEnv() {
+        if (gJvm) {
+            JNIEnv* env = nullptr;
+            jint status = gJvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+            if (status == JNI_EDETACHED) {
+                if (gJvm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
+                    return nullptr;
+                }
+            } else if (status != JNI_OK) {
+                return nullptr;
+            }
+            return env;
+        }
         return facebook::jni::Environment::current();
+    }
+
+    JNIEnv* attachCurrentThread() {
+        if (!gJvm) {
+            return nullptr;
+        }
+        JNIEnv* env = nullptr;
+        jint status = gJvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+        if (status == JNI_EDETACHED) {
+            if (gJvm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
+                return nullptr;
+            }
+        } else if (status != JNI_OK) {
+            return nullptr;
+        }
+        return env;
+    }
+
+    bool waitForJvm(int timeoutMs) {
+        std::unique_lock<std::mutex> lock(gJvmMutex);
+        if (gJvmReady) {
+            return true;
+        }
+        bool ok = gJvmCv.wait_for(lock, std::chrono::milliseconds(timeoutMs), []() { return gJvmReady; });
+        return ok;
+    }
+
+    void configureJNI(JNIEnv *env) {
+        if (!env) {
+            return;
+        }
+        JavaVM* vm = nullptr;
+        if (env->GetJavaVM(&vm) == JNI_OK) {
+            {
+                std::lock_guard<std::mutex> lock(gJvmMutex);
+                gJvm = vm;
+                gJvmReady = true;
+            }
+            gJvmCv.notify_all();
+        }
     }
 
     jsi::Value execSqlQuery(jobject bridge, jsi::Runtime &rt, const jsi::Value &tag, const jsi::String &sql, const jsi::Array &arguments) {
         JNIEnv *env = getEnv();
+        if (!env) {
+            throw jsi::JSError(rt, "JNI env not available");
+        }
         jint jTag = static_cast<jint>(tag.asNumber());
 
         std::string queryStr = sql.utf8(rt);
 
-        jclass myNativeModuleClass = env->GetObjectClass(bridge);
+        LocalRef<jclass> myNativeModuleClass(env, env->GetObjectClass(bridge));
 
         jmethodID getConnectionMethod = env->GetMethodID(
-                myNativeModuleClass,
+                myNativeModuleClass.get(),
                 "getSQLiteConnection",
                 "(I)J"
         );
 
         jmethodID releaseConnectionMethod = env->GetMethodID(
-                myNativeModuleClass,
+                myNativeModuleClass.get(),
                 "releaseSQLiteConnection",
                 "(I)V"
         );
@@ -74,24 +151,21 @@ namespace watermelondb {
         
         // Check if a Java exception occurred (e.g., "No driver with tag X available")
         if (env->ExceptionCheck()) {
-            jthrowable exception = env->ExceptionOccurred();
+            LocalRef<jthrowable> exception(env, env->ExceptionOccurred());
             env->ExceptionClear();
             
             // Get the exception message
-            jclass exceptionClass = env->GetObjectClass(exception);
-            jmethodID getMessageMethod = env->GetMethodID(exceptionClass, "getMessage", "()Ljava/lang/String;");
-            jstring messageObj = (jstring)env->CallObjectMethod(exception, getMessageMethod);
+            LocalRef<jclass> exceptionClass(env, env->GetObjectClass(exception.get()));
+            jmethodID getMessageMethod = env->GetMethodID(exceptionClass.get(), "getMessage", "()Ljava/lang/String;");
+            LocalRef<jstring> messageObj(env, (jstring)env->CallObjectMethod(exception.get(), getMessageMethod));
             
             std::string message = "Database connection error for tag " + std::to_string(jTag);
-            if (messageObj) {
-                const char* messageChars = env->GetStringUTFChars(messageObj, nullptr);
+            if (messageObj.get()) {
+                const char* messageChars = env->GetStringUTFChars(messageObj.get(), nullptr);
                 message = std::string(messageChars);
-                env->ReleaseStringUTFChars(messageObj, messageChars);
+                env->ReleaseStringUTFChars(messageObj.get(), messageChars);
             }
-            
-            env->DeleteLocalRef(exception);
-            env->DeleteLocalRef(exceptionClass);
-            
+
             throw jsi::JSError(rt, message);
         }
         
@@ -128,6 +202,9 @@ namespace watermelondb {
 
     jsi::Value query(jobject bridge, jsi::Runtime &rt, const jsi::Value &tag, const jsi::String &table, const jsi::String &query) {
         JNIEnv *env = getEnv();
+        if (!env) {
+            throw jsi::JSError(rt, "JNI env not available");
+        }
 
         // Convert the jsi::Value arguments to std::string
         jint jTag = static_cast<jint>(tag.asNumber());
@@ -135,16 +212,16 @@ namespace watermelondb {
         auto tableStr = table.utf8(rt);
         auto queryStr = query.utf8(rt);
 
-        jclass myNativeModuleClass = env->GetObjectClass(bridge);
+        LocalRef<jclass> myNativeModuleClass(env, env->GetObjectClass(bridge));
 
         jmethodID getConnectionMethod = env->GetMethodID(
-                myNativeModuleClass,
+                myNativeModuleClass.get(),
                 "getSQLiteConnection",
                 "(I)J"
         );
 
         jmethodID releaseConnectionMethod = env->GetMethodID(
-                myNativeModuleClass,
+                myNativeModuleClass.get(),
                 "releaseSQLiteConnection",
                 "(I)V"
         );
@@ -153,24 +230,21 @@ namespace watermelondb {
         
         // Check if a Java exception occurred (e.g., "No driver with tag X available")
         if (env->ExceptionCheck()) {
-            jthrowable exception = env->ExceptionOccurred();
+            LocalRef<jthrowable> exception(env, env->ExceptionOccurred());
             env->ExceptionClear();
             
             // Get the exception message
-            jclass exceptionClass = env->GetObjectClass(exception);
-            jmethodID getMessageMethod = env->GetMethodID(exceptionClass, "getMessage", "()Ljava/lang/String;");
-            jstring messageObj = (jstring)env->CallObjectMethod(exception, getMessageMethod);
+            LocalRef<jclass> exceptionClass(env, env->GetObjectClass(exception.get()));
+            jmethodID getMessageMethod = env->GetMethodID(exceptionClass.get(), "getMessage", "()Ljava/lang/String;");
+            LocalRef<jstring> messageObj(env, (jstring)env->CallObjectMethod(exception.get(), getMessageMethod));
             
             std::string message = "Database connection error for tag " + std::to_string(jTag);
-            if (messageObj) {
-                const char* messageChars = env->GetStringUTFChars(messageObj, nullptr);
+            if (messageObj.get()) {
+                const char* messageChars = env->GetStringUTFChars(messageObj.get(), nullptr);
                 message = std::string(messageChars);
-                env->ReleaseStringUTFChars(messageObj, messageChars);
+                env->ReleaseStringUTFChars(messageObj.get(), messageChars);
             }
-            
-            env->DeleteLocalRef(exception);
-            env->DeleteLocalRef(exceptionClass);
-            
+
             throw jsi::JSError(rt, message);
         }
         
@@ -212,7 +286,7 @@ namespace watermelondb {
             jstring jTable = env->NewStringUTF(tableStr.c_str());
 
             jmethodID isCachedMethod = env->GetMethodID(
-                    myNativeModuleClass,
+                    myNativeModuleClass.get(),
                     "isCached",
                     "(ILjava/lang/String;Ljava/lang/String;)Z");
 
@@ -223,7 +297,7 @@ namespace watermelondb {
                 records.push_back(std::move(jsiId));
             } else {
                 jmethodID markAsCachedMethod = env->GetMethodID(
-                        myNativeModuleClass,
+                        myNativeModuleClass.get(),
                         "markAsCached",
                         "(ILjava/lang/String;Ljava/lang/String;)V");
 

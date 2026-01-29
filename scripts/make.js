@@ -145,15 +145,12 @@ const copyNonJavaScriptFiles = (buildPath) => {
     'native/shared',
     'native/ios',
     'native/android',
-    'native/android-jsi',
     'native/specs',
     'react-native.config.js',
     'rn-cli.config.js',
   ])
   cleanFolder(`${buildPath}/native/android/build`)
   cleanFolder(`${buildPath}/native/android/bin/build`)
-  cleanFolder(`${buildPath}/native/android-jsi/build`)
-  cleanFolder(`${buildPath}/native/android-jsi/bin/build`)
 }
 
 cleanFolder(DIST_PATH)

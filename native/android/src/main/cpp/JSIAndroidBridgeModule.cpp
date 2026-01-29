@@ -1,12 +1,31 @@
 #include "JSIAndroidBridgeModule.h"
 #include "JSIAndroidUtils.h"
+#include "SliceImportEngine.h"
+#include "SliceImportDatabaseAdapterAndroid.h"
 
 #include <jni.h>
 #include <fbjni/fbjni.h>
 #include <memory>
 #include <sqlite3.h>
+#include <ReactCommon/TurboModuleUtils.h>
+#include <unordered_map>
 
 namespace facebook::react {
+
+namespace {
+std::mutex gImportMutex;
+std::unordered_map<void*, std::shared_ptr<watermelondb::SliceImportEngine>> gActiveImports;
+
+void retainImport(const std::shared_ptr<watermelondb::SliceImportEngine>& engine) {
+    std::lock_guard<std::mutex> lock(gImportMutex);
+    gActiveImports[engine.get()] = engine;
+}
+
+void releaseImport(void* key) {
+    std::lock_guard<std::mutex> lock(gImportMutex);
+    gActiveImports.erase(key);
+}
+} // namespace
 
 JSIAndroidBridgeModule::JSIAndroidBridgeModule(std::shared_ptr<CallInvoker> jsInvoker)
 : NativeWatermelonDBModuleCxxSpec(std::move(jsInvoker)) {
@@ -141,6 +160,48 @@ jsi::Array JSIAndroidBridgeModule::execSqlQuery(jsi::Runtime &rt, double tag, js
     jsi::Value result = watermelondb::execSqlQuery(databaseBridge, rt, tagValue, sql, args);
     
     return result.asObject(rt).asArray(rt);
+}
+
+jsi::Value JSIAndroidBridgeModule::importRemoteSlice(jsi::Runtime &rt, double tag, jsi::String sliceUrl) {
+    const double tagCopy = tag;
+    const std::string sliceUrlUtf8 = sliceUrl.utf8(rt);
+
+    jobject databaseBridge = getDatabaseBridge();
+    
+    if (databaseBridge == nullptr) {
+        throw jsi::JSError(rt, "DatabaseBridge instance not available. Make sure the DatabaseBridge native module is initialized.");
+    }
+
+    auto jsInvoker = jsInvoker_;
+
+    return createPromiseAsJSIValue(rt, [databaseBridge, tagCopy, sliceUrlUtf8, jsInvoker](jsi::Runtime &rt2, std::shared_ptr<Promise> promise) {
+        JNIEnv* env = watermelondb::getEnv();
+        if (env) {
+            watermelondb::configureJNI(env);
+        }
+        auto dbInterface = createAndroidDatabaseInterface(databaseBridge, static_cast<jint>(tagCopy));
+        if (!dbInterface) {
+            jsInvoker->invokeAsync([promise]() mutable {
+                promise->reject("Failed to create Android database interface");
+            });
+            return;
+        }
+
+        auto engine = std::make_shared<watermelondb::SliceImportEngine>(dbInterface);
+        void* engineKey = engine.get();
+        retainImport(engine);
+
+        engine->startImport(sliceUrlUtf8, [engineKey, jsInvoker, promise](const std::string& errorMessage) mutable {
+            releaseImport(engineKey);
+            jsInvoker->invokeAsync([promise, errorMessage]() mutable {
+                if (!errorMessage.empty()) {
+                    promise->reject(errorMessage);
+                } else {
+                    promise->resolve(jsi::Value::undefined());
+                }
+            });
+        });
+    });
 }
 
 } // namespace facebook::react

@@ -18,6 +18,7 @@ public:
     
     jsi::Array query(jsi::Runtime &rt, double tag, jsi::String table, jsi::String query);
     jsi::Array execSqlQuery(jsi::Runtime &rt, double tag, jsi::String sql, jsi::Array args);
+    jsi::Value importRemoteSlice(jsi::Runtime &rt, double tag, jsi::String sliceUrl);
 
 private:
     std::mutex mutex_;
