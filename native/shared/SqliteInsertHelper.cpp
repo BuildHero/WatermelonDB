@@ -24,15 +24,15 @@ bool SqliteInsertHelper::bindFieldValue(
             rc = sqlite3_bind_double(stmt, paramIndex, value.realValue);
             break;
         case FieldValue::Type::TEXT_VALUE:
-            rc = sqlite3_bind_text(stmt, paramIndex, value.textValue.c_str(), -1, SQLITE_TRANSIENT);
-            break;
+            rc = sqlite3_bind_text(stmt, paramIndex, value.textValue.c_str(), -1, SQLITE_STATIC);
+            break; 
         case FieldValue::Type::BLOB_VALUE:
             rc = sqlite3_bind_blob(
                 stmt,
                 paramIndex,
                 value.blobValue.data(),
                 static_cast<int>(value.blobValue.size()),
-                SQLITE_TRANSIENT
+                SQLITE_STATIC
             );
             break;
     }
@@ -161,10 +161,11 @@ bool SqliteInsertHelper::insertRowsMulti(
         sqlite3_clear_bindings(stmt);
 
         int paramIndex = 1;
+        static const FieldValue kNullValue = FieldValue::makeNull();
         for (size_t rowIdx = 0; rowIdx < static_cast<size_t>(chunkSize); rowIdx++) {
             const auto& rowValues = rows[offset + rowIdx];
             for (size_t colIdx = 0; colIdx < columnCount; colIdx++) {
-                FieldValue value = (colIdx < rowValues.size()) ? rowValues[colIdx] : FieldValue::makeNull();
+                const FieldValue& value = (colIdx < rowValues.size()) ? rowValues[colIdx] : kNullValue;
                 if (!bindFieldValue(db, stmt, paramIndex, value, errorMessage)) {
                     if (!shouldCache && stmt) {
                         sqlite3_finalize(stmt);
