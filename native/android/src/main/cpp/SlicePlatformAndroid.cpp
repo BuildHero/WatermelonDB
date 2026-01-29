@@ -190,7 +190,7 @@ Java_com_nozbe_watermelondb_slice_SliceDownloadManager_nativeOnComplete(
         gDownloadCallbacks.erase(it);
     }
 
-    if (!state || state->completed.exchange(true)) {
+    if (!state || state->completed.load()) {
         return;
     }
 
@@ -203,6 +203,9 @@ Java_com_nozbe_watermelondb_slice_SliceDownloadManager_nativeOnComplete(
         }
     }
     watermelondb::android::runOnWorkQueue([state, error]() {
+        if (state->completed.exchange(true)) {
+            return;
+        }
         state->onComplete(error);
     });
 }
