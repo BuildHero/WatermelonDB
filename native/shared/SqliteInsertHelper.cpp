@@ -24,8 +24,7 @@ bool SqliteInsertHelper::bindFieldValue(
             rc = sqlite3_bind_double(stmt, paramIndex, value.realValue);
             break;
         case FieldValue::Type::TEXT_VALUE:
-            // Safe because sqlite3_step is called immediately after binding
-            rc = sqlite3_bind_text(stmt, paramIndex, value.textValue.c_str(), -1, SQLITE_STATIC);
+            rc = sqlite3_bind_text(stmt, paramIndex, value.textValue.c_str(), -1, SQLITE_TRANSIENT);
             break;
         case FieldValue::Type::BLOB_VALUE:
             rc = sqlite3_bind_blob(
@@ -33,7 +32,7 @@ bool SqliteInsertHelper::bindFieldValue(
                 paramIndex,
                 value.blobValue.data(),
                 static_cast<int>(value.blobValue.size()),
-                SQLITE_STATIC
+                SQLITE_TRANSIENT
             );
             break;
     }
