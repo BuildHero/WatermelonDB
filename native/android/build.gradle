@@ -10,7 +10,7 @@ def newArchEnabled = project.hasProperty("newArchEnabled") && project.newArchEna
 
 android {
     namespace "com.nozbe.watermelondb"
-    namespace "com.nozbe.watermelondb"
+
     compileSdkVersion rootProject.hasProperty('compileSdkVersion') ? rootProject.compileSdkVersion : DEFAULT_COMPILE_SDK_VERSION
     buildToolsVersion rootProject.hasProperty('buildToolsVersion') ? rootProject.buildToolsVersion : DEFAULT_BUILD_TOOLS_VERSION
 
