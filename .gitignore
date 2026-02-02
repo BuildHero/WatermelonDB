@@ -20,3 +20,7 @@ coverage/
 # docs/README.md
 docs-build/
 .npmrc
+
+native/android/.cxx/
+*.hprof
+native/iosTest/Pods/
