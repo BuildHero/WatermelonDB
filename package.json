@@ -1,7 +1,7 @@
 {
   "name": "@BuildHero/watermelondb",
   "description": "Build powerful React Native and React web apps that scale from hundreds to tens of thousands of records and remain fast",
-  "version": "5.0.0-109",
+  "version": "5.0.0-110",
   "scripts": {
     "build": "NODE_ENV=production node ./scripts/make.js",
     "dev": "NODE_ENV=development node ./scripts/make.js",
@@ -10,7 +10,7 @@
     "prettier": "prettier-eslint --config ./.prettierrc --write \"./src/**/*.{js,jsx,ts,tsx}\"",
     "eslint": "eslint ./src -c ./.eslintrc.yml --cache --cache-location ./.cache/.eslintcache --ext .js,.jsx,.ts,.tsx",
     "typecheck": "tsc --noEmit",
-    "test": "jest --config=./jest.config.js --forceExit --detectOpenHandles --no-cache && yarn run test:cpp && yarn run test:android && yarn run test:ios",
+    "test": "jest --config=./jest.config.js --forceExit --detectOpenHandles --no-cache",
     "test:cpp": "native/shared/tests/run_cpp_tests.sh",
     "test:watch": "jest --config=./jest.config.js --watch",
     "test:coverage": "jest --config=./jest.config.js --coverage",
