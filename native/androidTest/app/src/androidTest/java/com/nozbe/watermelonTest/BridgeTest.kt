@@ -1,5 +1,6 @@
 package com.nozbe.watermelonTest
 
+import org.junit.Ignore
 import org.junit.Test
 import androidx.test.rule.ActivityTestRule
 import android.util.Log
@@ -12,6 +13,7 @@ class BridgeTest {
     val activityRule: ActivityTestRule<MainActivity> = ActivityTestRule(MainActivity::class.java)
 
     @Test
+    @Ignore("Requires JS integration test harness; skipped in androidTest runner by default.")
     fun testBridge() {
         synchronized(BridgeTestReporter.testFinishedNotification) {
             BridgeTestReporter.testFinishedNotification.wait(500000)

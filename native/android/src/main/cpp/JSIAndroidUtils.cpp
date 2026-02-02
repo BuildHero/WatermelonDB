@@ -1,34 +1,16 @@
 #include "JSIAndroidUtils.h"
 #include "../../../../shared/DatabaseUtils.h"
 #include <string>
+#include <cctype>
 #include <fbjni/fbjni.h>
 #include <sqlite3.h>
+#include "SQLiteConnection.h"
 #include <android/log.h>
 #include <mutex>
 #include <condition_variable>
 #include <chrono>
 
 using namespace watermelondb;
-
-struct SQLiteConnection {
-    sqlite3* const db;
-    const int openFlags;
-    char* path;
-    char* label;
-
-    volatile bool canceled;
-
-    SQLiteConnection(sqlite3* db, int openFlags, const char* path_, const char* label_) :
-            db(db), openFlags(openFlags), canceled(false) {
-        path = strdup(path_);
-        label = strdup(label_);
-    }
-
-    ~SQLiteConnection() {
-        free(path);
-        free(label);
-    }
-};
 
 template <typename T>
 class LocalRef {
@@ -46,6 +28,19 @@ private:
 };
 
 namespace watermelondb {
+
+    static bool isReadOnlyQuery(const std::string &query) {
+        size_t i = 0;
+        while (i < query.size() && std::isspace(static_cast<unsigned char>(query[i]))) {
+            i++;
+        }
+        std::string prefix;
+        for (; i < query.size() && prefix.size() < 7; i++) {
+            char c = static_cast<char>(std::tolower(static_cast<unsigned char>(query[i])));
+            prefix.push_back(c);
+        }
+        return prefix.rfind("select", 0) == 0 || prefix.rfind("with", 0) == 0 || prefix.rfind("explain", 0) == 0;
+    }
     static JavaVM* gJvm = nullptr;
     static std::mutex gJvmMutex;
     static std::condition_variable gJvmCv;
@@ -135,15 +130,19 @@ namespace watermelondb {
 
         LocalRef<jclass> myNativeModuleClass(env, env->GetObjectClass(bridge));
 
+        const bool readOnly = isReadOnlyQuery(queryStr);
+        const char* getMethod = readOnly ? "getSQLiteReadConnection" : "getSQLiteConnection";
+        const char* releaseMethod = readOnly ? "releaseSQLiteReadConnection" : "releaseSQLiteConnection";
+
         jmethodID getConnectionMethod = env->GetMethodID(
                 myNativeModuleClass.get(),
-                "getSQLiteConnection",
+                getMethod,
                 "(I)J"
         );
 
         jmethodID releaseConnectionMethod = env->GetMethodID(
                 myNativeModuleClass.get(),
-                "releaseSQLiteConnection",
+                releaseMethod,
                 "(I)V"
         );
 
@@ -216,13 +215,13 @@ namespace watermelondb {
 
         jmethodID getConnectionMethod = env->GetMethodID(
                 myNativeModuleClass.get(),
-                "getSQLiteConnection",
+                "getSQLiteReadConnection",
                 "(I)J"
         );
 
         jmethodID releaseConnectionMethod = env->GetMethodID(
                 myNativeModuleClass.get(),
-                "releaseSQLiteConnection",
+                "releaseSQLiteReadConnection",
                 "(I)V"
         );
 

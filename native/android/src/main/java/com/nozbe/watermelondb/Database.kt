@@ -16,28 +16,50 @@ import java.lang.reflect.Method
 
 class Database(private val name: String, private val context: Context) {
 
-    private val db: SQLiteDatabase by lazy {
-        SQLiteDatabase.openOrCreateDatabase(
-            // TODO: This SUCKS. Seems like Android doesn't like sqlite `?mode=memory&cache=shared` mode. To avoid random breakages, save the file to /tmp, but this is slow.
-            // NOTE: This is because Android system SQLite is not compiled with SQLITE_USE_URI=1
-            // issue `PRAGMA cache=shared` query after connection when needed
-            if (name == ":memory:" || name.contains("mode=memory")) {
-                context.cacheDir.delete()
-                File(context.cacheDir, name).path
-            } else
-            // On some systems there is some kind of lock on `/databases` folder ¯\_(ツ)_/¯
-                context.getDatabasePath("$name.db").path.replace("/databases", ""),
-            null
-        )
+    private val databasePath: String = resolveDatabasePath()
+    private val transactionDepth = ThreadLocal<Int>()
+
+    private val writerDb: SQLiteDatabase by lazy {
+        SQLiteDatabase.openOrCreateDatabase(databasePath, null).also {
+            runPragma(it, "PRAGMA journal_mode=WAL")
+        }
+    }
+
+    private val readerDb: SQLiteDatabase by lazy {
+        // Ensure writer is opened and WAL is enabled before opening the reader.
+        writerDb
+        if (isInMemoryPath(databasePath)) {
+            writerDb
+        } else {
+            SQLiteDatabase.openDatabase(databasePath, null, SQLiteDatabase.OPEN_READONLY).also {
+                try {
+                    runPragma(it, "PRAGMA query_only=1")
+                } catch (_: Exception) {
+                    // Best effort; some builds may not allow setting pragmas on read-only connections.
+                }
+            }
+        }
+    }
+
+    private fun runPragma(db: SQLiteDatabase, sql: String) {
+        db.rawQuery(sql, null).use { /* pragma executed */ }
     }
 
     var userVersion: Int
-        get() = db.version
+        get() = writerDb.version
         set(value) {
-            db.version = value
+            writerDb.version = value
         }
 
     fun acquireSqliteConnection(): Long {
+        return acquireSqliteConnection(writerDb)
+    }
+
+    fun acquireSqliteReadConnection(): Long {
+        return acquireSqliteConnection(readerDb)
+    }
+
+    private fun acquireSqliteConnection(db: SQLiteDatabase): Long {
         val getThreadConnectionFlags = db.javaClass.getDeclaredMethod("getThreadDefaultConnectionFlags", Boolean::class.java)
 
         getThreadConnectionFlags.isAccessible = true
@@ -81,6 +103,14 @@ class Database(private val name: String, private val context: Context) {
     }
 
     fun releaseSQLiteConnection() {
+        releaseSQLiteConnection(writerDb)
+    }
+
+    fun releaseSQLiteReadConnection() {
+        releaseSQLiteConnection(readerDb)
+    }
+
+    private fun releaseSQLiteConnection(db: SQLiteDatabase) {
         val getThreadSession: Method = db.javaClass.getDeclaredMethod("getThreadSession")
 
         getThreadSession.isAccessible = true
@@ -114,11 +144,12 @@ class Database(private val name: String, private val context: Context) {
         }
 
     fun execute(query: SQL, args: QueryArgs = emptyArray()) =
-        db.execSQL(query, args)
+        writerDb.execSQL(query, args)
 
-    fun delete(query: SQL, args: QueryArgs) = db.execSQL(query, args)
+    fun delete(query: SQL, args: QueryArgs) = writerDb.execSQL(query, args)
 
-    fun rawQuery(query: SQL, args: RawQueryArgs = emptyArray()): Cursor = db.rawQuery(query, args)
+    fun rawQuery(query: SQL, args: RawQueryArgs = emptyArray()): Cursor = readDatabase(query).rawQuery(query, args)
+    fun rawQueryOnWriter(query: SQL, args: RawQueryArgs = emptyArray()): Cursor = writerDb.rawQuery(query, args)
 
     fun count(query: SQL, args: RawQueryArgs = emptyArray()): Int =
         rawQuery(query, args).use {
@@ -168,25 +199,91 @@ class Database(private val name: String, private val context: Context) {
     }
 
     fun transaction(function: () -> Unit) {
-        db.beginTransaction()
+        writerDb.beginTransaction()
+        incrementTransactionDepth()
 
         try {
             function()
-            db.setTransactionSuccessful()
+            writerDb.setTransactionSuccessful()
         } catch (e: SQLiteFullException) {
             e.printStackTrace()
             Log.e("watermelondb", "found this error ${e.localizedMessage}")
             throw e
         } finally {
             try {
-                db.endTransaction()
+                writerDb.endTransaction()
             } catch (e: Exception) {
                 Log.e("watermelondb", "eee ${e.localizedMessage}")
             }
+            decrementTransactionDepth()
         }
     }
 
-    fun close() = db.close()
+    fun close() {
+        writerDb.close()
+        if (readerDb != writerDb) {
+            readerDb.close()
+        }
+    }
 
-    fun setUpdateHook(updateHook: SQLiteUpdateHook) = db.setUpdateHook(updateHook)
+    fun setUpdateHook(updateHook: SQLiteUpdateHook) = writerDb.setUpdateHook(updateHook)
+
+    private fun resolveDatabasePath(): String {
+        // TODO: This SUCKS. Seems like Android doesn't like sqlite `?mode=memory&cache=shared` mode. To avoid random breakages, save the file to /tmp, but this is slow.
+        // NOTE: This is because Android system SQLite is not compiled with SQLITE_USE_URI=1
+        // issue `PRAGMA cache=shared` query after connection when needed
+        return if (name == ":memory:" || name.contains("mode=memory")) {
+            context.cacheDir.delete()
+            File(context.cacheDir, name).path
+        } else {
+            // On some systems there is some kind of lock on `/databases` folder ¯\_(ツ)_/¯
+            context.getDatabasePath("$name.db").path.replace("/databases", "")
+        }
+    }
+
+    private fun readDatabase(query: SQL): SQLiteDatabase {
+        if ((transactionDepth.get() ?: 0) > 0) {
+            return writerDb
+        }
+        return if (isReadOnlyQuery(query)) readerDb else writerDb
+    }
+
+    private fun isReadOnlyQuery(query: SQL): Boolean {
+        val trimmed = query.trimStart().lowercase()
+        return trimmed.startsWith("select") || trimmed.startsWith("with") || trimmed.startsWith("explain")
+    }
+
+    private fun incrementTransactionDepth() {
+        val next = (transactionDepth.get() ?: 0) + 1
+        transactionDepth.set(next)
+    }
+
+    private fun decrementTransactionDepth() {
+        val next = (transactionDepth.get() ?: 0) - 1
+        if (next <= 0) {
+            transactionDepth.remove()
+        } else {
+            transactionDepth.set(next)
+        }
+    }
+
+    private fun isInMemoryPath(path: String): Boolean {
+        return path == ":memory:" || path.contains("mode=memory")
+    }
+
+    internal fun _test_isReadOnlyQuery(query: SQL): Boolean {
+        return isReadOnlyQuery(query)
+    }
+
+    internal fun _test_readDatabaseIdentity(query: SQL): String {
+        return if (readDatabase(query) === readerDb) "reader" else "writer"
+    }
+
+    internal fun _test_readerQueryOnlyValue(): Int {
+        val cursor = readerDb.rawQuery("pragma query_only", emptyArray())
+        cursor.use {
+            it.moveToFirst()
+            return it.getInt(0)
+        }
+    }
 }

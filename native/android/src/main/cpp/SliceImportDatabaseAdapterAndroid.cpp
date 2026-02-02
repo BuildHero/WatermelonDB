@@ -36,13 +36,7 @@ static bool execSQL(sqlite3 *db, const char *sql, std::string &errorMessage) {
     return true;
 }
 
-struct SQLiteConnection {
-    sqlite3* const db;
-    const int openFlags;
-    char* path;
-    char* label;
-    volatile bool canceled;
-};
+#include "SQLiteConnection.h"
 
 static bool runOnAndroidWorkQueueSync(const std::function<void()>& work, std::string* errorMessage) {
     if (!watermelondb::waitForJvm(5000)) {

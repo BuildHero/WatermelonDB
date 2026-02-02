@@ -295,6 +295,25 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
         }
     }
 
+    fun getSQLiteReadConnection(tag: ConnectionTag): Long {
+        try {
+            val driver = getDriver(tag)
+            return driver.getDatabase().acquireSqliteReadConnection()
+        } catch (e: Exception) {
+            android.util.Log.e("WatermelonDB", "getSQLiteReadConnection failed for tag $tag", e)
+            throw Exception("Failed to get SQLite read connection for tag $tag: ${e.message}", e)
+        }
+    }
+
+    fun releaseSQLiteReadConnection(tag: ConnectionTag) {
+        try {
+            val driver = getDriver(tag)
+            driver.getDatabase().releaseSQLiteReadConnection()
+        } catch (e: Exception) {
+            android.util.Log.e("WatermelonDB", "releaseSQLiteReadConnection failed for tag $tag", e)
+        }
+    }
+
     fun isCached(tag: ConnectionTag, table: TableName, id: RecordID): Boolean {
         val driver = getDriver(tag)
 
@@ -306,6 +325,7 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
 
         return driver.markAsCached(table, id)
     }
+
 
     private fun getDriver(tag: ConnectionTag): DatabaseDriver {
         val connection = connections[tag]

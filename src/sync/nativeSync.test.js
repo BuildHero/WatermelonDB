@@ -1,0 +1,98 @@
+const makeTurboModule = () => ({
+  configureSync: jest.fn(),
+  startSync: jest.fn(),
+  getSyncStateJson: jest.fn(() => '{"state":"idle"}'),
+  addSyncListener: jest.fn(),
+  removeSyncListener: jest.fn(),
+  notifyQueueDrained: jest.fn(),
+  setAuthToken: jest.fn(),
+  clearAuthToken: jest.fn(),
+  initSyncSocket: jest.fn(),
+  syncSocketAuthenticate: jest.fn(),
+  syncSocketDisconnect: jest.fn(),
+})
+
+const setupModule = (moduleInstance = makeTurboModule()) => {
+  jest.resetModules()
+  jest.doMock('react-native', () => ({
+    TurboModuleRegistry: {
+      get: jest.fn(() => moduleInstance),
+    },
+    TurboModule: class {},
+  }))
+  // eslint-disable-next-line global-require
+  return require('./nativeSync')
+}
+
+describe('nativeSync', () => {
+  it('throws if native module is missing', () => {
+    jest.resetModules()
+    jest.doMock('react-native', () => ({
+      TurboModuleRegistry: {
+        get: jest.fn(() => null),
+      },
+      TurboModule: class {},
+    }))
+    const nativeSync = require('./nativeSync')
+    expect(() => nativeSync.configureSync({})).toThrow('[WatermelonDB][Sync] NativeWatermelonDBModule not available')
+  })
+
+  it('configures sync with JSON string', () => {
+    const moduleInstance = makeTurboModule()
+    const nativeSync = setupModule(moduleInstance)
+    nativeSync.configureSync({ endpoint: 'x', connectionTag: 1 })
+    expect(moduleInstance.configureSync).toHaveBeenCalledWith(
+      JSON.stringify({ endpoint: 'x', connectionTag: 1 }),
+    )
+  })
+
+  it('parses getSyncState JSON and handles invalid JSON', () => {
+    const moduleInstance = makeTurboModule()
+    moduleInstance.getSyncStateJson.mockReturnValue('{"state":"ok"}')
+    const nativeSync = setupModule(moduleInstance)
+    expect(nativeSync.getSyncState()).toEqual({ state: 'ok' })
+
+    moduleInstance.getSyncStateJson.mockReturnValue('not-json')
+    expect(nativeSync.getSyncState()).toEqual({})
+  })
+
+  it('wraps addSyncListener and unregisters', () => {
+    const moduleInstance = makeTurboModule()
+    let capturedListener
+    moduleInstance.addSyncListener.mockImplementation(listener => {
+      capturedListener = listener
+      return 7
+    })
+    const nativeSync = setupModule(moduleInstance)
+
+    const listener = jest.fn()
+    const unsubscribe = nativeSync.addSyncListener(listener)
+
+    capturedListener('{"type":"state","state":"syncing"}')
+    expect(listener).toHaveBeenCalledWith({ type: 'state', state: 'syncing' })
+
+    unsubscribe()
+    expect(moduleInstance.removeSyncListener).toHaveBeenCalledWith(7)
+  })
+
+  it('passes through remaining methods', () => {
+    const moduleInstance = makeTurboModule()
+    const nativeSync = setupModule(moduleInstance)
+
+    nativeSync.startSync('reason')
+    nativeSync.notifyQueueDrained()
+    nativeSync.setAuthToken('token')
+    nativeSync.clearAuthToken()
+    nativeSync.initSyncSocket('wss://example.com')
+    nativeSync.syncSocketAuthenticate('token')
+    nativeSync.syncSocketDisconnect()
+
+    expect(moduleInstance.startSync).toHaveBeenCalledWith('reason')
+    expect(moduleInstance.notifyQueueDrained).toHaveBeenCalledWith()
+    expect(moduleInstance.setAuthToken).toHaveBeenCalledWith('token')
+    expect(moduleInstance.clearAuthToken).toHaveBeenCalledWith()
+    expect(moduleInstance.initSyncSocket).toHaveBeenCalledWith('wss://example.com')
+    expect(moduleInstance.syncSocketAuthenticate).toHaveBeenCalledWith('token')
+    expect(moduleInstance.syncSocketDisconnect).toHaveBeenCalledWith()
+  })
+})

@@ -10,7 +10,7 @@ import java.util.Arrays
 
 class MainApplication : Application(), ReactApplication {
 
-    private val reactNativeHost = object : ReactNativeHost(this) {
+    override val reactNativeHost: ReactNativeHost = object : ReactNativeHost(this) {
         override fun getUseDeveloperSupport(): Boolean = BuildConfig.DEBUG
 
         override fun getPackages(): List<ReactPackage> =
@@ -22,6 +22,4 @@ class MainApplication : Application(), ReactApplication {
 
         override fun getJSMainModuleName(): String = "src/index.integrationTests.native"
     }
-
-    override fun getReactNativeHost(): ReactNativeHost = reactNativeHost
 }

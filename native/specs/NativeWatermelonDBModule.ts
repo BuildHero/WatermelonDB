@@ -7,6 +7,17 @@ export interface Spec extends TurboModule {
     tag: number, 
     sliceUrl: string
   ): Promise<void>
+  configureSync(configJson: string): void
+  startSync(reason: string): void
+  getSyncStateJson(): string
+  addSyncListener(listener: (eventJson: string) => void): number
+  removeSyncListener(listenerId: number): void
+  notifyQueueDrained(): void
+  setAuthToken(token: string): void
+  clearAuthToken(): void
+  initSyncSocket(socketUrl: string): void
+  syncSocketAuthenticate(token: string): void
+  syncSocketDisconnect(): void
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>('NativeWatermelonDBModule')

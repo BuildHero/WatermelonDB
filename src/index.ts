@@ -22,3 +22,12 @@ export type {
 export type { SchemaMigrations } from './Schema/migrations'
 
 export { Q }
+
+export {
+  configureSync,
+  startSync,
+  getSyncState,
+  addSyncListener,
+} from './sync/nativeSync'
+
+export { SyncManager } from './sync/SyncManager'

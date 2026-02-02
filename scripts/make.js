@@ -149,8 +149,12 @@ const copyNonJavaScriptFiles = (buildPath) => {
     'react-native.config.js',
     'rn-cli.config.js',
   ])
+  // Clean build directories
   cleanFolder(`${buildPath}/native/android/build`)
   cleanFolder(`${buildPath}/native/android/bin/build`)
+  // Remove test directories from dist
+  cleanFolder(`${buildPath}/native/shared/tests`)
+  cleanFolder(`${buildPath}/native/android/src/androidTest`)
 }
 
 cleanFolder(DIST_PATH)

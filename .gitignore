@@ -24,3 +24,5 @@ docs-build/
 native/android/.cxx/
 *.hprof
 native/iosTest/Pods/
+native/android/libs/sqlite-android-extracted/
+native/android/libs/zstd-jni-extracted/

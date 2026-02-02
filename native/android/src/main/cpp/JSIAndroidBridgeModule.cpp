@@ -2,19 +2,25 @@
 #include "JSIAndroidUtils.h"
 #include "SliceImportEngine.h"
 #include "SliceImportDatabaseAdapterAndroid.h"
+#include "../../../../shared/SyncApplyEngine.h"
+#include "../../../../shared/JsonUtils.h"
 
 #include <jni.h>
 #include <fbjni/fbjni.h>
 #include <memory>
 #include <sqlite3.h>
+#include "SQLiteConnection.h"
 #include <ReactCommon/TurboModuleUtils.h>
 #include <unordered_map>
+#include <cctype>
 
 namespace facebook::react {
 
 namespace {
 std::mutex gImportMutex;
 std::unordered_map<void*, std::shared_ptr<watermelondb::SliceImportEngine>> gActiveImports;
+std::mutex gSocketMutex;
+JSIAndroidBridgeModule* gSocketModule = nullptr;
 
 void retainImport(const std::shared_ptr<watermelondb::SliceImportEngine>& engine) {
     std::lock_guard<std::mutex> lock(gImportMutex);
@@ -27,8 +33,147 @@ void releaseImport(void* key) {
 }
 } // namespace
 
+static void emitSocketEvent(const std::string &eventJson) {
+    std::lock_guard<std::mutex> lock(gSocketMutex);
+    if (!gSocketModule) {
+        return;
+    }
+    gSocketModule->emitSyncEventFromNative(eventJson);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_nozbe_watermelondb_sync_SyncSocketManager_nativeOnStatus(
+    JNIEnv* env,
+    jclass,
+    jint status,
+    jstring errorMessage
+) {
+    std::string statusStr;
+    switch (status) {
+        case 0: statusStr = "connected"; break;
+        case 1: statusStr = "disconnected"; break;
+        default: statusStr = "error"; break;
+    }
+
+    std::string errorStr;
+    if (errorMessage) {
+        const char* chars = env->GetStringUTFChars(errorMessage, nullptr);
+        if (chars) {
+            errorStr = chars;
+            env->ReleaseStringUTFChars(errorMessage, chars);
+        }
+    }
+
+    std::string eventJson = std::string("{\"status\":\"") +
+                            statusStr + "\"";
+    if (!errorStr.empty()) {
+        eventJson += std::string(",\"data\":\"") + watermelondb::json_utils::escapeJsonString(errorStr) + "\"";
+    }
+    eventJson += "}";
+
+    emitSocketEvent(eventJson);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_nozbe_watermelondb_sync_SyncSocketManager_nativeOnCdc(
+    JNIEnv*,
+    jclass
+) {
+    emitSocketEvent("{\"status\":\"cdc\"}");
+}
+
+static sqlite3* acquireSqlite(jobject bridge, jint tag, std::string& errorMessage) {
+    JNIEnv* env = facebook::jni::Environment::current();
+    if (!env || !bridge) {
+        errorMessage = "DatabaseBridge not available";
+        return nullptr;
+    }
+    jclass cls = env->GetObjectClass(bridge);
+    if (!cls) {
+        env->ExceptionClear();
+        errorMessage = "DatabaseBridge class not found";
+        return nullptr;
+    }
+    jmethodID getConn = env->GetMethodID(cls, "getSQLiteConnection", "(I)J");
+    if (!getConn) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(cls);
+        errorMessage = "getSQLiteConnection not found";
+        return nullptr;
+    }
+    jlong ptr = env->CallLongMethod(bridge, getConn, tag);
+    env->DeleteLocalRef(cls);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        errorMessage = "Failed to get SQLite connection";
+        return nullptr;
+    }
+    if (!ptr) {
+        errorMessage = "SQLite connection pointer is null";
+        return nullptr;
+    }
+    auto connection = reinterpret_cast<SQLiteConnection*>(ptr);
+    if (!connection || !connection->db) {
+        errorMessage = "SQLite connection invalid";
+        return nullptr;
+    }
+    return connection->db;
+}
+
+static void releaseSqlite(jobject bridge, jint tag) {
+    JNIEnv* env = facebook::jni::Environment::current();
+    if (!env || !bridge) {
+        return;
+    }
+    jclass cls = env->GetObjectClass(bridge);
+    if (!cls) {
+        env->ExceptionClear();
+        return;
+    }
+    jmethodID releaseConn = env->GetMethodID(cls, "releaseSQLiteConnection", "(I)V");
+    if (releaseConn) {
+        env->CallVoidMethod(bridge, releaseConn, tag);
+    } else {
+        env->ExceptionClear();
+    }
+    env->DeleteLocalRef(cls);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+}
+
 JSIAndroidBridgeModule::JSIAndroidBridgeModule(std::shared_ptr<CallInvoker> jsInvoker)
 : NativeWatermelonDBModuleCxxSpec(std::move(jsInvoker)) {
+    {
+        std::lock_guard<std::mutex> lock(gSocketMutex);
+        gSocketModule = this;
+    }
+    syncEventState_ = std::make_shared<SyncEventState>();
+    syncEventState_->jsInvoker = jsInvoker_;
+    syncEngine_ = std::make_shared<watermelondb::SyncEngine>();
+    syncEngine_->setEventCallback([this](const std::string &eventJson) {
+        emitSyncEventLocked(eventJson);
+    });
+    syncEngine_->setApplyCallback([this](const std::string &payload, std::string &errorMessage) {
+        if (syncConnectionTag_ <= 0) {
+            errorMessage = "Missing connectionTag in sync config";
+            return false;
+        }
+        jobject databaseBridge = getDatabaseBridge();
+        if (!databaseBridge) {
+            errorMessage = "DatabaseBridge not available";
+            return false;
+        }
+        std::string error;
+        sqlite3* db = acquireSqlite(databaseBridge, (jint)syncConnectionTag_, error);
+        if (!db) {
+            errorMessage = error;
+            return false;
+        }
+        bool ok = watermelondb::applySyncPayload(db, payload, errorMessage);
+        releaseSqlite(databaseBridge, (jint)syncConnectionTag_);
+        return ok;
+    });
     JNIEnv* env = getEnv();
     
     jobject localBridge = findDatabaseBridgeFromContext();
@@ -43,9 +188,25 @@ JSIAndroidBridgeModule::JSIAndroidBridgeModule(std::shared_ptr<CallInvoker> jsIn
 }
 
 JSIAndroidBridgeModule::~JSIAndroidBridgeModule() {
+    {
+        std::lock_guard<std::mutex> lock(gSocketMutex);
+        if (gSocketModule == this) {
+            gSocketModule = nullptr;
+        }
+    }
+    if (syncEngine_) {
+        syncEngine_->shutdown();
+    }
     if (globalDatabaseBridge_ != nullptr) {
         getEnv()->DeleteGlobalRef(globalDatabaseBridge_);
         globalDatabaseBridge_ = nullptr;
+    }
+    auto state = syncEventState_;
+    if (state) {
+        const std::lock_guard<std::mutex> lock(state->mutex);
+        state->alive = false;
+        state->runtime = nullptr;
+        state->listeners.clear();
     }
 }
 
@@ -201,6 +362,220 @@ jsi::Value JSIAndroidBridgeModule::importRemoteSlice(jsi::Runtime &rt, double ta
                 }
             });
         });
+    });
+}
+
+void JSIAndroidBridgeModule::configureSync(jsi::Runtime &rt, jsi::String configJson) {
+    auto state = syncEventState_;
+    if (state) {
+        const std::lock_guard<std::mutex> lock(state->mutex);
+        state->runtime = &rt;
+    }
+    const std::string config = configJson.utf8(rt);
+    const std::string tagKey = "\"connectionTag\"";
+    size_t pos = config.find(tagKey);
+    if (pos != std::string::npos) {
+        pos = config.find(':', pos + tagKey.size());
+        if (pos != std::string::npos) {
+            pos++;
+            while (pos < config.size() && std::isspace(static_cast<unsigned char>(config[pos]))) {
+                pos++;
+            }
+            long long value = 0;
+            bool any = false;
+            while (pos < config.size() && std::isdigit(static_cast<unsigned char>(config[pos]))) {
+                any = true;
+                value = value * 10 + (config[pos] - '0');
+                pos++;
+            }
+            if (any) {
+                syncConnectionTag_ = value;
+            }
+        }
+    }
+    if (syncEngine_) {
+        syncEngine_->configure(configJson.utf8(rt));
+    }
+}
+
+void JSIAndroidBridgeModule::startSync(jsi::Runtime &rt, jsi::String reason) {
+    auto state = syncEventState_;
+    if (state) {
+        const std::lock_guard<std::mutex> lock(state->mutex);
+        state->runtime = &rt;
+    }
+    if (syncEngine_) {
+        syncEngine_->start(reason.utf8(rt));
+    }
+}
+
+jsi::String JSIAndroidBridgeModule::getSyncStateJson(jsi::Runtime &rt) {
+    auto state = syncEventState_;
+    if (state) {
+        const std::lock_guard<std::mutex> lock(state->mutex);
+        state->runtime = &rt;
+    }
+    if (syncEngine_) {
+        return jsi::String::createFromUtf8(rt, syncEngine_->stateJson());
+    }
+    return jsi::String::createFromUtf8(rt, "{\"state\":\"idle\"}");
+}
+
+double JSIAndroidBridgeModule::addSyncListener(jsi::Runtime &rt, jsi::Function listener) {
+    auto state = syncEventState_;
+    if (!state) {
+        return 0;
+    }
+    const std::lock_guard<std::mutex> lock(state->mutex);
+    state->runtime = &rt;
+    const int64_t id = nextSyncListenerId_++;
+    state->listeners.emplace(id, std::move(listener));
+    return static_cast<double>(id);
+}
+
+void JSIAndroidBridgeModule::removeSyncListener(jsi::Runtime &rt, double listenerId) {
+    auto state = syncEventState_;
+    if (!state) {
+        return;
+    }
+    const std::lock_guard<std::mutex> lock(state->mutex);
+    state->runtime = &rt;
+    state->listeners.erase(static_cast<int64_t>(listenerId));
+}
+
+void JSIAndroidBridgeModule::notifyQueueDrained(jsi::Runtime &rt) {
+    auto state = syncEventState_;
+    if (state) {
+        const std::lock_guard<std::mutex> lock(state->mutex);
+        state->runtime = &rt;
+    }
+    if (syncEngine_) {
+        syncEngine_->notifyQueueDrained();
+    }
+}
+
+void JSIAndroidBridgeModule::setAuthToken(jsi::Runtime &rt, jsi::String token) {
+    auto state = syncEventState_;
+    if (state) {
+        const std::lock_guard<std::mutex> lock(state->mutex);
+        state->runtime = &rt;
+    }
+    if (syncEngine_) {
+        syncEngine_->setAuthToken(token.utf8(rt));
+    }
+}
+
+void JSIAndroidBridgeModule::clearAuthToken(jsi::Runtime &rt) {
+    auto state = syncEventState_;
+    if (state) {
+        const std::lock_guard<std::mutex> lock(state->mutex);
+        state->runtime = &rt;
+    }
+    if (syncEngine_) {
+        syncEngine_->clearAuthToken();
+    }
+}
+
+void JSIAndroidBridgeModule::initSyncSocket(jsi::Runtime &rt, jsi::String socketUrl) {
+    auto state = syncEventState_;
+    if (state) {
+        const std::lock_guard<std::mutex> lock(state->mutex);
+        state->runtime = &rt;
+    }
+    JNIEnv* env = getEnv();
+    jclass cls = env->FindClass("com/nozbe/watermelondb/sync/SyncSocketManager");
+    if (!cls) {
+        env->ExceptionClear();
+        return;
+    }
+    jmethodID method = env->GetStaticMethodID(cls, "initialize", "(Ljava/lang/String;)V");
+    if (!method) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(cls);
+        return;
+    }
+    std::string url = socketUrl.utf8(rt);
+    jstring jurl = env->NewStringUTF(url.c_str());
+    env->CallStaticVoidMethod(cls, method, jurl);
+    env->DeleteLocalRef(jurl);
+    env->DeleteLocalRef(cls);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+}
+
+void JSIAndroidBridgeModule::syncSocketAuthenticate(jsi::Runtime &rt, jsi::String token) {
+    auto state = syncEventState_;
+    if (state) {
+        const std::lock_guard<std::mutex> lock(state->mutex);
+        state->runtime = &rt;
+    }
+    JNIEnv* env = getEnv();
+    jclass cls = env->FindClass("com/nozbe/watermelondb/sync/SyncSocketManager");
+    if (!cls) {
+        env->ExceptionClear();
+        return;
+    }
+    jmethodID method = env->GetStaticMethodID(cls, "authenticate", "(Ljava/lang/String;)V");
+    if (!method) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(cls);
+        return;
+    }
+    std::string tokenStr = token.utf8(rt);
+    jstring jtoken = env->NewStringUTF(tokenStr.c_str());
+    env->CallStaticVoidMethod(cls, method, jtoken);
+    env->DeleteLocalRef(jtoken);
+    env->DeleteLocalRef(cls);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+}
+
+void JSIAndroidBridgeModule::syncSocketDisconnect(jsi::Runtime &rt) {
+    auto state = syncEventState_;
+    if (state) {
+        const std::lock_guard<std::mutex> lock(state->mutex);
+        state->runtime = &rt;
+    }
+    JNIEnv* env = getEnv();
+    jclass cls = env->FindClass("com/nozbe/watermelondb/sync/SyncSocketManager");
+    if (!cls) {
+        env->ExceptionClear();
+        return;
+    }
+    jmethodID method = env->GetStaticMethodID(cls, "disconnect", "()V");
+    if (!method) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(cls);
+        return;
+    }
+    env->CallStaticVoidMethod(cls, method);
+    env->DeleteLocalRef(cls);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+}
+
+void JSIAndroidBridgeModule::emitSyncEventFromNative(const std::string &eventJson) {
+    emitSyncEventLocked(eventJson);
+}
+
+void JSIAndroidBridgeModule::emitSyncEventLocked(const std::string &eventJson) {
+    auto state = syncEventState_;
+    if (!state || !state->jsInvoker) {
+        return;
+    }
+    auto jsInvoker = state->jsInvoker;
+    jsInvoker->invokeAsync([state, eventJson]() {
+        const std::lock_guard<std::mutex> lock(state->mutex);
+        if (!state->alive || !state->runtime || state->listeners.empty()) {
+            return;
+        }
+        jsi::Runtime &rt = *state->runtime;
+        for (auto &entry : state->listeners) {
+            entry.second.call(rt, jsi::String::createFromUtf8(rt, eventJson));
+        }
     });
 }
 
