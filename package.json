@@ -1,7 +1,7 @@
 {
   "name": "@BuildHero/watermelondb",
   "description": "Build powerful React Native and React web apps that scale from hundreds to tens of thousands of records and remain fast",
-  "version": "5.0.0-107",
+  "version": "5.0.0-110",
   "scripts": {
     "build": "NODE_ENV=production node ./scripts/make.js",
     "dev": "NODE_ENV=development node ./scripts/make.js",
@@ -11,11 +11,12 @@
     "eslint": "eslint ./src -c ./.eslintrc.yml --cache --cache-location ./.cache/.eslintcache --ext .js,.jsx,.ts,.tsx",
     "typecheck": "tsc --noEmit",
     "test": "jest --config=./jest.config.js --forceExit --detectOpenHandles --no-cache",
+    "test:cpp": "native/shared/tests/run_cpp_tests.sh",
     "test:watch": "jest --config=./jest.config.js --watch",
     "test:coverage": "jest --config=./jest.config.js --coverage",
     "ci:check": "concurrently 'npm run test' 'npm run eslint' 'npm run typecheck' --kill-others-on-fail",
     "test:android": "cd native/androidTest; ./gradlew connectedAndroidTest",
-    "test:ios": "cd native/iosTest; xcodebuild -workspace WatermelonTester.xcworkspace -scheme 'WatermelonTester' -destination 'name=iPhone 8' test",
+    "test:ios": "cd native/iosTest/ios; xcodebuild -workspace WatermelonTester.xcworkspace -scheme 'WatermelonTester' -destination 'name=iPhone 17 Pro' test",
     "test:typescript": "cd examples/typescript; yarn; npm run test",
     "swiftlint": "cd native; swiftlint",
     "ktlint": "cd native/androidTest; ./gradlew ktlint",

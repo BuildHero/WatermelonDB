@@ -29,6 +29,24 @@
     "allowJs": true,
     "checkJs": false
   },
-  "include": ["src/**/*", "src/**/*.json", "src/**/__tests__/**/*"],
-  "exclude": ["node_modules", "dist", "examples", "coverage"]
+  "include": ["src/**/*", "src/**/*.json"],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "examples",
+    "coverage",
+    "**/__tests__/**",
+    "**/__mocks__/**",
+    "**/*.test.js",
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/test.js",
+    "**/test.ts",
+    "**/test.tsx",
+    "**/testModels.js",
+    "**/testDispatcher.ts",
+    "native/androidTest",
+    "native/iosTest",
+    "native/shared/tests"
+  ]
 }

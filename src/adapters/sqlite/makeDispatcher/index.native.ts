@@ -22,6 +22,14 @@ import { syncReturnToResult } from '../common'
 type NativeWatermelonDBModuleSpec = {
   query(tag: number, table: string, query: string): Record<string, any>[]
   execSqlQuery(tag: number, sql: string, args: Record<string, any>[]): Record<string, any>[]
+  configureSync(configJson: string): void
+  startSync(reason: string): void
+  getSyncStateJson(): string
+  addSyncListener(listener: (eventJson: string) => void): number
+  removeSyncListener(listenerId: number): void
+  notifyQueueDrained(): void
+  setAuthToken(token: string): void
+  clearAuthToken(): void
 }
 
 // @ts-ignore

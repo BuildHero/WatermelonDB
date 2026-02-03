@@ -68,6 +68,11 @@ const plugins = [
   ],
 ]
 
+const testPlugins = plugins.filter(p => (Array.isArray(p) ? p[0] : p) !== 'module:fast-async').concat([
+  // nodent struggles with newer syntax in tests; use standard transform instead
+  '@babel/plugin-transform-async-to-generator',
+])
+
 module.exports = {
   presets: [
     ['@babel/preset-typescript', { allowDeclareFields: true }],
@@ -96,7 +101,7 @@ module.exports = {
       ],
     },
     test: {
-      plugins: [...plugins, '@babel/plugin-syntax-jsx'],
+      plugins: [...testPlugins, '@babel/plugin-syntax-jsx'],
     },
   },
 }

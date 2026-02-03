@@ -1,0 +1,58 @@
+# Development and test files
+**/__tests__/
+**/__mocks__/
+**/*.test.js
+**/*.test.ts
+**/*.test.tsx
+**/test.js
+**/test.ts
+**/test.tsx
+**/testModels.js
+**/testDispatcher.ts
+
+# Dependencies
+node_modules/
+yarn.lock
+
+# Native test directories
+native/androidTest/
+native/iosTest/
+native/iosTestOld/
+native/shared/tests/
+
+# Build artifacts
+native/android/build/
+native/android/bin/build/
+native/android/.cxx/
+*.hprof
+
+# Development directories
+.cache/
+coverage/
+docs-build/
+examples/
+
+# CI/CD and tooling
+.github/
+.vscode/
+scripts/
+.eslintrc.yml
+.prettierrc
+babel.config.js
+jest.config.js
+tsconfig.json
+greenkeeper.json
+
+# Documentation source (keep built docs)
+docs/README.md
+
+# Git files
+.gitignore
+.gitattributes
+
+# Misc
+.DS_Store
+npm-debug.log
+yarn-error.log
+*.tgz
+.npmrc

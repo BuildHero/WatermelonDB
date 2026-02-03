@@ -1,15 +1,16 @@
 apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
-apply plugin: 'com.facebook.react'
 
-def DEFAULT_COMPILE_SDK_VERSION = 28
-def DEFAULT_BUILD_TOOLS_VERSION = "28.0.3"
+def DEFAULT_COMPILE_SDK_VERSION = 33
+def DEFAULT_BUILD_TOOLS_VERSION = "33.0.0"
 def DEFAULT_MIN_SDK_VERSION = 16
-def DEFAULT_TARGET_SDK_VERSION = 28
+def DEFAULT_TARGET_SDK_VERSION = 33
 
 def newArchEnabled = project.hasProperty("newArchEnabled") && project.newArchEnabled == "true"
 
 android {
+    namespace "com.nozbe.watermelondb"
+
     compileSdkVersion rootProject.hasProperty('compileSdkVersion') ? rootProject.compileSdkVersion : DEFAULT_COMPILE_SDK_VERSION
     buildToolsVersion rootProject.hasProperty('buildToolsVersion') ? rootProject.buildToolsVersion : DEFAULT_BUILD_TOOLS_VERSION
 
@@ -18,6 +19,7 @@ android {
         targetSdkVersion rootProject.hasProperty('targetSdkVersion') ? rootProject.targetSdkVersion : DEFAULT_TARGET_SDK_VERSION
         versionCode 1
         versionName "1.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         externalNativeBuild {
             cmake {
                 arguments "-DANDROID_STL=c++_shared", "-DREACT_NATIVE_NEW_ARCH_ENABLED=${newArchEnabled ? 1 : 0}"
@@ -42,6 +44,9 @@ android {
         pickFirst '**/libfbjni.so'
         pickFirst '**/libsqlite3x.so'
         pickFirst '**/libzstd-jni-1.5.7-6.so'
+        jniLibs {
+            useLegacyPackaging true
+        }
     }
 
     sourceSets {
@@ -54,11 +59,16 @@ android {
     }
 }
 
-react {
-    codegenDir = file("$rootDir/../node_modules/react-native-codegen")
-    jsRootDir = file("../specs")
-    libraryName = "WatermelonDBSpec"
-    codegenJavaPackageName = "com.watermelondb.specs"
+// Apply React plugin only if available (not available in test environments)
+if (plugins.hasPlugin('com.facebook.react') || project.hasProperty('react.gradle.plugin.enabled')) {
+    apply plugin: 'com.facebook.react'
+    
+    react {
+        codegenDir = file("$rootDir/../node_modules/react-native-codegen")
+        jsRootDir = file("../specs")
+        libraryName = "WatermelonDBSpec"
+        codegenJavaPackageName = "com.watermelondb.specs"
+    }
 }
 
 dependencies {
@@ -70,7 +80,19 @@ dependencies {
     implementation "com.facebook.react:react-android"
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlin_version"
     implementation "com.squareup.okhttp3:okhttp:4.12.0"
+    implementation('io.socket:socket.io-client:2.1.1') {
+        exclude group: 'org.json', module: 'json'
+    }
     compileOnly files('libs/zstd-jni.aar')
+    debugImplementation files('libs/sqlite-android.aar')
+    debugImplementation files('libs/zstd-jni.aar')
+    androidTestImplementation files('libs/sqlite-android.aar')
+    androidTestImplementation files('libs/zstd-jni.aar')
+    androidTestImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test:core:1.5.0'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+    androidTestImplementation 'androidx.test:runner:1.5.2'
+    androidTestImplementation 'androidx.test:rules:1.5.0'
 
 }
 

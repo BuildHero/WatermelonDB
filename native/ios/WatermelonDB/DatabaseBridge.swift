@@ -1,4 +1,3 @@
-import React
 import Foundation
 
 @objc(DatabaseBridge)
@@ -47,6 +46,15 @@ final public class DatabaseBridge: RCTEventEmitter {
     }
     
     @objc
+    public func getRawReadConnection(connectionTag: ConnectionTag) -> OpaquePointer? {
+        guard let connection = connections[connectionTag.intValue], case let .connected(driver, synchronous: true) = connection else {
+            return nil
+        }
+        
+        return driver.database.getRawReadPointer()
+    }
+    
+    @objc
     public func isCached(connectionTag: ConnectionTag, table: String, id: String) -> Bool {
         guard let connection = connections[connectionTag.intValue], case let .connected(driver, synchronous: true) = connection else {
             return false
@@ -90,12 +98,19 @@ extension DatabaseBridge {
         affectedTables.insert(tableName)
     }
     
-    @available(iOS 10.0, *)
     private func resetBatchTimer() {
         batchTimer?.invalidate() // Cancel the existing timer if it's running
-        
-        batchTimer = Timer.scheduledTimer(withTimeInterval: batchInterval, repeats: false) { _ in
-            self.emitAffectedTables()
+
+        if #available(iOS 10.0, *) {
+            batchTimer = Timer.scheduledTimer(withTimeInterval: batchInterval, repeats: false) { _ in
+                self.emitAffectedTables()
+            }
+        } else {
+            batchTimer = Timer.scheduledTimer(timeInterval: batchInterval,
+                                              target: self,
+                                              selector: #selector(emitAffectedTablesLegacy),
+                                              userInfo: nil,
+                                              repeats: false)
         }
     }
     
@@ -115,14 +130,17 @@ extension DatabaseBridge {
     }
     
     // This function handles SQLite update events
-    @available(iOS 10.0, *)
     private func sqliteUpdateCallback(userData: UnsafeMutableRawPointer?, opcode: Int32, dbName: UnsafePointer<Int8>?, tableName: UnsafePointer<Int8>?, rowId: Int64) {
         guard let tableName = tableName else { return }
         self.bufferTableName(String(cString: tableName))
         self.resetBatchTimer()
     }
-}
 
+    @objc
+    private func emitAffectedTablesLegacy() {
+        emitAffectedTables()
+    }
+}
 
 // MARK: - Asynchronous connections
 

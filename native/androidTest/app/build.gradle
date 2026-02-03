@@ -72,7 +72,10 @@ project.ext.react = [
        bundleInDebug: true,
 ]
 
-apply from: "../../../node_modules/react-native/react.gradle"
+// Note: React Native 0.70+ no longer uses react.gradle in this location
+// Bundling is now handled by the React Native Gradle Plugin (RNGP) automatically
+// If you need custom bundling configuration, use the react block in android {} section
+// apply from: "../../../node_modules/react-native/react.gradle"
 
 /**
  * Set this to true to create two separate APKs instead of one:
@@ -90,9 +93,10 @@ def enableSeparateBuildPerCPUArchitecture = false
 def enableProguardInReleaseBuilds = false
 
 android {
+    namespace "com.nozbe.watermelonTest"
     testBuildType "debug"
 
-    compileSdkVersion rootProject.compileSdkVersion
+    compileSdkVersion rootProject.compileSdkVersion ?: 34
     buildToolsVersion rootProject.buildToolsVersion
 
     defaultConfig {
@@ -102,7 +106,7 @@ android {
         versionCode 1
         versionName "1.0"
         ndk {
-            abiFilters "armeabi-v7a", "x86"
+            abiFilters "armeabi-v7a", "x86", "arm64-v8a", "x86_64"
         }
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -121,7 +125,7 @@ android {
             reset()
             enable enableSeparateBuildPerCPUArchitecture
             universalApk false  // If true, also generate a universal APK
-            include "armeabi-v7a", "x86"
+            include "armeabi-v7a", "x86", "arm64-v8a", "x86_64"
         }
     }
     buildTypes {
@@ -144,7 +148,7 @@ android {
         variant.outputs.each { output ->
             // For each separate APK per architecture, set a unique version code as described here:
             // http://tools.android.com/tech-docs/new-build-system/user-guide/apk-splits
-            def versionCodes = ["armeabi-v7a": 1, "x86": 2]
+            def versionCodes = ["armeabi-v7a": 1, "x86": 2, "arm64-v8a": 3, "x86_64": 4]
             def abi = output.getFilter(OutputFile.ABI)
             if (abi != null) {  // null for the universal-debug, universal-release variants
                 output.versionCodeOverride =
@@ -155,6 +159,10 @@ android {
 
     packagingOptions {
         pickFirst '**/libjsc.so'
+        pickFirst '**/libc++_shared.so'
+        jniLibs {
+            useLegacyPackaging true
+        }
     }
 }
 
@@ -166,13 +174,14 @@ dependencies {
     ktlint "com.github.shyiko:ktlint:0.31.0"
     implementation fileTree(dir: "libs", include: ["*.jar"])
     implementation project(':watermelondb')
-    implementation 'androidx.appcompat:appcompat:1.0.2'
+    implementation 'androidx.appcompat:appcompat:1.6.1'
     //noinspection GradleDynamicVersion
     implementation "com.facebook.react:react-native:+"  // From node_modules
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlin_version"
     androidTestImplementation 'androidx.annotation:annotation:1.0.0'
-    androidTestImplementation 'androidx.test:runner:1.1.1'
-    androidTestImplementation 'androidx.test:rules:1.1.1'
+    androidTestImplementation 'androidx.test:runner:1.5.2'
+    androidTestImplementation 'androidx.test:rules:1.5.0'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
 }
 
 task ktlint(type: JavaExec, group: "verification") {

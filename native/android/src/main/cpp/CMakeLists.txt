@@ -25,6 +25,23 @@ include_directories(
     ../../../../shared
 )
 
+# Optional simdjson headers from node_modules
+set(SIMDJSON_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../../../node_modules/@nozbe/simdjson")
+set(SIMDJSON_INCLUDE_DIR "${SIMDJSON_DIR}/include")
+set(SIMDJSON_SRC_DIR "${SIMDJSON_DIR}/src")
+if (EXISTS "${SIMDJSON_DIR}/simdjson.h")
+  include_directories("${SIMDJSON_DIR}")
+  message(STATUS "Using simdjson headers: ${SIMDJSON_DIR}")
+elseif (EXISTS "${SIMDJSON_INCLUDE_DIR}/simdjson.h")
+  include_directories("${SIMDJSON_INCLUDE_DIR}")
+  message(STATUS "Using simdjson headers: ${SIMDJSON_INCLUDE_DIR}")
+elseif (EXISTS "${SIMDJSON_SRC_DIR}/simdjson.h")
+  include_directories("${SIMDJSON_SRC_DIR}")
+  message(STATUS "Using simdjson headers: ${SIMDJSON_SRC_DIR}")
+else ()
+  message(FATAL_ERROR "simdjson headers not found. Please add @nozbe/simdjson or provide simdjson headers.")
+endif ()
+
 # Configure sqlite-android manually using AAR extraction
 # Note: This replaces find_package(sqlite-android REQUIRED CONFIG) to work around
 # missing Prefab metadata in the AAR when using custom sqlite-android builds
@@ -169,6 +186,8 @@ set(SOURCE_FILES
     ../../../../shared/DatabaseUtils.cpp
     ../../../../shared/SliceDecoder.cpp
     ../../../../shared/SliceImportEngine.cpp
+    ../../../../shared/Simdjson.cpp
+    ../../../../shared/SyncApplyEngine.cpp
     ../../../../shared/SqliteInsertHelper.cpp
     # List C/C++ source files with relative paths to this CMakeLists.txt.
     JSIAndroidUtils.cpp
@@ -176,6 +195,7 @@ set(SOURCE_FILES
     JSIAndroidBridgeModule.cpp
     JSIAndroidBridgeInstaller.cpp
     SlicePlatformAndroid.cpp
+    SyncPlatformAndroid.cpp
     SliceImportDatabaseAdapterAndroid.cpp)
 
 set(LINKED_LIBRARIES

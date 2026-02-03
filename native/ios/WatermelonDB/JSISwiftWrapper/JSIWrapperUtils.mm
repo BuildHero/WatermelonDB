@@ -1,16 +1,33 @@
 #include "JSIWrapperUtils.h"
 #include "DatabaseUtils.h"
 #include <string>
+#include <cctype>
 
 namespace watermelondb {
+
+static bool isReadOnlyQuery(const std::string &query) {
+    size_t i = 0;
+    while (i < query.size() && std::isspace(static_cast<unsigned char>(query[i]))) {
+        i++;
+    }
+    std::string prefix;
+    for (; i < query.size() && prefix.size() < 7; i++) {
+        char c = static_cast<char>(std::tolower(static_cast<unsigned char>(query[i])));
+        prefix.push_back(c);
+    }
+    return prefix.rfind("select", 0) == 0 || prefix.rfind("with", 0) == 0 || prefix.rfind("explain", 0) == 0;
+}
 
 jsi::Value execSqlQuery(DatabaseBridge *databaseBridge, jsi::Runtime &rt, const jsi::Value &tag, const jsi::String &sql, const jsi::Array &args) {
    auto tagNumber = [[NSNumber alloc] initWithDouble:tag.asNumber()];
     
-    auto db = [databaseBridge getRawConnectionWithConnectionTag:tagNumber];
+    const auto query = sql.utf8(rt);
+    auto db = isReadOnlyQuery(query)
+        ? [databaseBridge getRawReadConnectionWithConnectionTag:tagNumber]
+        : [databaseBridge getRawConnectionWithConnectionTag:tagNumber];
     
     
-    auto stmt = getStmt(rt, static_cast<sqlite3*>(db), sql.utf8(rt), args);
+    auto stmt = getStmt(rt, static_cast<sqlite3*>(db), query, args);
     
     std::vector<jsi::Value> records = {};
     
@@ -33,7 +50,7 @@ jsi::Value query(DatabaseBridge *databaseBridge, jsi::Runtime &rt, const jsi::Va
     auto tagNumber = [[NSNumber alloc] initWithDouble:tag.asNumber()];
     auto tableStr = [NSString stringWithUTF8String:table.utf8(rt).c_str()];
     
-    auto db = [databaseBridge getRawConnectionWithConnectionTag:tagNumber];
+    auto db = [databaseBridge getRawReadConnectionWithConnectionTag:tagNumber];
         
     auto stmt = getStmt(rt, static_cast<sqlite3*>(db), query.utf8(rt), jsi::Array(rt, 0));
     
@@ -72,4 +89,3 @@ jsi::Value query(DatabaseBridge *databaseBridge, jsi::Runtime &rt, const jsi::Va
 }
 
 } // namespace watermelondb
-

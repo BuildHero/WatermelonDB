@@ -67,7 +67,7 @@ NS_ASSUME_NONNULL_END
         _db                         = nil;
         _logsErrors                 = YES;
         _crashOnErrors              = NO;
-        _maxBusyRetryTimeInterval   = 2;
+        _maxBusyRetryTimeInterval   = 10;
         _isOpen                     = NO;
     }
     
