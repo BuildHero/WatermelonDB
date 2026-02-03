@@ -1,11 +1,13 @@
 import {
   configureSync as nativeConfigureSync,
   startSync as nativeStartSync,
+  setSyncPullUrl as nativeSetSyncPullUrl,
   getSyncState as nativeGetSyncState,
   addSyncListener as nativeAddSyncListener,
-  notifyQueueDrained as nativeNotifyQueueDrained,
   setAuthToken as nativeSetAuthToken,
   clearAuthToken as nativeClearAuthToken,
+  setAuthTokenProvider as nativeSetAuthTokenProvider,
+  setPushChangesProvider as nativeSetPushChangesProvider,
   initSyncSocket as nativeInitSyncSocket,
   syncSocketAuthenticate as nativeSyncSocketAuthenticate,
   syncSocketDisconnect as nativeSyncSocketDisconnect,
@@ -22,29 +24,68 @@ export type SyncEvent = {
   [key: string]: any
 }
 
+export type SyncUnsubscribe = () => void
+
 export type SyncConfig = Record<string, any>
 
 export class SyncManager {
-  private static drainUnsubscribe: (() => void) | null = null
-  private static authUnsubscribe: (() => void) | null = null
-  private static authTokenProvider: (() => Promise<string> | string) | null = null
   private static configured = false
   private static connectionTag: number | null = null
+  private static pullChangesUrl: string | null = null
+  private static adapter: any | null = null
 
   static configure(config: SyncConfig): void {
-    const { authTokenProvider, ...rest } = config ?? {}
-    SyncManager.assertValidConfig(config, rest, authTokenProvider)
+    const {
+      authTokenProvider,
+      pushChangesProvider,
+      database,
+      adapter,
+      connectionTag,
+      pullChangesUrl,
+      ...rest
+    } = config ?? {}
+
+    const resolvedConnectionTag = SyncManager.resolveConnectionTag(connectionTag, database, adapter)
+    const resolvedPullChangesUrl = pullChangesUrl
+
+    const nativeConfig = {
+      ...rest,
+      connectionTag: resolvedConnectionTag,
+      pullEndpointUrl: resolvedPullChangesUrl,
+    }
+
+    SyncManager.assertValidConfig(
+      config,
+      nativeConfig,
+      authTokenProvider,
+      pushChangesProvider,
+      resolvedPullChangesUrl,
+    )
+
+    SyncManager.connectionTag = resolvedConnectionTag
+    SyncManager.pullChangesUrl = resolvedPullChangesUrl
+    SyncManager.adapter = SyncManager.resolveAdapter(database, adapter)
+
+    nativeConfigureSync(nativeConfig)
+
+    SyncManager.configured = true
+
     if (authTokenProvider && typeof authTokenProvider === 'function') {
       SyncManager.setAuthTokenProvider(authTokenProvider)
     }
-    SyncManager.connectionTag = typeof rest.connectionTag === 'number' ? rest.connectionTag : null
-    nativeConfigureSync(rest)
-    SyncManager.configured = true
+
+    if (pushChangesProvider && typeof pushChangesProvider === 'function') {
+      SyncManager.setPushChangesProvider(pushChangesProvider)
+    }
   }
 
   static start(reason: string): void {
     SyncManager.assertConfigured('start')
-    nativeStartSync(reason)
+    void SyncManager.refreshPullChangesUrlFromSequenceId()
+      .catch(() => {})
+      .finally(() => {
+        nativeStartSync(reason)
+      })
   }
 
   static getState(): SyncState {
@@ -52,27 +93,8 @@ export class SyncManager {
     return nativeGetSyncState()
   }
 
-  static subscribe(listener: (event: SyncEvent) => void): () => void {
+  static subscribe(listener: (event: SyncEvent) => void): SyncUnsubscribe {
     return nativeAddSyncListener(listener)
-  }
-
-  static setQueueDrainHandler(handler: () => Promise<void> | void): void {
-    SyncManager.assertConfigured('setQueueDrainHandler')
-    if (SyncManager.drainUnsubscribe) {
-      SyncManager.drainUnsubscribe()
-      SyncManager.drainUnsubscribe = null
-    }
-
-    SyncManager.drainUnsubscribe = SyncManager.subscribe(async (event) => {
-      if (event?.type !== 'drain_queue') {
-        return
-      }
-      try {
-        await handler()
-      } finally {
-        nativeNotifyQueueDrained()
-      }
-    })
   }
 
   static withConnectionTag(connectionTag: number): SyncConfig {
@@ -90,33 +112,13 @@ export class SyncManager {
   }
 
   static setAuthTokenProvider(provider: () => Promise<string> | string): void {
-    SyncManager.authTokenProvider = provider
-    SyncManager.refreshAuthToken()
-    if (SyncManager.authUnsubscribe) {
-      SyncManager.authUnsubscribe()
-      SyncManager.authUnsubscribe = null
-    }
-    SyncManager.authUnsubscribe = SyncManager.subscribe(async (event) => {
-      if (event?.type !== 'auth_required') {
-        return
-      }
-      await SyncManager.refreshAuthToken()
-    })
+    SyncManager.assertConfigured('setAuthTokenProvider')
+    nativeSetAuthTokenProvider(provider)
   }
 
-  private static async refreshAuthToken(): Promise<void> {
-    const provider = SyncManager.authTokenProvider
-    if (!provider) {
-      return
-    }
-    try {
-      const token = await provider()
-      if (token) {
-        nativeSetAuthToken(token)
-      }
-    } catch {
-      // Ignore provider errors; native will stay in auth_required until resolved.
-    }
+  static setPushChangesProvider(provider: () => Promise<void> | void): void {
+    SyncManager.assertConfigured('setPushChangesProvider')
+    nativeSetPushChangesProvider(provider)
   }
 
   static initSocket(socketUrl: string): void {
@@ -138,7 +140,7 @@ export class SyncManager {
     SyncManager.assertConfigured('importRemoteSlice')
     const tag = SyncManager.connectionTag
     if (!tag) {
-      throw new Error('[WatermelonDB][Sync] importRemoteSlice requires a configured connectionTag.')
+      throw new Error('[WatermelonDB][Sync] importRemoteSlice requires a configured database or adapter.')
     }
     return nativeImportRemoteSlice(tag, sliceUrl)
   }
@@ -155,6 +157,8 @@ export class SyncManager {
     rawConfig: SyncConfig | null | undefined,
     config: SyncConfig,
     authTokenProvider: unknown,
+    pushChangesProvider?: unknown,
+    pullChangesUrl?: unknown,
   ): void {
     if (!rawConfig || typeof rawConfig !== 'object') {
       throw new Error('[WatermelonDB][Sync] SyncManager.configure(...) expects a config object.')
@@ -162,19 +166,77 @@ export class SyncManager {
     if (authTokenProvider !== undefined && typeof authTokenProvider !== 'function') {
       throw new Error('[WatermelonDB][Sync] authTokenProvider must be a function when provided.')
     }
-    const pullEndpointUrl = typeof config.pullEndpointUrl === 'string' ? config.pullEndpointUrl.trim() : ''
-
-    if (!pullEndpointUrl) {
-      throw new Error('[WatermelonDB][Sync] configure requires pullEndpointUrl.')
+    if (typeof pushChangesProvider !== 'function') {
+      throw new Error('[WatermelonDB][Sync] pushChangesProvider must be a function.')
     }
-
-    if (config.socketioUrl && typeof config.socketioUrl !== 'string') {
-      throw new Error('[WatermelonDB][Sync] socketioUrl must be a string when provided.')
+    if (typeof pullChangesUrl !== 'string' || pullChangesUrl.trim() === '') {
+      throw new Error('[WatermelonDB][Sync] pullChangesUrl must be a non-empty string.')
     }
 
     const connectionTag = config.connectionTag
     if (typeof connectionTag !== 'number' || !Number.isFinite(connectionTag) || connectionTag <= 0) {
-      throw new Error('[WatermelonDB][Sync] configure requires a numeric connectionTag > 0.')
+      throw new Error('[WatermelonDB][Sync] configure requires a database/adapter or a numeric connectionTag > 0.')
     }
+  }
+
+  private static resolveConnectionTag(
+    connectionTag: unknown,
+    database: unknown,
+    adapter: unknown,
+  ): number | null {
+    if (typeof connectionTag === 'number' && Number.isFinite(connectionTag) && connectionTag > 0) {
+      return connectionTag
+    }
+
+    const adapterCandidate = adapter || (database && (database as any).adapter)
+    const tag =
+      (adapterCandidate && (adapterCandidate as any)._tag) ||
+      (adapterCandidate &&
+        (adapterCandidate as any).underlyingAdapter &&
+        (adapterCandidate as any).underlyingAdapter._tag)
+    if (typeof tag === 'number' && Number.isFinite(tag) && tag > 0) {
+      return tag
+    }
+
+    return null
+  }
+
+  private static resolveAdapter(database: unknown, adapter: unknown): any | null {
+    return (adapter as any) || (database && (database as any).adapter) || null
+  }
+
+  private static buildPullChangesUrl(baseUrl: string, sequenceId: string): string {
+    const trimmed = baseUrl.trim()
+    if (trimmed === '') {
+      return trimmed
+    }
+    const encoded = encodeURIComponent(sequenceId)
+    if (/[?&]sequenceId=/.test(trimmed)) {
+      return trimmed.replace(/([?&])sequenceId=[^&]*/, `$1sequenceId=${encoded}`)
+    }
+    const joiner = trimmed.includes('?') ? '&' : '?'
+    return `${trimmed}${joiner}sequenceId=${encoded}`
+  }
+
+  private static async refreshPullChangesUrlFromSequenceId(): Promise<void> {
+    const baseUrl = SyncManager.pullChangesUrl
+    if (!baseUrl) {
+      return
+    }
+    const adapter = SyncManager.adapter
+    if (!adapter || typeof adapter.getLocal !== 'function') {
+      return
+    }
+    let sequenceId: string | null | undefined = null
+    try {
+      sequenceId = await adapter.getLocal('__watermelon_last_pulled_at')
+    } catch {
+      return
+    }
+    if (!sequenceId || typeof sequenceId !== 'string' || sequenceId.trim() === '') {
+      nativeSetSyncPullUrl(baseUrl)
+      return
+    }
+    nativeSetSyncPullUrl(SyncManager.buildPullChangesUrl(baseUrl, sequenceId))
   }
 }

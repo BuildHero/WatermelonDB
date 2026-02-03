@@ -6,12 +6,14 @@ import { TurboModule, TurboModuleRegistry } from 'react-native'
 interface NativeSyncModule extends TurboModule {
   configureSync(configJson: string): void
   startSync(reason: string): void
+  setSyncPullUrl(pullEndpointUrl: string): void
   getSyncStateJson(): string
   addSyncListener(listener: (eventJson: string) => void): number
   removeSyncListener(listenerId: number): void
-  notifyQueueDrained(): void
   setAuthToken(token: string): void
   clearAuthToken(): void
+  setAuthTokenProvider(provider: () => Promise<string> | string): void
+  setPushChangesProvider(provider: () => Promise<void> | void): void
   initSyncSocket(socketUrl: string): void
   syncSocketAuthenticate(token: string): void
   syncSocketDisconnect(): void
@@ -43,6 +45,11 @@ export function startSync(reason: string): void {
   module.startSync(reason ?? 'unknown')
 }
 
+export function setSyncPullUrl(pullEndpointUrl: string): void {
+  const module = getNativeModule()
+  module.setSyncPullUrl(pullEndpointUrl)
+}
+
 export function getSyncState(): SyncEvent {
   const module = getNativeModule()
   try {
@@ -66,11 +73,6 @@ export function addSyncListener(listener: (event: SyncEvent) => void): () => voi
   return () => module.removeSyncListener(id)
 }
 
-export function notifyQueueDrained(): void {
-  const module = getNativeModule()
-  module.notifyQueueDrained()
-}
-
 export function setAuthToken(token: string): void {
   const module = getNativeModule()
   module.setAuthToken(token)
@@ -79,6 +81,16 @@ export function setAuthToken(token: string): void {
 export function clearAuthToken(): void {
   const module = getNativeModule()
   module.clearAuthToken()
+}
+
+export function setAuthTokenProvider(provider: () => Promise<string> | string): void {
+  const module = getNativeModule()
+  module.setAuthTokenProvider(provider)
+}
+
+export function setPushChangesProvider(provider: () => Promise<void> | void): void {
+  const module = getNativeModule()
+  module.setPushChangesProvider(provider)
 }
 
 export function initSyncSocket(socketUrl: string): void {

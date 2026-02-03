@@ -443,6 +443,22 @@ static bool readBoolField(const JsonValue& object, const std::string& key, bool&
     return true;
 }
 
+static bool readStringOrNumberField(const JsonValue& object, const std::string& key, std::string& out) {
+    const JsonValue* value = findObjectField(object, key);
+    if (!value) {
+        return false;
+    }
+    if (value->type == JsonValue::Type::String) {
+        out = value->stringValue;
+        return true;
+    }
+    if (value->type == JsonValue::Type::Number) {
+        out = value->numberValue;
+        return true;
+    }
+    return false;
+}
+
 static const JsonValue* findRowPayload(const JsonValue& entry) {
     if (const JsonValue* row = findObjectField(entry, "row")) {
         return row;
@@ -454,6 +470,25 @@ static const JsonValue* findRowPayload(const JsonValue& entry) {
         return row;
     }
     return nullptr;
+}
+
+static bool extractSequenceId(const JsonValue& entry, std::string& out) {
+    if (readStringOrNumberField(entry, "sequenceId", out) ||
+        readStringOrNumberField(entry, "sequence_id", out) ||
+        readStringOrNumberField(entry, "sequence", out)) {
+        return true;
+    }
+
+    const JsonValue* row = findRowPayload(entry);
+    if (row && row->type == JsonValue::Type::Object) {
+        if (readStringOrNumberField(*row, "sequenceId", out) ||
+            readStringOrNumberField(*row, "sequence_id", out) ||
+            readStringOrNumberField(*row, "sequence", out)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static bool extractDeleteFlag(const JsonValue& entry, bool& isDeleted) {
@@ -521,6 +556,28 @@ static bool extractDeleteId(const JsonValue& entry, const JsonValue* row, JsonVa
     return false;
 }
 
+static bool setLocalStorage(sqlite3* db, const std::string& key, const std::string& value, std::string& errorMessage) {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "INSERT OR REPLACE INTO local_storage (key, value) VALUES (?, ?)";
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        errorMessage = "Failed to prepare local_storage insert";
+        return false;
+    }
+    if (sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_text(stmt, 2, value.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        errorMessage = "Failed to bind local_storage values";
+        return false;
+    }
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        errorMessage = "Failed to write local_storage";
+        return false;
+    }
+    sqlite3_finalize(stmt);
+    return true;
+}
+
 static bool applyDeletes(sqlite3* db, const std::string& table, const JsonValue& rows, std::string& errorMessage) {
     if (rows.type != JsonValue::Type::Array || rows.arrayValue.empty()) {
         return true;
@@ -584,6 +641,7 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
     }
 
     std::unordered_map<std::string, JsonValue> deletesByTable;
+    std::string maxSequenceId;
     for (const auto& entry : root.arrayValue) {
         if (entry.type != JsonValue::Type::Object) {
             continue;
@@ -597,6 +655,13 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
 
         bool isDeleted = false;
         extractDeleteFlag(entry, isDeleted);
+
+        std::string sequenceId;
+        if (extractSequenceId(entry, sequenceId) && !sequenceId.empty()) {
+            if (sequenceId > maxSequenceId) {
+                maxSequenceId = sequenceId;
+            }
+        }
 
         JsonValue rowPayload;
         const JsonValue* rowPtr = findRowPayload(entry);
@@ -633,6 +698,14 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
 
     for (const auto& entry : deletesByTable) {
         if (!applyDeletes(db, entry.first, entry.second, errorMessage)) {
+            execSql(db, "ROLLBACK", errorMessage);
+            return false;
+        }
+    }
+
+    if (!maxSequenceId.empty()) {
+        // Keep in sync with JS (`SyncManager.refreshPullChangesUrlFromSequenceId`) which reads this key.
+        if (!setLocalStorage(db, "__watermelon_last_pulled_at", maxSequenceId, errorMessage)) {
             execSql(db, "ROLLBACK", errorMessage);
             return false;
         }

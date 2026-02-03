@@ -194,5 +194,61 @@ void httpRequest(const HttpRequest& request,
     }
 }
 
+std::string generateRequestId() {
+    JNIEnv* env = getEnv();
+    if (!env) {
+        return "";
+    }
+    watermelondb::configureJNI(env);
+
+    jclass uuidClass = env->FindClass("java/util/UUID");
+    if (!uuidClass) {
+        env->ExceptionClear();
+        return "";
+    }
+    jmethodID randomMethod = env->GetStaticMethodID(uuidClass, "randomUUID", "()Ljava/util/UUID;");
+    if (!randomMethod) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(uuidClass);
+        return "";
+    }
+    jobject uuidObj = env->CallStaticObjectMethod(uuidClass, randomMethod);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(uuidClass);
+        return "";
+    }
+    jmethodID toStringMethod = env->GetMethodID(uuidClass, "toString", "()Ljava/lang/String;");
+    if (!toStringMethod) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(uuidClass);
+        if (uuidObj) {
+            env->DeleteLocalRef(uuidObj);
+        }
+        return "";
+    }
+    jstring uuidStr = (jstring)env->CallObjectMethod(uuidObj, toStringMethod);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(uuidClass);
+        if (uuidObj) {
+            env->DeleteLocalRef(uuidObj);
+        }
+        return "";
+    }
+    std::string result;
+    if (uuidStr) {
+        const char* chars = env->GetStringUTFChars(uuidStr, nullptr);
+        if (chars) {
+            result = chars;
+            env->ReleaseStringUTFChars(uuidStr, chars);
+        }
+        env->DeleteLocalRef(uuidStr);
+    }
+    env->DeleteLocalRef(uuidObj);
+    env->DeleteLocalRef(uuidClass);
+    return result;
+}
+
 } // namespace platform
 } // namespace watermelondb

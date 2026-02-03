@@ -253,6 +253,34 @@ void test_array_payload_upserts_and_deletes() {
     sqlite3_close(db);
 }
 
+void test_updates_last_sequence_id_ulid() {
+    sqlite3* db = nullptr;
+    sqlite3_open(":memory:", &db);
+    std::string error;
+    execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT)", error);
+    execSql(db, "CREATE TABLE local_storage (key TEXT PRIMARY KEY, value TEXT)", error);
+
+    std::string payload = R"([
+        { "table": "tasks", "row": { "id": "u1", "name": "alpha" }, "sequenceId": "01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+        { "table": "tasks", "row": { "id": "u2", "name": "beta" }, "sequenceId": "01ARZ3NDEKTSV4RRFFQ69G5FAW" },
+        { "table": "tasks", "row": { "id": "u3", "name": "gamma" }, "sequenceId": "01ARZ3NDEKTSV4RRFFQ69G5FAU" }
+      ])";
+
+    bool ok = watermelondb::applySyncPayload(db, payload, error);
+    expectTrue(ok, "applySyncPayload should update last_sequence_id for ULIDs");
+
+    std::string sequenceId;
+    expectTrue(querySingleText(db, "SELECT value FROM local_storage WHERE key='__watermelon_last_pulled_at'", sequenceId),
+               "last_pulled_at should be stored");
+    expectTrue(sequenceId == "01ARZ3NDEKTSV4RRFFQ69G5FAW", "last_sequence_id should be the highest ULID");
+
+    std::string lastSequenceId;
+    expectTrue(!querySingleText(db, "SELECT value FROM local_storage WHERE key='__watermelon_last_sequence_id'", lastSequenceId),
+               "last_sequence_id should not be updated");
+
+    sqlite3_close(db);
+}
+
 } // namespace
 
 int main() {
@@ -265,6 +293,7 @@ int main() {
     test_rollback_on_error();
     test_payload_requires_array();
     test_array_payload_upserts_and_deletes();
+    test_updates_last_sequence_id_ulid();
 
     if (gFailures > 0) {
         std::cerr << gFailures << " test(s) failed\n";

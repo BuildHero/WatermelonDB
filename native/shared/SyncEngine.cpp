@@ -4,7 +4,10 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <iomanip>
+#include <sstream>
 #include <thread>
+#include <vector>
 
 #if __has_include(<simdjson.h>)
 #include <simdjson.h>
@@ -15,6 +18,220 @@
 #endif
 
 namespace watermelondb {
+
+namespace {
+
+bool isUnreservedUrlChar(unsigned char c) {
+    return std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~';
+}
+
+std::string urlEncode(const std::string& value) {
+    std::ostringstream encoded;
+    encoded.fill('0');
+    encoded << std::hex << std::uppercase;
+    for (unsigned char c : value) {
+        if (isUnreservedUrlChar(c)) {
+            encoded << static_cast<char>(c);
+        } else {
+            encoded << '%' << std::setw(2) << static_cast<int>(c);
+        }
+    }
+    return encoded.str();
+}
+
+struct CursorValue {
+    std::string value;
+    bool encoded = false;
+};
+
+std::string buildUrlWithCursor(const std::string& baseUrl, const std::string& cursor, bool encoded) {
+    const std::string encodedCursor = encoded ? cursor : urlEncode(cursor);
+    const size_t queryPos = baseUrl.find('?');
+    const std::string base = queryPos == std::string::npos ? baseUrl : baseUrl.substr(0, queryPos);
+    const std::string query = queryPos == std::string::npos ? "" : baseUrl.substr(queryPos + 1);
+
+    std::vector<std::string> parts;
+    bool replaced = false;
+    size_t start = 0;
+    while (start <= query.size()) {
+        const size_t end = query.find('&', start);
+        const std::string part = query.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (!part.empty()) {
+            if (part.rfind("cursor=", 0) == 0) {
+                parts.emplace_back("cursor=" + encodedCursor);
+                replaced = true;
+            } else {
+                parts.emplace_back(part);
+            }
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+
+    if (!replaced) {
+        parts.emplace_back("cursor=" + encodedCursor);
+    }
+
+    std::ostringstream rebuilt;
+    rebuilt << base;
+    if (!parts.empty()) {
+        rebuilt << '?';
+        for (size_t i = 0; i < parts.size(); ++i) {
+            if (i > 0) {
+                rebuilt << '&';
+            }
+            rebuilt << parts[i];
+        }
+    }
+    return rebuilt.str();
+}
+
+bool appendJsonValue(const simdjson::dom::element& element, std::string& out);
+
+bool appendJsonString(const std::string& value, std::string& out) {
+    out += "\"";
+    out += json_utils::escapeJsonString(value);
+    out += "\"";
+    return true;
+}
+
+bool appendJsonValue(const simdjson::dom::element& element, std::string& out) {
+    switch (element.type()) {
+        case simdjson::dom::element_type::OBJECT: {
+            simdjson::dom::object obj;
+            if (element.get(obj)) {
+                return false;
+            }
+            out += "{";
+            bool first = true;
+            for (auto field : obj) {
+                if (!first) {
+                    out += ",";
+                }
+                first = false;
+                std::string_view key = field.key;
+                appendJsonString(std::string(key), out);
+                out += ":";
+                if (!appendJsonValue(field.value, out)) {
+                    return false;
+                }
+            }
+            out += "}";
+            return true;
+        }
+        case simdjson::dom::element_type::ARRAY: {
+            simdjson::dom::array arr;
+            if (element.get(arr)) {
+                return false;
+            }
+            out += "[";
+            bool first = true;
+            for (auto value : arr) {
+                if (!first) {
+                    out += ",";
+                }
+                first = false;
+                if (!appendJsonValue(value, out)) {
+                    return false;
+                }
+            }
+            out += "]";
+            return true;
+        }
+        case simdjson::dom::element_type::STRING: {
+            std::string_view value;
+            if (element.get(value)) {
+                return false;
+            }
+            return appendJsonString(std::string(value), out);
+        }
+        case simdjson::dom::element_type::INT64: {
+            int64_t value = 0;
+            if (element.get(value)) {
+                return false;
+            }
+            out += std::to_string(value);
+            return true;
+        }
+        case simdjson::dom::element_type::UINT64: {
+            uint64_t value = 0;
+            if (element.get(value)) {
+                return false;
+            }
+            out += std::to_string(value);
+            return true;
+        }
+        case simdjson::dom::element_type::DOUBLE: {
+            double value = 0;
+            if (element.get(value)) {
+                return false;
+            }
+            out += std::to_string(value);
+            return true;
+        }
+        case simdjson::dom::element_type::BOOL: {
+            bool value = false;
+            if (element.get(value)) {
+                return false;
+            }
+            out += value ? "true" : "false";
+            return true;
+        }
+        case simdjson::dom::element_type::NULL_VALUE:
+            out += "null";
+            return true;
+    }
+    return false;
+}
+
+bool extractNextCursor(const std::string& body, CursorValue& cursorOut) {
+    cursorOut.value.clear();
+    cursorOut.encoded = false;
+    try {
+        simdjson::dom::parser parser;
+        simdjson::dom::element doc = parser.parse(body);
+        if (doc.type() != simdjson::dom::element_type::OBJECT) {
+            return false;
+        }
+        simdjson::dom::object obj;
+        if (doc.get(obj)) {
+            return false;
+        }
+        auto nextField = obj["next"];
+        if (nextField.error() == simdjson::NO_SUCH_FIELD) {
+            return false;
+        }
+        if (nextField.error()) {
+            return false;
+        }
+        simdjson::dom::element nextValue = nextField.value();
+        if (nextValue.is_null()) {
+            return false;
+        }
+        if (nextValue.is_string()) {
+            std::string_view str;
+            if (nextValue.get(str)) {
+                return false;
+            }
+            cursorOut.value = std::string(str);
+            cursorOut.encoded = true;
+            return !cursorOut.value.empty();
+        }
+        std::string json;
+        if (!appendJsonValue(nextValue, json)) {
+            return false;
+        }
+        cursorOut.value = std::move(json);
+        cursorOut.encoded = false;
+        return !cursorOut.value.empty();
+    } catch (...) {
+        return false;
+    }
+}
+
+} // namespace
 
 SyncEngine::SyncEngine() = default;
 
@@ -34,6 +251,26 @@ void SyncEngine::setApplyCallback(ApplyCallback callback) {
     applyCallback_ = std::move(callback);
 }
 
+void SyncEngine::setAuthTokenRequestCallback(AuthTokenRequestCallback callback) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (shutdown_) {
+        return;
+    }
+
+    authTokenRequestCallback_ = std::move(callback);
+}
+
+void SyncEngine::setPushChangesCallback(PushChangesCallback callback) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (shutdown_) {
+        return;
+    }
+
+    pushChangesCallback_ = std::move(callback);
+}
+
 void SyncEngine::configure(const std::string& configJson) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (shutdown_) {
@@ -50,14 +287,29 @@ void SyncEngine::configure(const std::string& configJson) {
     emitLocked(stateJson_);
 }
 
+void SyncEngine::setPullEndpointUrl(const std::string& url) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (shutdown_) {
+        return;
+    }
+
+    pullEndpointUrl_ = url;
+}
+
 void SyncEngine::setAuthToken(const std::string& token) {
     bool shouldRestart = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+
         if (shutdown_) {
             return;
         }
+
         authToken_ = token;
+
+        authRequestInFlight_ = false;
+
         if (!syncInFlight_ && stateJson_ == "{\"state\":\"auth_required\"}") {
             shouldRestart = true;
         }
@@ -73,6 +325,26 @@ void SyncEngine::clearAuthToken() {
         return;
     }
     authToken_.clear();
+    authRequestInFlight_ = false;
+}
+
+void SyncEngine::requestAuthToken() {
+    AuthTokenRequestCallback callback;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (shutdown_ || authRequestInFlight_) {
+            return;
+        }
+
+        authRequestInFlight_ = true;
+
+        callback = authTokenRequestCallback_;
+    }
+
+    if (callback) {
+        callback();
+    }
 }
 
 void SyncEngine::start(const std::string& reason) {
@@ -92,6 +364,13 @@ void SyncEngine::start(const std::string& reason) {
         retryScheduled_ = false;
         retryCount_ = 0;
         currentReason_ = reason;
+        const bool resumeFromAuth = (stateJson_ == "{\"state\":\"auth_required\"}") && !currentPullUrl_.empty();
+        if (!resumeFromAuth) {
+            currentRequestId_ = platform::generateRequestId();
+            currentPullUrl_ = pullEndpointUrl_;
+        } else if (currentRequestId_.empty()) {
+            currentRequestId_ = platform::generateRequestId();
+        }
         stateJson_ = "{\"state\":\"sync_requested\"}";
         emitLocked("{\"type\":\"state\",\"state\":\"sync_requested\"}");
         emitLocked(std::string("{\"type\":\"sync_start\",\"reason\":\"") + json_utils::escapeJsonString(reason) + "\"}");
@@ -119,31 +398,10 @@ void SyncEngine::shutdown() {
     retryCount_ = 0;
     pendingReason_.clear();
     currentReason_.clear();
+    currentRequestId_.clear();
+    currentPullUrl_.clear();
     stateJson_ = "{\"state\":\"idle\"}";
     syncId_++;
-}
-
-void SyncEngine::notifyQueueDrained() {
-    std::string pendingReason;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (shutdown_) {
-            return;
-        }
-        if (stateJson_ != "{\"state\":\"waiting_for_queue\"}") {
-            return;
-        }
-        stateJson_ = "{\"state\":\"done\"}";
-        emitLocked("{\"type\":\"state\",\"state\":\"done\"}");
-        syncInFlight_ = false;
-        retryScheduled_ = false;
-        retryCount_ = 0;
-        pendingReason = std::move(pendingReason_);
-        pendingReason_.clear();
-    }
-    if (!pendingReason.empty()) {
-        start(pendingReason);
-    }
 }
 
 void SyncEngine::emitLocked(const std::string& eventJson) {
@@ -155,9 +413,11 @@ void SyncEngine::emitLocked(const std::string& eventJson) {
 void SyncEngine::dispatchRequest(int64_t syncId, bool isRetry) {
     std::string pullEndpointUrl;
     std::string authToken;
+    std::string requestId;
     int timeoutMs = 30000;
     int attempt = 1;
-
+    AuthTokenRequestCallback authRequest;
+    bool shouldRequestAuth = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (shutdown_) {
@@ -166,10 +426,15 @@ void SyncEngine::dispatchRequest(int64_t syncId, bool isRetry) {
         if (syncId != syncId_) {
             return;
         }
-        pullEndpointUrl = pullEndpointUrl_;
+        pullEndpointUrl = currentPullUrl_.empty() ? pullEndpointUrl_ : currentPullUrl_;
         authToken = authToken_;
+        requestId = currentRequestId_;
         timeoutMs = timeoutMs_;
         attempt = retryCount_ + 1;
+        if (requestId.empty()) {
+            currentRequestId_ = platform::generateRequestId();
+            requestId = currentRequestId_;
+        }
 
         if (pullEndpointUrl.empty()) {
             emitLocked("{\"type\":\"error\",\"message\":\"Missing sync pullEndpointUrl\"}");
@@ -177,15 +442,40 @@ void SyncEngine::dispatchRequest(int64_t syncId, bool isRetry) {
             emitLocked("{\"type\":\"state\",\"state\":\"error\"}");
             syncInFlight_ = false;
             retryScheduled_ = false;
+            currentRequestId_.clear();
+            currentPullUrl_.clear();
             return;
         }
 
-        stateJson_ = "{\"state\":\"syncing\"}";
-        emitLocked("{\"type\":\"state\",\"state\":\"syncing\"}");
-        emitLocked(std::string("{\"type\":\"phase\",\"phase\":\"pull\",\"attempt\":") + std::to_string(attempt) + "}");
-        if (isRetry) {
-            emitLocked(std::string("{\"type\":\"sync_retry\",\"attempt\":") + std::to_string(attempt) + "}");
+        if (authToken.empty() && authTokenRequestCallback_) {
+            stateJson_ = "{\"state\":\"auth_required\"}";
+            emitLocked("{\"type\":\"auth_required\"}");
+            emitLocked("{\"type\":\"state\",\"state\":\"auth_required\"}");
+            syncInFlight_ = false;
+            retryScheduled_ = false;
+            retryCount_ = 0;
+            if (!authRequestInFlight_) {
+                authRequestInFlight_ = true;
+                authRequest = authTokenRequestCallback_;
+            }
+            shouldRequestAuth = true;
         }
+
+        if (!shouldRequestAuth) {
+            stateJson_ = "{\"state\":\"syncing\"}";
+            emitLocked("{\"type\":\"state\",\"state\":\"syncing\"}");
+            emitLocked(std::string("{\"type\":\"phase\",\"phase\":\"pull\",\"attempt\":") + std::to_string(attempt) + "}");
+            if (isRetry) {
+                emitLocked(std::string("{\"type\":\"sync_retry\",\"attempt\":") + std::to_string(attempt) + "}");
+            }
+        }
+    }
+
+    if (shouldRequestAuth) {
+        if (authRequest) {
+            authRequest();
+        }
+        return;
     }
 
     platform::HttpRequest request;
@@ -193,7 +483,10 @@ void SyncEngine::dispatchRequest(int64_t syncId, bool isRetry) {
     request.url = pullEndpointUrl;
     request.timeoutMs = timeoutMs;
     if (!authToken.empty()) {
-        request.headers["Authorization"] = std::string("Bearer ") + authToken;
+        request.headers["Authorization"] = authToken;
+    }
+    if (!requestId.empty()) {
+        request.headers["X-Request-Id"] = requestId;
     }
 
     platform::httpRequest(request, [self = shared_from_this(), syncId](const platform::HttpResponse& response) {
@@ -202,6 +495,7 @@ void SyncEngine::dispatchRequest(int64_t syncId, bool isRetry) {
 }
 
 void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse& response) {
+    AuthTokenRequestCallback authRequest;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (shutdown_) {
@@ -222,6 +516,8 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
             syncInFlight_ = false;
             retryScheduled_ = false;
             retryCount_ = 0;
+            currentRequestId_.clear();
+            currentPullUrl_.clear();
             return;
         }
 
@@ -232,10 +528,11 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
             syncInFlight_ = false;
             retryScheduled_ = false;
             retryCount_ = 0;
-            return;
-        }
-
-        if (response.statusCode >= 400) {
+            if (!authRequestInFlight_) {
+                authRequestInFlight_ = true;
+                authRequest = authTokenRequestCallback_;
+            }
+        } else if (response.statusCode >= 400) {
             if (scheduleRetryLocked(syncId, response.statusCode, std::string("HTTP ") + std::to_string(response.statusCode))) {
                 return;
             }
@@ -246,14 +543,28 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
             syncInFlight_ = false;
             retryScheduled_ = false;
             retryCount_ = 0;
+            currentRequestId_.clear();
+            currentPullUrl_.clear();
             return;
+        } else {
+            emitLocked(std::string("{\"type\":\"http\",\"phase\":\"pull\",\"status\":") +
+                       std::to_string(response.statusCode) + "}");
+        }
+    }
+    if (response.statusCode == 401 || response.statusCode == 403) {
+        if (authRequest) {
+            authRequest();
         }
 
-        emitLocked(std::string("{\"type\":\"http\",\"phase\":\"pull\",\"status\":") +
-                   std::to_string(response.statusCode) + "}");
+        return;
+    }
+    
+    if (authRequest) {
+        authRequest();
     }
 
     ApplyCallback applyCb;
+    PushChangesCallback pushChangesCb;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (shutdown_) {
@@ -263,9 +574,11 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
             return;
         }
         applyCb = applyCallback_;
+        pushChangesCb = pushChangesCallback_;
     }
 
     std::string applyError;
+
     if (applyCb) {
         if (!applyCb(response.body, applyError)) {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -276,10 +589,87 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
             syncInFlight_ = false;
             retryScheduled_ = false;
             retryCount_ = 0;
+            currentRequestId_.clear();
+            currentPullUrl_.clear();
             return;
         }
     }
 
+    CursorValue nextCursor;
+    if (extractNextCursor(response.body, nextCursor)) {
+        std::string nextUrl;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (shutdown_ || syncId != syncId_) {
+                return;
+            }
+            const std::string baseUrl = currentPullUrl_.empty() ? pullEndpointUrl_ : currentPullUrl_;
+            currentPullUrl_ = buildUrlWithCursor(baseUrl, nextCursor.value, nextCursor.encoded);
+            nextUrl = currentPullUrl_;
+            retryScheduled_ = false;
+            retryCount_ = 0;
+        }
+        if (!nextUrl.empty()) {
+            dispatchRequest(syncId, false);
+            return;
+        }
+    }
+
+    if (pushChangesCb) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+
+            if (shutdown_ || syncId != syncId_) {
+                return;
+            }
+
+            emitLocked("{\"type\":\"phase\",\"phase\":\"push\"}");
+        }
+
+        auto self = shared_from_this();
+
+        pushChangesCb([self, syncId](bool success, const std::string& errorMessage) {
+            std::string pendingReason;
+            {
+                std::lock_guard<std::mutex> lock(self->mutex_);
+                
+                if (self->shutdown_ || syncId != self->syncId_) {
+                    return;
+                }
+                
+                if (!success) {
+                    self->emitLocked(std::string("{\"type\":\"error\",\"message\":\"") +
+                                     json_utils::escapeJsonString(errorMessage) + "\"}");
+                    self->stateJson_ = "{\"state\":\"error\"}";
+                    self->emitLocked("{\"type\":\"state\",\"state\":\"error\"}");
+                    self->syncInFlight_ = false;
+                    self->retryScheduled_ = false;
+                    self->retryCount_ = 0;
+                    self->currentRequestId_.clear();
+                    self->currentPullUrl_.clear();
+                    return;
+                }
+               
+                self->stateJson_ = "{\"state\":\"done\"}";
+                self->emitLocked("{\"type\":\"state\",\"state\":\"done\"}");
+                self->syncInFlight_ = false;
+                self->retryScheduled_ = false;
+                self->retryCount_ = 0;
+                self->currentRequestId_.clear();
+                self->currentPullUrl_.clear();
+                pendingReason = std::move(self->pendingReason_);
+                self->pendingReason_.clear();
+            }
+
+            if (!pendingReason.empty()) {
+                self->start(pendingReason);
+            }
+        });
+        
+        return;
+    }
+
+    std::string pendingReason;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (shutdown_) {
@@ -288,9 +678,18 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
         if (syncId != syncId_) {
             return;
         }
-        stateJson_ = "{\"state\":\"waiting_for_queue\"}";
-        emitLocked("{\"type\":\"phase\",\"phase\":\"drain_queue\"}");
-        emitLocked("{\"type\":\"drain_queue\"}");
+        stateJson_ = "{\"state\":\"done\"}";
+        emitLocked("{\"type\":\"state\",\"state\":\"done\"}");
+        syncInFlight_ = false;
+        retryScheduled_ = false;
+        retryCount_ = 0;
+        currentRequestId_.clear();
+        currentPullUrl_.clear();
+        pendingReason = std::move(pendingReason_);
+        pendingReason_.clear();
+    }
+    if (!pendingReason.empty()) {
+        start(pendingReason);
     }
 }
 

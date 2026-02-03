@@ -7,7 +7,9 @@
 
 #include <jni.h>
 #include <fbjni/fbjni.h>
+#include <exception>
 #include <memory>
+#include <utility>
 #include <sqlite3.h>
 #include "SQLiteConnection.h"
 #include <ReactCommon/TurboModuleUtils.h>
@@ -173,6 +175,12 @@ JSIAndroidBridgeModule::JSIAndroidBridgeModule(std::shared_ptr<CallInvoker> jsIn
         bool ok = watermelondb::applySyncPayload(db, payload, errorMessage);
         releaseSqlite(databaseBridge, (jint)syncConnectionTag_);
         return ok;
+    });
+    syncEngine_->setAuthTokenRequestCallback([this]() {
+        requestAuthTokenFromJs();
+    });
+    syncEngine_->setPushChangesCallback([this](std::function<void(bool success, const std::string& errorMessage)> completion) {
+        requestPushChangesFromJs(std::move(completion));
     });
     JNIEnv* env = getEnv();
     
@@ -409,6 +417,12 @@ void JSIAndroidBridgeModule::startSync(jsi::Runtime &rt, jsi::String reason) {
     }
 }
 
+void JSIAndroidBridgeModule::setSyncPullUrl(jsi::Runtime &rt, jsi::String pullEndpointUrl) {
+    if (syncEngine_) {
+        syncEngine_->setPullEndpointUrl(pullEndpointUrl.utf8(rt));
+    }
+}
+
 jsi::String JSIAndroidBridgeModule::getSyncStateJson(jsi::Runtime &rt) {
     auto state = syncEventState_;
     if (state) {
@@ -443,17 +457,6 @@ void JSIAndroidBridgeModule::removeSyncListener(jsi::Runtime &rt, double listene
     state->listeners.erase(static_cast<int64_t>(listenerId));
 }
 
-void JSIAndroidBridgeModule::notifyQueueDrained(jsi::Runtime &rt) {
-    auto state = syncEventState_;
-    if (state) {
-        const std::lock_guard<std::mutex> lock(state->mutex);
-        state->runtime = &rt;
-    }
-    if (syncEngine_) {
-        syncEngine_->notifyQueueDrained();
-    }
-}
-
 void JSIAndroidBridgeModule::setAuthToken(jsi::Runtime &rt, jsi::String token) {
     auto state = syncEventState_;
     if (state) {
@@ -473,6 +476,25 @@ void JSIAndroidBridgeModule::clearAuthToken(jsi::Runtime &rt) {
     }
     if (syncEngine_) {
         syncEngine_->clearAuthToken();
+    }
+}
+
+void JSIAndroidBridgeModule::setAuthTokenProvider(jsi::Runtime &rt, jsi::Function provider) {
+    auto state = syncEventState_;
+    if (state) {
+        const std::lock_guard<std::mutex> lock(state->mutex);
+        state->runtime = &rt;
+        authTokenProvider_ = std::make_shared<jsi::Function>(std::move(provider));
+    }
+    requestAuthTokenFromJs();
+}
+
+void JSIAndroidBridgeModule::setPushChangesProvider(jsi::Runtime &rt, jsi::Function provider) {
+    auto state = syncEventState_;
+    if (state) {
+        const std::lock_guard<std::mutex> lock(state->mutex);
+        state->runtime = &rt;
+        pushChangesProvider_ = std::make_shared<jsi::Function>(std::move(provider));
     }
 }
 
@@ -576,6 +598,218 @@ void JSIAndroidBridgeModule::emitSyncEventLocked(const std::string &eventJson) {
         for (auto &entry : state->listeners) {
             entry.second.call(rt, jsi::String::createFromUtf8(rt, eventJson));
         }
+    });
+}
+
+void JSIAndroidBridgeModule::requestAuthTokenFromJs() {
+    auto state = syncEventState_;
+    if (!state || !state->jsInvoker) {
+        return;
+    }
+    auto engineWeak = std::weak_ptr<watermelondb::SyncEngine>(syncEngine_);
+    state->jsInvoker->invokeAsync([state, engineWeak, this]() {
+        jsi::Runtime* runtime = nullptr;
+        std::shared_ptr<jsi::Function> provider;
+        {
+            const std::lock_guard<std::mutex> lock(state->mutex);
+            if (!state->alive || !state->runtime) {
+                return;
+            }
+            runtime = state->runtime;
+            provider = authTokenProvider_;
+        }
+        if (!runtime || !provider) {
+            return;
+        }
+        jsi::Runtime& rt = *runtime;
+        jsi::Value result;
+        try {
+            result = provider->call(rt);
+        } catch (...) {
+            if (auto engine = engineWeak.lock()) {
+                engine->clearAuthToken();
+            }
+            return;
+        }
+        bool usedPromiseResolve = false;
+        jsi::Value promiseValue = jsi::Value::undefined();
+        try {
+            if (rt.global().hasProperty(rt, "Promise")) {
+                jsi::Value promiseCtorValue = rt.global().getProperty(rt, "Promise");
+                if (promiseCtorValue.isObject()) {
+                    jsi::Object promiseCtorObj = promiseCtorValue.asObject(rt);
+                    jsi::Value resolveValue = promiseCtorObj.getProperty(rt, "resolve");
+                    if (resolveValue.isObject() && resolveValue.asObject(rt).isFunction(rt)) {
+                        jsi::Function resolveFunc = resolveValue.asObject(rt).asFunction(rt);
+                        promiseValue = resolveFunc.call(rt, promiseCtorObj, result);
+                        usedPromiseResolve = true;
+                    }
+                }
+            }
+        } catch (...) {
+            if (auto engine = engineWeak.lock()) {
+                engine->clearAuthToken();
+            }
+            return;
+        }
+        if (!usedPromiseResolve && result.isObject()) {
+            // jsi::Value is move-only; keep object/thenable alive for inspection below
+            promiseValue = std::move(result);
+        }
+
+        if (promiseValue.isObject()) {
+            jsi::Object promiseObj = promiseValue.asObject(rt);
+            jsi::Value thenValue = promiseObj.getProperty(rt, "then");
+            if (thenValue.isObject() && thenValue.asObject(rt).isFunction(rt)) {
+                jsi::Function thenFunc = thenValue.asObject(rt).asFunction(rt);
+                auto resolve = jsi::Function::createFromHostFunction(
+                    rt,
+                    jsi::PropNameID::forUtf8(rt, "resolve"),
+                    1,
+                    [engineWeak](jsi::Runtime& rt2, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                        if (count > 0 && args[0].isString()) {
+                            if (auto engine = engineWeak.lock()) {
+                                engine->setAuthToken(args[0].asString(rt2).utf8(rt2));
+                            }
+                            return jsi::Value::undefined();
+                        }
+                        if (auto engine = engineWeak.lock()) {
+                            engine->clearAuthToken();
+                        }
+                        return jsi::Value::undefined();
+                    });
+                auto reject = jsi::Function::createFromHostFunction(
+                    rt,
+                    jsi::PropNameID::forUtf8(rt, "reject"),
+                    1,
+                    [engineWeak](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                        if (auto engine = engineWeak.lock()) {
+                            engine->clearAuthToken();
+                        }
+                        return jsi::Value::undefined();
+                    });
+                bool handled = false;
+                try {
+                    jsi::Value functionCtorValue = rt.global().getProperty(rt, "Function");
+                    if (functionCtorValue.isObject() && functionCtorValue.asObject(rt).isFunction(rt)) {
+                        jsi::Function functionCtor = functionCtorValue.asObject(rt).asFunction(rt);
+                        jsi::Value helperValue = functionCtor.call(
+                            rt,
+                            jsi::String::createFromUtf8(rt, "p"),
+                            jsi::String::createFromUtf8(rt, "r"),
+                            jsi::String::createFromUtf8(rt, "j"),
+                            jsi::String::createFromUtf8(rt, "return p.then(r,j);")
+                        );
+                        if (helperValue.isObject() && helperValue.asObject(rt).isFunction(rt)) {
+                            jsi::Function helper = helperValue.asObject(rt).asFunction(rt);
+                            helper.call(rt, promiseObj, resolve, reject);
+                            handled = true;
+                        }
+                    }
+                    if (!handled) {
+                        thenFunc.call(rt, promiseObj, resolve, reject);
+                    }
+                } catch (...) {
+                    if (auto engine = engineWeak.lock()) {
+                        engine->clearAuthToken();
+                    }
+                    return;
+                }
+                return;
+            }
+        }
+
+        if (!usedPromiseResolve && result.isString()) {
+            if (auto engine = engineWeak.lock()) {
+                engine->setAuthToken(result.asString(rt).utf8(rt));
+            }
+            return;
+        }
+
+        if (auto engine = engineWeak.lock()) {
+            engine->clearAuthToken();
+        }
+    });
+}
+
+void JSIAndroidBridgeModule::requestPushChangesFromJs(
+    std::function<void(bool success, const std::string& errorMessage)> completion) {
+    auto state = syncEventState_;
+    if (!state || !state->jsInvoker) {
+        completion(false, "Missing JS runtime for pushChanges");
+        return;
+    }
+    auto completionPtr = std::make_shared<std::function<void(bool, const std::string&)>>(std::move(completion));
+    state->jsInvoker->invokeAsync([state, completionPtr, this]() {
+        jsi::Runtime* runtime = nullptr;
+        std::shared_ptr<jsi::Function> provider;
+        {
+            const std::lock_guard<std::mutex> lock(state->mutex);
+            if (!state->alive || !state->runtime) {
+                return;
+            }
+            runtime = state->runtime;
+            provider = pushChangesProvider_;
+        }
+        if (!runtime || !provider) {
+            (*completionPtr)(false, "Missing pushChanges provider");
+            return;
+        }
+        jsi::Runtime& rt = *runtime;
+        jsi::Value result;
+        try {
+            result = provider->call(rt);
+        } catch (const jsi::JSError& e) {
+            (*completionPtr)(false, e.what());
+            return;
+        } catch (const std::exception& e) {
+            (*completionPtr)(false, e.what());
+            return;
+        } catch (...) {
+            (*completionPtr)(false, "pushChangesProvider threw");
+            return;
+        }
+        if (result.isObject()) {
+            try {
+                jsi::Object resultObj = result.asObject(rt);
+                jsi::Value thenValue = resultObj.getProperty(rt, "then");
+                if (thenValue.isObject() && thenValue.asObject(rt).isFunction(rt)) {
+                    jsi::Function thenFunc = thenValue.asObject(rt).asFunction(rt);
+                    auto resolve = jsi::Function::createFromHostFunction(
+                        rt,
+                        jsi::PropNameID::forUtf8(rt, "resolve"),
+                        1,
+                        [completionPtr](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                            (*completionPtr)(true, "");
+                            return jsi::Value::undefined();
+                        });
+                    auto reject = jsi::Function::createFromHostFunction(
+                        rt,
+                        jsi::PropNameID::forUtf8(rt, "reject"),
+                        1,
+                        [completionPtr](jsi::Runtime& rt2, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                            std::string message = "pushChanges rejected";
+                            if (count > 0 && args[0].isString()) {
+                                message = args[0].asString(rt2).utf8(rt2);
+                            }
+                            (*completionPtr)(false, message);
+                            return jsi::Value::undefined();
+                        });
+                    thenFunc.call(rt, resultObj, resolve, reject);
+                    return;
+                }
+            } catch (const jsi::JSError& e) {
+                (*completionPtr)(false, e.what());
+                return;
+            } catch (const std::exception& e) {
+                (*completionPtr)(false, e.what());
+                return;
+            } catch (...) {
+                (*completionPtr)(false, "pushChangesProvider promise handling threw");
+                return;
+            }
+        }
+        (*completionPtr)(true, "");
     });
 }
 
