@@ -9,6 +9,7 @@ import {
   initSyncSocket as nativeInitSyncSocket,
   syncSocketAuthenticate as nativeSyncSocketAuthenticate,
   syncSocketDisconnect as nativeSyncSocketDisconnect,
+  importRemoteSlice as nativeImportRemoteSlice,
 } from './nativeSync'
 
 export type SyncState = {
@@ -28,6 +29,7 @@ export class SyncManager {
   private static authUnsubscribe: (() => void) | null = null
   private static authTokenProvider: (() => Promise<string> | string) | null = null
   private static configured = false
+  private static connectionTag: number | null = null
 
   static configure(config: SyncConfig): void {
     const { authTokenProvider, ...rest } = config ?? {}
@@ -35,6 +37,7 @@ export class SyncManager {
     if (authTokenProvider && typeof authTokenProvider === 'function') {
       SyncManager.setAuthTokenProvider(authTokenProvider)
     }
+    SyncManager.connectionTag = typeof rest.connectionTag === 'number' ? rest.connectionTag : null
     nativeConfigureSync(rest)
     SyncManager.configured = true
   }
@@ -131,6 +134,15 @@ export class SyncManager {
     nativeSyncSocketDisconnect()
   }
 
+  static importRemoteSlice(sliceUrl: string): Promise<void> {
+    SyncManager.assertConfigured('importRemoteSlice')
+    const tag = SyncManager.connectionTag
+    if (!tag) {
+      throw new Error('[WatermelonDB][Sync] importRemoteSlice requires a configured connectionTag.')
+    }
+    return nativeImportRemoteSlice(tag, sliceUrl)
+  }
+
   private static assertConfigured(method: string): void {
     if (SyncManager.configured) {
       return
@@ -150,11 +162,16 @@ export class SyncManager {
     if (authTokenProvider !== undefined && typeof authTokenProvider !== 'function') {
       throw new Error('[WatermelonDB][Sync] authTokenProvider must be a function when provided.')
     }
-    const endpoint = typeof config.endpoint === 'string' ? config.endpoint.trim() : ''
-    const pullUrl = typeof config.pullUrl === 'string' ? config.pullUrl.trim() : ''
-    if (!endpoint && !pullUrl) {
-      throw new Error('[WatermelonDB][Sync] configure requires endpoint or pullUrl.')
+    const pullEndpointUrl = typeof config.pullEndpointUrl === 'string' ? config.pullEndpointUrl.trim() : ''
+
+    if (!pullEndpointUrl) {
+      throw new Error('[WatermelonDB][Sync] configure requires pullEndpointUrl.')
     }
+
+    if (config.socketioUrl && typeof config.socketioUrl !== 'string') {
+      throw new Error('[WatermelonDB][Sync] socketioUrl must be a string when provided.')
+    }
+
     const connectionTag = config.connectionTag
     if (typeof connectionTag !== 'number' || !Number.isFinite(connectionTag) || connectionTag <= 0) {
       throw new Error('[WatermelonDB][Sync] configure requires a numeric connectionTag > 0.')

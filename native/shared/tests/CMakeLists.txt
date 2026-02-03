@@ -58,6 +58,7 @@ endif()
 
 add_executable(sync_engine_tests
   SyncEngineTests.cpp
+  ../SyncEngine.cpp
   ${SIMDJSON_INCLUDE_DIR_ABS}/simdjson.cpp
 )
 target_include_directories(sync_engine_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR}/.. ${SIMDJSON_INCLUDE_DIR})

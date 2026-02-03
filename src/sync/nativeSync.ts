@@ -15,6 +15,7 @@ interface NativeSyncModule extends TurboModule {
   initSyncSocket(socketUrl: string): void
   syncSocketAuthenticate(token: string): void
   syncSocketDisconnect(): void
+  importRemoteSlice(tag: number, sliceUrl: string): Promise<void>
 }
 
 type SyncConfig = Record<string, any>
@@ -93,4 +94,9 @@ export function syncSocketAuthenticate(token: string): void {
 export function syncSocketDisconnect(): void {
   const module = getNativeModule()
   module.syncSocketDisconnect()
+}
+
+export function importRemoteSlice(tag: number, sliceUrl: string): Promise<void> {
+  const module = getNativeModule()
+  return module.importRemoteSlice(tag, sliceUrl)
 }

@@ -186,6 +186,7 @@ set(SOURCE_FILES
     ../../../../shared/DatabaseUtils.cpp
     ../../../../shared/SliceDecoder.cpp
     ../../../../shared/SliceImportEngine.cpp
+    ../../../../shared/SyncEngine.cpp
     ../../../../shared/Simdjson.cpp
     ../../../../shared/SyncApplyEngine.cpp
     ../../../../shared/SqliteInsertHelper.cpp

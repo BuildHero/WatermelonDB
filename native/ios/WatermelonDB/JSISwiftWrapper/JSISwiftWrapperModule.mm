@@ -65,7 +65,7 @@ JSISwiftWrapperModule::JSISwiftWrapperModule(std::shared_ptr<CallInvoker> jsInvo
         }
     });
 
-    socketStatusObserver_ = [[NSNotificationCenter defaultCenter]
+    socketStatusObserver_ = (__bridge_retained void*)[[NSNotificationCenter defaultCenter]
         addObserverForName:SyncSocketClient.statusNotificationName
                     object:nil
                      queue:nil
@@ -91,7 +91,7 @@ JSISwiftWrapperModule::JSISwiftWrapperModule(std::shared_ptr<CallInvoker> jsInvo
         emitSyncEventLocked(eventJson);
     }];
 
-    socketCdcObserver_ = [[NSNotificationCenter defaultCenter]
+    socketCdcObserver_ = (__bridge_retained void*)[[NSNotificationCenter defaultCenter]
         addObserverForName:SyncSocketClient.cdcNotificationName
                     object:nil
                      queue:nil
@@ -111,10 +111,12 @@ JSISwiftWrapperModule::~JSISwiftWrapperModule() {
     }
     if (socketStatusObserver_) {
         [[NSNotificationCenter defaultCenter] removeObserver:(__bridge id)socketStatusObserver_];
+        CFRelease(socketStatusObserver_);
         socketStatusObserver_ = nullptr;
     }
     if (socketCdcObserver_) {
         [[NSNotificationCenter defaultCenter] removeObserver:(__bridge id)socketCdcObserver_];
+        CFRelease(socketCdcObserver_);
         socketCdcObserver_ = nullptr;
     }
     auto state = syncEventState_;

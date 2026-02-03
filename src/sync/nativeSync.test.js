@@ -10,6 +10,7 @@ const makeTurboModule = () => ({
   initSyncSocket: jest.fn(),
   syncSocketAuthenticate: jest.fn(),
   syncSocketDisconnect: jest.fn(),
+  importRemoteSlice: jest.fn(() => Promise.resolve()),
 })
 
 const setupModule = (moduleInstance = makeTurboModule()) => {
@@ -40,9 +41,9 @@ describe('nativeSync', () => {
   it('configures sync with JSON string', () => {
     const moduleInstance = makeTurboModule()
     const nativeSync = setupModule(moduleInstance)
-    nativeSync.configureSync({ endpoint: 'x', connectionTag: 1 })
+    nativeSync.configureSync({ pullEndpointUrl: 'x', connectionTag: 1 })
     expect(moduleInstance.configureSync).toHaveBeenCalledWith(
-      JSON.stringify({ endpoint: 'x', connectionTag: 1 }),
+      JSON.stringify({ pullEndpointUrl: 'x', connectionTag: 1 }),
     )
   })
 
@@ -86,6 +87,7 @@ describe('nativeSync', () => {
     nativeSync.initSyncSocket('wss://example.com')
     nativeSync.syncSocketAuthenticate('token')
     nativeSync.syncSocketDisconnect()
+    nativeSync.importRemoteSlice(3, 'https://example.com/slice')
 
     expect(moduleInstance.startSync).toHaveBeenCalledWith('reason')
     expect(moduleInstance.notifyQueueDrained).toHaveBeenCalledWith()
@@ -94,5 +96,6 @@ describe('nativeSync', () => {
     expect(moduleInstance.initSyncSocket).toHaveBeenCalledWith('wss://example.com')
     expect(moduleInstance.syncSocketAuthenticate).toHaveBeenCalledWith('token')
     expect(moduleInstance.syncSocketDisconnect).toHaveBeenCalledWith()
+    expect(moduleInstance.importRemoteSlice).toHaveBeenCalledWith(3, 'https://example.com/slice')
   })
 })

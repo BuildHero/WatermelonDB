@@ -63,14 +63,10 @@ void test_insert_and_update() {
     std::string error;
     execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT, count INTEGER)", error);
 
-    std::string payload = R"({
-        "changes": {
-          "tasks": {
-            "created": [{ "id": "t1", "name": "alpha", "count": 1 }],
-            "updated": [{ "id": "t1", "name": "beta", "count": 2 }]
-          }
-        }
-      })";
+    std::string payload = R"([
+        { "table": "tasks", "row": { "id": "t1", "name": "alpha", "count": 1 } },
+        { "table": "tasks", "row": { "id": "t1", "name": "beta", "count": 2 } }
+      ])";
 
     bool ok = watermelondb::applySyncPayload(db, payload, error);
     expectTrue(ok, "applySyncPayload should succeed for created/updated");
@@ -91,13 +87,9 @@ void test_update_inserts_when_missing() {
     std::string error;
     execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT)", error);
 
-    std::string payload = R"({
-        "changes": {
-          "tasks": {
-            "updated": [{ "id": "t2", "name": "gamma" }]
-          }
-        }
-      })";
+    std::string payload = R"([
+        { "table": "tasks", "row": { "id": "t2", "name": "gamma" } }
+      ])";
 
     bool ok = watermelondb::applySyncPayload(db, payload, error);
     expectTrue(ok, "applySyncPayload should insert on updated when missing");
@@ -116,13 +108,9 @@ void test_deletes() {
     execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT)", error);
     execSql(db, "INSERT INTO tasks (id, name) VALUES ('t3', 'delta')", error);
 
-    std::string payload = R"({
-        "changes": {
-          "tasks": {
-            "deleted": ["t3"]
-          }
-        }
-      })";
+    std::string payload = R"([
+        { "table": "tasks", "deleted": true, "id": "t3" }
+      ])";
 
     bool ok = watermelondb::applySyncPayload(db, payload, error);
     expectTrue(ok, "applySyncPayload should delete rows");
@@ -149,17 +137,14 @@ void test_json_types_as_text() {
     std::string error;
     execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, meta TEXT, flag INTEGER)", error);
 
-    std::string payload = R"({
-        "changes": {
-          "tasks": {
-            "created": [{
-              "id": "t4",
-              "meta": { "nested": true, "values": [1, 2, 3] },
-              "flag": true
-            }]
+    std::string payload = R"([
+        { "table": "tasks", "row": {
+            "id": "t4",
+            "meta": { "nested": true, "values": [1, 2, 3] },
+            "flag": true
           }
         }
-      })";
+      ])";
 
     bool ok = watermelondb::applySyncPayload(db, payload, error);
     expectTrue(ok, "applySyncPayload should accept objects/arrays");
@@ -190,7 +175,12 @@ void test_delete_chunking() {
         ids += "\"x\"";
     }
     ids += "]";
-    std::string payload = std::string("{\"changes\":{\"tasks\":{\"deleted\":") + ids + "}}}";
+    std::string payload = "[";
+    for (int i = 0; i < 1000; i++) {
+        if (i) payload += ",";
+        payload += "{\"table\":\"tasks\",\"deleted\":true,\"id\":\"x\"}";
+    }
+    payload += "]";
 
     bool ok = watermelondb::applySyncPayload(db, payload, error);
     expectTrue(ok, "applySyncPayload should delete in chunks");
@@ -207,16 +197,12 @@ void test_rollback_on_error() {
     std::string error;
     execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT)", error);
 
-    std::string payload = R"({
-        "changes": {
-          "tasks": {
-            "created": [{ "id": "t5", "name": "ok", "bogus": "oops" }]
-          }
-        }
-      })";
+    std::string payload = R"([
+        { "table": "tasks", "row": { "name": "missing_id" } }
+      ])";
 
     bool ok = watermelondb::applySyncPayload(db, payload, error);
-    expectTrue(!ok, "applySyncPayload should fail on invalid column");
+    expectTrue(!ok, "applySyncPayload should fail on missing id");
 
     int count = querySingleInt(db, "SELECT COUNT(*) FROM tasks");
     expectTrue(count == 0, "transaction should rollback on error");
@@ -224,7 +210,7 @@ void test_rollback_on_error() {
     sqlite3_close(db);
 }
 
-void test_payload_without_changes_wrapper() {
+void test_payload_requires_array() {
     sqlite3* db = nullptr;
     sqlite3_open(":memory:", &db);
     std::string error;
@@ -237,35 +223,32 @@ void test_payload_without_changes_wrapper() {
       })";
 
     bool ok = watermelondb::applySyncPayload(db, payload, error);
-    expectTrue(ok, "applySyncPayload should accept root changes object");
-
-    std::string name;
-    expectTrue(querySingleText(db, "SELECT name FROM tasks WHERE id='t6'", name), "row should exist");
-    expectTrue(name == "direct", "row should match payload");
+    expectTrue(!ok, "applySyncPayload should require array payload");
 
     sqlite3_close(db);
 }
 
-void test_delete_with_non_array_is_ignored() {
+void test_array_payload_upserts_and_deletes() {
     sqlite3* db = nullptr;
     sqlite3_open(":memory:", &db);
     std::string error;
-    execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY)", error);
-    execSql(db, "INSERT INTO tasks (id) VALUES ('t7')", error);
+    execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT)", error);
 
-    std::string payload = R"({
-        "changes": {
-          "tasks": {
-            "deleted": { "id": "t7" }
-          }
-        }
-      })";
+    std::string payload = R"([
+        { "table": "tasks", "row": { "id": "a1", "name": "alpha" } },
+        { "tableName": "tasks", "row": { "id": "b2", "name": "bravo" } },
+        { "table": "tasks", "deleted": true, "id": "a1" }
+      ])";
 
     bool ok = watermelondb::applySyncPayload(db, payload, error);
-    expectTrue(ok, "applySyncPayload should ignore non-array deletes");
+    expectTrue(ok, "applySyncPayload should accept array payload");
 
     int count = querySingleInt(db, "SELECT COUNT(*) FROM tasks");
-    expectTrue(count == 1, "row should remain");
+    expectTrue(count == 1, "only one row should remain after delete");
+
+    std::string name;
+    expectTrue(querySingleText(db, "SELECT name FROM tasks WHERE id='b2'", name), "remaining row should exist");
+    expectTrue(name == "bravo", "remaining row should match payload");
 
     sqlite3_close(db);
 }
@@ -280,8 +263,8 @@ int main() {
     test_json_types_as_text();
     test_delete_chunking();
     test_rollback_on_error();
-    test_payload_without_changes_wrapper();
-    test_delete_with_non_array_is_ignored();
+    test_payload_requires_array();
+    test_array_payload_upserts_and_deletes();
 
     if (gFailures > 0) {
         std::cerr << gFailures << " test(s) failed\n";

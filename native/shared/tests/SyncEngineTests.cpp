@@ -90,7 +90,7 @@ void test_success_flow() {
         done(response);
     });
 
-    engine->configure("{\"endpoint\":\"https://example.com\",\"connectionTag\":1}");
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
     engine->start("test");
 
     expectTrue(recorder.waitForContains("\"type\":\"drain_queue\""), "expected drain_queue event");
@@ -111,7 +111,7 @@ void test_auth_required() {
         done(response);
     });
 
-    engine->configure("{\"endpoint\":\"https://example.com\",\"connectionTag\":1}");
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
     engine->start("auth");
 
     expectTrue(recorder.waitForContains("\"type\":\"auth_required\""), "expected auth_required event");
@@ -138,7 +138,7 @@ void test_retry_flow() {
         done(response);
     });
 
-    engine->configure("{\"endpoint\":\"https://example.com\",\"connectionTag\":1,"
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1,"
                       "\"maxRetries\":1,\"retryInitialMs\":0,\"retryMaxMs\":0}");
     engine->start("retry");
 
@@ -160,7 +160,7 @@ void test_shutdown_prevents_events() {
         done(response);
     });
 
-    engine->configure("{\"endpoint\":\"https://example.com\",\"connectionTag\":1}");
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
     engine->shutdown();
     engine->start("after_shutdown");
 
@@ -180,7 +180,7 @@ void test_auth_token_restart() {
         done(response);
     });
 
-    engine->configure("{\"endpoint\":\"https://example.com\",\"connectionTag\":1}");
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
     engine->start("auth");
     expectTrue(recorder.waitForContains("\"type\":\"auth_required\""), "expected auth_required event");
 
@@ -210,7 +210,7 @@ void test_queue_when_in_flight() {
         done(response);
     });
 
-    engine->configure("{\"endpoint\":\"https://example.com\",\"connectionTag\":1}");
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
     engine->start("first");
     engine->start("second");
 
@@ -232,7 +232,7 @@ void test_backoff_delay_cap() {
         done(response);
     });
 
-    engine->configure("{\"endpoint\":\"https://example.com\",\"connectionTag\":1,"
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1,"
                       "\"maxRetries\":3,\"retryInitialMs\":10,\"retryMaxMs\":15}");
     engine->start("retry");
 
@@ -251,8 +251,8 @@ void test_missing_endpoint_error() {
     engine->configure("{\"connectionTag\":1}");
     engine->start("missing");
 
-    expectTrue(recorder.waitForContains("\"message\":\"Missing sync endpoint\""),
-               "expected missing endpoint error");
+    expectTrue(recorder.waitForContains("\"message\":\"Missing sync pullEndpointUrl\""),
+               "expected missing pullEndpointUrl error");
     expectTrue(recorder.waitForContains("\"state\":\"error\""), "expected error state");
 }
 
@@ -267,8 +267,8 @@ void test_invalid_config_json() {
     engine->configure("{invalid");
     engine->start("invalid_config");
 
-    expectTrue(recorder.waitForContains("\"message\":\"Missing sync endpoint\""),
-               "expected missing endpoint error from invalid config");
+    expectTrue(recorder.waitForContains("\"message\":\"Missing sync pullEndpointUrl\""),
+               "expected missing pullEndpointUrl error from invalid config");
     expectTrue(recorder.waitForContains("\"state\":\"error\""), "expected error state");
 }
 
@@ -289,7 +289,7 @@ void test_apply_error_sets_state() {
         done(response);
     });
 
-    engine->configure("{\"endpoint\":\"https://example.com\",\"connectionTag\":1}");
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
     engine->start("apply_error");
 
     expectTrue(recorder.waitForContains("\"message\":\"apply failed\""), "expected apply error message");

@@ -14,6 +14,7 @@ const makeModule = () => {
     initSyncSocket: jest.fn(),
     syncSocketAuthenticate: jest.fn(),
     syncSocketDisconnect: jest.fn(),
+    importRemoteSlice: jest.fn(() => Promise.resolve()),
   }
 
   jest.doMock('./nativeSync', () => nativeSync)
@@ -36,21 +37,21 @@ describe('SyncManager', () => {
       '[WatermelonDB][Sync] SyncManager.configure(...) expects a config object.',
     )
     expect(() => SyncManager.configure({ connectionTag: 1 })).toThrow(
-      '[WatermelonDB][Sync] configure requires endpoint or pullUrl.',
+      '[WatermelonDB][Sync] configure requires pullEndpointUrl.',
     )
-    expect(() => SyncManager.configure({ endpoint: 'https://example.com' })).toThrow(
+    expect(() => SyncManager.configure({ pullEndpointUrl: 'https://example.com' })).toThrow(
       '[WatermelonDB][Sync] configure requires a numeric connectionTag > 0.',
     )
-    expect(() => SyncManager.configure({ endpoint: 'x', connectionTag: 1, authTokenProvider: 'nope' })).toThrow(
+    expect(() => SyncManager.configure({ pullEndpointUrl: 'x', connectionTag: 1, authTokenProvider: 'nope' })).toThrow(
       '[WatermelonDB][Sync] authTokenProvider must be a function when provided.',
     )
   })
 
-  it('accepts pullUrl and passes config to native', () => {
+  it('accepts pullEndpointUrl and passes config to native', () => {
     const { SyncManager, nativeSync } = makeModule()
-    SyncManager.configure({ pullUrl: 'https://example.com/pull', connectionTag: 2 })
+    SyncManager.configure({ pullEndpointUrl: 'https://example.com/pull', connectionTag: 2 })
     expect(nativeSync.configureSync).toHaveBeenCalledWith({
-      pullUrl: 'https://example.com/pull',
+      pullEndpointUrl: 'https://example.com/pull',
       connectionTag: 2,
     })
   })
@@ -69,7 +70,7 @@ describe('SyncManager', () => {
       .mockResolvedValueOnce('token-2')
 
     SyncManager.configure({
-      endpoint: 'https://example.com',
+      pullEndpointUrl: 'https://example.com/pull',
       connectionTag: 1,
       authTokenProvider: provider,
     })
@@ -102,6 +103,13 @@ describe('SyncManager', () => {
     )
   })
 
+  it('throws if importRemoteSlice is called before configure', () => {
+    const { SyncManager } = makeModule()
+    expect(() => SyncManager.importRemoteSlice('https://example.com/slice')).toThrow(
+      '[WatermelonDB][Sync] SyncManager.configure(...) must be called before importRemoteSlice.',
+    )
+  })
+
   it('throws if auth methods are called before configure', () => {
     const { SyncManager } = makeModule()
     expect(() => SyncManager.setAuthToken('token')).toThrow(
@@ -121,7 +129,7 @@ describe('SyncManager', () => {
     })
 
     const handler = jest.fn().mockResolvedValue(undefined)
-    SyncManager.configure({ endpoint: 'https://example.com', connectionTag: 1 })
+    SyncManager.configure({ pullEndpointUrl: 'https://example.com/pull', connectionTag: 1 })
     SyncManager.setQueueDrainHandler(handler)
 
     await capturedListener({ type: 'drain_queue' })
@@ -136,7 +144,7 @@ describe('SyncManager', () => {
     const unsubscribe = jest.fn()
     nativeSync.addSyncListener.mockReturnValue(unsubscribe)
 
-    SyncManager.configure({ endpoint: 'https://example.com', connectionTag: 1 })
+    SyncManager.configure({ pullEndpointUrl: 'https://example.com/pull', connectionTag: 1 })
     SyncManager.setQueueDrainHandler(() => {})
     SyncManager.setQueueDrainHandler(() => {})
 
@@ -152,7 +160,7 @@ describe('SyncManager', () => {
     })
 
     const handler = jest.fn()
-    SyncManager.configure({ endpoint: 'https://example.com', connectionTag: 1 })
+    SyncManager.configure({ pullEndpointUrl: 'https://example.com/pull', connectionTag: 1 })
     SyncManager.setQueueDrainHandler(handler)
 
     await capturedListener({ type: 'state', state: 'syncing' })
@@ -175,7 +183,7 @@ describe('SyncManager', () => {
     })
 
     SyncManager.configure({
-      endpoint: 'https://example.com',
+      pullEndpointUrl: 'https://example.com/pull',
       connectionTag: 1,
       authTokenProvider: provider,
     })
@@ -192,7 +200,7 @@ describe('SyncManager', () => {
     const { SyncManager, nativeSync } = makeModule()
     const provider = jest.fn().mockResolvedValue('')
     SyncManager.configure({
-      endpoint: 'https://example.com',
+      pullEndpointUrl: 'https://example.com/pull',
       connectionTag: 1,
       authTokenProvider: provider,
     })
@@ -202,7 +210,7 @@ describe('SyncManager', () => {
 
   it('passes socket methods through to native', () => {
     const { SyncManager, nativeSync } = makeModule()
-    SyncManager.configure({ endpoint: 'https://example.com', connectionTag: 1 })
+    SyncManager.configure({ pullEndpointUrl: 'https://example.com/pull', connectionTag: 1 })
 
     SyncManager.initSocket('wss://example.com')
     SyncManager.authenticateSocket('token')
@@ -217,11 +225,19 @@ describe('SyncManager', () => {
     const { SyncManager, nativeSync } = makeModule()
     nativeSync.getSyncState.mockReturnValue({ state: 'configured' })
 
-    SyncManager.configure({ endpoint: 'https://example.com', connectionTag: 1 })
+    SyncManager.configure({ pullEndpointUrl: 'https://example.com/pull', connectionTag: 1 })
     SyncManager.start('manual')
     const state = SyncManager.getState()
 
     expect(nativeSync.startSync).toHaveBeenCalledWith('manual')
     expect(state).toEqual({ state: 'configured' })
+  })
+
+  it('routes importRemoteSlice through to native', async () => {
+    const { SyncManager, nativeSync } = makeModule()
+    SyncManager.configure({ pullEndpointUrl: 'https://example.com/pull', connectionTag: 7 })
+
+    await SyncManager.importRemoteSlice('https://example.com/slice')
+    expect(nativeSync.importRemoteSlice).toHaveBeenCalledWith(7, 'https://example.com/slice')
   })
 })

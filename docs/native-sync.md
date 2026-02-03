@@ -8,7 +8,8 @@ This library includes a native sync engine that pulls changes from your backend,
 import { SyncManager } from '@nozbe/watermelondb'
 
 SyncManager.configure({
-  endpoint: 'https://api.example.com/sync',
+  pullEndpointUrl: 'https://api.example.com/sync/pull',
+  socketioUrl: 'https://api.example.com',
   connectionTag: 1,
   authTokenProvider: async () => getLatestAuthToken(),
   timeoutMs: 30000,
@@ -39,8 +40,8 @@ SyncManager.start('app_launch')
 
 `SyncManager.configure(config)` accepts a plain object that is JSON-stringified and parsed natively.
 
-- `endpoint` (string, required): Base sync endpoint. Pull uses `endpoint + "/pull"` unless `pullUrl` is set.
-- `pullUrl` (string, optional): Full pull URL override.
+- `pullEndpointUrl` (string, required): Full URL for the pull sync endpoint.
+- `socketioUrl` (string, optional): Base URL for Socket.io connection (used for real-time sync notifications).
 - `authToken` (string, optional): Initial bearer token (if you already have one).
 - `authTokenProvider` (function, optional): Async/sync function that returns the latest bearer token. Used on configure and when native emits `auth_required`.
 - `connectionTag` (number, required): SQLite connection tag used for applying changes.
@@ -82,6 +83,16 @@ When socket.io is enabled, events look like:
 - `{"status":"cdc"}`
 
 ## Socket.io (optional)
+
+If `socketioUrl` is provided in the config, you can use socket methods:
+
+```ts
+SyncManager.authenticateSocket('token')
+// ...
+SyncManager.disconnectSocket()
+```
+
+Alternatively, you can initialize the socket manually:
 
 ```ts
 SyncManager.initSocket('https://api.example.com')
