@@ -270,7 +270,7 @@ void test_updates_last_sequence_id_ulid() {
     expectTrue(ok, "applySyncPayload should update last_sequence_id for ULIDs");
 
     std::string sequenceId;
-    expectTrue(querySingleText(db, "SELECT value FROM local_storage WHERE key='__watermelon_last_pulled_at'", sequenceId),
+    expectTrue(querySingleText(db, "SELECT value FROM local_storage WHERE key='__watermelon_last_sequence_id'", sequenceId),
                "last_pulled_at should be stored");
     expectTrue(sequenceId == "01ARZ3NDEKTSV4RRFFQ69G5FAW", "last_sequence_id should be the highest ULID");
 

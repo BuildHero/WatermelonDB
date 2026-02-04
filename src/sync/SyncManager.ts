@@ -1,3 +1,5 @@
+import { Database } from 'index'
+import { getLastPulledAt } from './impl'
 import {
   configureSync as nativeConfigureSync,
   startSync as nativeStartSync,
@@ -33,6 +35,7 @@ export class SyncManager {
   private static connectionTag: number | null = null
   private static pullChangesUrl: string | null = null
   private static adapter: any | null = null
+  private static database: Database | null = null
 
   static configure(config: SyncConfig): void {
     const {
@@ -44,6 +47,8 @@ export class SyncManager {
       pullChangesUrl,
       ...rest
     } = config ?? {}
+
+    SyncManager.database = database
 
     const resolvedConnectionTag = SyncManager.resolveConnectionTag(connectionTag, database, adapter)
     const resolvedPullChangesUrl = pullChangesUrl
@@ -82,7 +87,7 @@ export class SyncManager {
   static start(reason: string): void {
     SyncManager.assertConfigured('start')
     void SyncManager.refreshPullChangesUrlFromSequenceId()
-      .catch(() => {})
+      .catch(() => { })
       .finally(() => {
         nativeStartSync(reason)
       })
@@ -229,7 +234,7 @@ export class SyncManager {
     }
     let sequenceId: string | null | undefined = null
     try {
-      sequenceId = await adapter.getLocal('__watermelon_last_pulled_at')
+      sequenceId = await getLastPulledAt(SyncManager.database as Database, true) as string
     } catch {
       return
     }

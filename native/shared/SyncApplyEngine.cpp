@@ -705,7 +705,7 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
 
     if (!maxSequenceId.empty()) {
         // Keep in sync with JS (`SyncManager.refreshPullChangesUrlFromSequenceId`) which reads this key.
-        if (!setLocalStorage(db, "__watermelon_last_pulled_at", maxSequenceId, errorMessage)) {
+        if (!setLocalStorage(db, "__watermelon_last_sequence_id", maxSequenceId, errorMessage)) {
             execSql(db, "ROLLBACK", errorMessage);
             return false;
         }

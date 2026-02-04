@@ -18,9 +18,13 @@ const makeModule = () => {
   }
 
   jest.doMock('./nativeSync', () => nativeSync)
+  const impl = {
+    getLastPulledAt: jest.fn(),
+  }
+  jest.doMock('./impl', () => impl)
 
   const { SyncManager } = require('./SyncManager')
-  return { SyncManager, nativeSync }
+  return { SyncManager, nativeSync, impl }
 }
 
 const flushMicrotasks = () => new Promise(resolve => setImmediate(resolve))
@@ -190,15 +194,19 @@ describe('SyncManager', () => {
   })
 
   it('updates pullChangesUrl with sequenceId before start', async () => {
-    const { SyncManager, nativeSync } = makeModule()
-    const adapter = { _tag: 1, getLocal: jest.fn().mockResolvedValue('seq-123') }
+    const { SyncManager, nativeSync, impl } = makeModule()
+    impl.getLastPulledAt.mockResolvedValue('seq-123')
+    const database = {}
+    const adapter = { _tag: 1, getLocal: jest.fn() }
     SyncManager.configure({
+      database,
       adapter,
       pushChangesProvider: jest.fn(),
       pullChangesUrl: 'https://example.com/pull',
     })
 
     SyncManager.start('manual')
+    await flushMicrotasks()
     await flushMicrotasks()
 
     expect(nativeSync.setSyncPullUrl).toHaveBeenCalledWith('https://example.com/pull?sequenceId=seq-123')
