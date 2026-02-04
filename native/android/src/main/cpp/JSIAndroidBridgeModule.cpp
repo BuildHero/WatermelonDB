@@ -631,104 +631,65 @@ void JSIAndroidBridgeModule::requestAuthTokenFromJs() {
             }
             return;
         }
-        bool usedPromiseResolve = false;
-        jsi::Value promiseValue = jsi::Value::undefined();
-        try {
-            if (rt.global().hasProperty(rt, "Promise")) {
-                jsi::Value promiseCtorValue = rt.global().getProperty(rt, "Promise");
-                if (promiseCtorValue.isObject()) {
-                    jsi::Object promiseCtorObj = promiseCtorValue.asObject(rt);
-                    jsi::Value resolveValue = promiseCtorObj.getProperty(rt, "resolve");
-                    if (resolveValue.isObject() && resolveValue.asObject(rt).isFunction(rt)) {
-                        jsi::Function resolveFunc = resolveValue.asObject(rt).asFunction(rt);
-                        promiseValue = resolveFunc.call(rt, promiseCtorObj, result);
-                        usedPromiseResolve = true;
-                    }
-                }
-            }
-        } catch (...) {
-            if (auto engine = engineWeak.lock()) {
-                engine->clearAuthToken();
-            }
-            return;
-        }
-        if (!usedPromiseResolve && result.isObject()) {
-            // jsi::Value is move-only; keep object/thenable alive for inspection below
-            promiseValue = std::move(result);
-        }
 
-        if (promiseValue.isObject()) {
-            jsi::Object promiseObj = promiseValue.asObject(rt);
-            jsi::Value thenValue = promiseObj.getProperty(rt, "then");
-            if (thenValue.isObject() && thenValue.asObject(rt).isFunction(rt)) {
-                jsi::Function thenFunc = thenValue.asObject(rt).asFunction(rt);
-                auto resolve = jsi::Function::createFromHostFunction(
-                    rt,
-                    jsi::PropNameID::forUtf8(rt, "resolve"),
-                    1,
-                    [engineWeak](jsi::Runtime& rt2, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                        if (count > 0 && args[0].isString()) {
-                            if (auto engine = engineWeak.lock()) {
-                                engine->setAuthToken(args[0].asString(rt2).utf8(rt2));
-                            }
-                            return jsi::Value::undefined();
-                        }
-                        if (auto engine = engineWeak.lock()) {
-                            engine->clearAuthToken();
-                        }
-                        return jsi::Value::undefined();
-                    });
-                auto reject = jsi::Function::createFromHostFunction(
-                    rt,
-                    jsi::PropNameID::forUtf8(rt, "reject"),
-                    1,
-                    [engineWeak](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
-                        if (auto engine = engineWeak.lock()) {
-                            engine->clearAuthToken();
-                        }
-                        return jsi::Value::undefined();
-                    });
-                bool handled = false;
-                try {
-                    jsi::Value functionCtorValue = rt.global().getProperty(rt, "Function");
-                    if (functionCtorValue.isObject() && functionCtorValue.asObject(rt).isFunction(rt)) {
-                        jsi::Function functionCtor = functionCtorValue.asObject(rt).asFunction(rt);
-                        jsi::Value helperValue = functionCtor.call(
-                            rt,
-                            jsi::String::createFromUtf8(rt, "p"),
-                            jsi::String::createFromUtf8(rt, "r"),
-                            jsi::String::createFromUtf8(rt, "j"),
-                            jsi::String::createFromUtf8(rt, "return p.then(r,j);")
-                        );
-                        if (helperValue.isObject() && helperValue.asObject(rt).isFunction(rt)) {
-                            jsi::Function helper = helperValue.asObject(rt).asFunction(rt);
-                            helper.call(rt, promiseObj, resolve, reject);
-                            handled = true;
-                        }
-                    }
-                    if (!handled) {
-                        thenFunc.call(rt, promiseObj, resolve, reject);
-                    }
-                } catch (...) {
-                    if (auto engine = engineWeak.lock()) {
-                        engine->clearAuthToken();
-                    }
-                    return;
-                }
-                return;
-            }
-        }
-
-        if (!usedPromiseResolve && result.isString()) {
+        if (result.isString()) {
             if (auto engine = engineWeak.lock()) {
                 engine->setAuthToken(result.asString(rt).utf8(rt));
             }
             return;
         }
-
-        if (auto engine = engineWeak.lock()) {
-            engine->clearAuthToken();
+        if (!result.isObject()) {
+            if (auto engine = engineWeak.lock()) {
+                engine->clearAuthToken();
+            }
+            return;
         }
+
+        jsi::Object promiseObj = result.asObject(rt);
+        if (!promiseObj.hasProperty(rt, "then")) {
+            if (auto engine = engineWeak.lock()) {
+                engine->clearAuthToken();
+            }
+            return;
+        }
+
+        jsi::Value thenVal = promiseObj.getProperty(rt, "then");
+        if (!thenVal.isObject() || !thenVal.asObject(rt).isFunction(rt)) {
+            if (auto engine = engineWeak.lock()) {
+                engine->clearAuthToken();
+            }
+            return;
+        }
+
+        jsi::Function thenFn = thenVal.asObject(rt).asFunction(rt);
+
+        auto onFulfilled = jsi::Function::createFromHostFunction(
+            rt,
+            jsi::PropNameID::forAscii(rt, "onFulfilled"),
+            1,
+            [engineWeak](jsi::Runtime& rt2, const jsi::Value&, const jsi::Value* argv, size_t argc) -> jsi::Value {
+                if (argc >= 1 && argv[0].isString()) {
+                    if (auto engine = engineWeak.lock()) {
+                        engine->setAuthToken(argv[0].asString(rt2).utf8(rt2));
+                    }
+                } else if (auto engine = engineWeak.lock()) {
+                    engine->clearAuthToken();
+                }
+                return jsi::Value::undefined();
+            });
+
+        auto onRejected = jsi::Function::createFromHostFunction(
+            rt,
+            jsi::PropNameID::forAscii(rt, "onRejected"),
+            1,
+            [engineWeak](jsi::Runtime& rt2, const jsi::Value&, const jsi::Value* argv, size_t argc) -> jsi::Value {
+                if (auto engine = engineWeak.lock()) {
+                    engine->clearAuthToken();
+                }
+                return jsi::Value::undefined();
+            });
+
+        thenFn.callWithThis(rt, promiseObj, onFulfilled, onRejected);
     });
 }
 
@@ -795,7 +756,7 @@ void JSIAndroidBridgeModule::requestPushChangesFromJs(
                             (*completionPtr)(false, message);
                             return jsi::Value::undefined();
                         });
-                    thenFunc.call(rt, resultObj, resolve, reject);
+                    thenFunc.callWithThis(rt, resultObj, resolve, reject);
                     return;
                 }
             } catch (const jsi::JSError& e) {
