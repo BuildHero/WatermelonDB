@@ -1,8 +1,9 @@
-import { Database } from 'index'
+import type Database from '../Database'
 import { getLastPulledAt } from './impl'
 import {
   configureSync as nativeConfigureSync,
   startSync as nativeStartSync,
+  syncDatabaseAsync as nativeSyncDatabaseAsync,
   setSyncPullUrl as nativeSetSyncPullUrl,
   getSyncState as nativeGetSyncState,
   addSyncListener as nativeAddSyncListener,
@@ -28,14 +29,31 @@ export type SyncEvent = {
 
 export type SyncUnsubscribe = () => void
 
-export type SyncConfig = Record<string, any>
+export type SyncConfig = {
+  database?: Database | null
+  adapter?: unknown
+  connectionTag?: number | null
+  pullChangesUrl?: string | null
+  socketioUrl?: string | null
+  timeoutMs?: number
+  maxRetries?: number
+  maxAuthRetries?: number
+  retryInitialMs?: number
+  retryMaxMs?: number
+  authTokenProvider?: () => Promise<string> | string
+  pushChangesProvider?: () => Promise<void> | void
+  [key: string]: any
+}
 
 export class SyncManager {
   private static configured = false
   private static connectionTag: number | null = null
   private static pullChangesUrl: string | null = null
+  private static socketioUrl: string | null = null
   private static adapter: any | null = null
   private static database: Database | null = null
+  private static authTokenProvider: (() => Promise<string> | string) | null = null
+  private static jsListeners = new Set<(event: SyncEvent) => void>()
 
   static configure(config: SyncConfig): void {
     const {
@@ -48,10 +66,10 @@ export class SyncManager {
       ...rest
     } = config ?? {}
 
-    SyncManager.database = database
+    SyncManager.database = database ?? null
 
     const resolvedConnectionTag = SyncManager.resolveConnectionTag(connectionTag, database, adapter)
-    const resolvedPullChangesUrl = pullChangesUrl
+    const resolvedPullChangesUrl = pullChangesUrl ?? null
 
     const nativeConfig = {
       ...rest,
@@ -69,7 +87,11 @@ export class SyncManager {
 
     SyncManager.connectionTag = resolvedConnectionTag
     SyncManager.pullChangesUrl = resolvedPullChangesUrl
+    SyncManager.socketioUrl = config.socketioUrl ?? null
     SyncManager.adapter = SyncManager.resolveAdapter(database, adapter)
+    SyncManager.authTokenProvider = authTokenProvider && typeof authTokenProvider === 'function'
+      ? authTokenProvider
+      : null
 
     nativeConfigureSync(nativeConfig)
 
@@ -82,15 +104,17 @@ export class SyncManager {
     if (pushChangesProvider && typeof pushChangesProvider === 'function') {
       SyncManager.setPushChangesProvider(pushChangesProvider)
     }
+
+    if (SyncManager.socketioUrl) {
+      SyncManager.initSocket()
+    }
   }
 
-  static start(reason: string): void {
-    SyncManager.assertConfigured('start')
-    void SyncManager.refreshPullChangesUrlFromSequenceId()
+  static syncDatabaseAsync(reason: string): Promise<void> {
+    SyncManager.assertConfigured('syncDatabaseAsync')
+    return SyncManager.refreshPullChangesUrlFromSequenceId()
       .catch(() => { })
-      .finally(() => {
-        nativeStartSync(reason)
-      })
+      .then(() => nativeSyncDatabaseAsync(reason))
   }
 
   static getState(): SyncState {
@@ -99,7 +123,14 @@ export class SyncManager {
   }
 
   static subscribe(listener: (event: SyncEvent) => void): SyncUnsubscribe {
-    return nativeAddSyncListener(listener)
+    SyncManager.jsListeners.add(listener)
+    const unsubscribe = nativeAddSyncListener(listener)
+    return () => {
+      SyncManager.jsListeners.delete(listener)
+      if (typeof unsubscribe === 'function') {
+        unsubscribe()
+      }
+    }
   }
 
   static withConnectionTag(connectionTag: number): SyncConfig {
@@ -118,6 +149,7 @@ export class SyncManager {
 
   static setAuthTokenProvider(provider: () => Promise<string> | string): void {
     SyncManager.assertConfigured('setAuthTokenProvider')
+    SyncManager.authTokenProvider = provider
     nativeSetAuthTokenProvider(provider)
   }
 
@@ -126,9 +158,30 @@ export class SyncManager {
     nativeSetPushChangesProvider(provider)
   }
 
-  static initSocket(socketUrl: string): void {
+  static initSocket(socketUrl?: string | null): void {
     SyncManager.assertConfigured('initSocket')
-    nativeInitSyncSocket(socketUrl)
+    const resolvedUrl = socketUrl ?? SyncManager.socketioUrl
+    if (!resolvedUrl || resolvedUrl.trim() === '') {
+      throw new Error('[WatermelonDB][Sync] initSocket requires socketUrl in configure or as a parameter.')
+    }
+    nativeInitSyncSocket(resolvedUrl)
+    const provider = SyncManager.authTokenProvider
+    if (provider) {
+      Promise.resolve()
+        .then(() => provider())
+        .then((token) => {
+          if (typeof token === 'string' && token.trim() !== '') {
+            nativeSyncSocketAuthenticate(token)
+          }
+        })
+        .catch((error) => {
+          SyncManager.emit({
+            type: 'error',
+            message: 'socket_auth_token_provider_failed',
+            error: error?.message ?? String(error),
+          })
+        })
+    }
   }
 
   static authenticateSocket(token: string): void {
@@ -139,6 +192,12 @@ export class SyncManager {
   static disconnectSocket(): void {
     SyncManager.assertConfigured('disconnectSocket')
     nativeSyncSocketDisconnect()
+  }
+
+  static reconnectSocket(socketUrl?: string | null): void {
+    SyncManager.assertConfigured('reconnectSocket')
+    nativeSyncSocketDisconnect()
+    SyncManager.initSocket(socketUrl)
   }
 
   static importRemoteSlice(sliceUrl: string): Promise<void> {
@@ -182,6 +241,16 @@ export class SyncManager {
     if (typeof connectionTag !== 'number' || !Number.isFinite(connectionTag) || connectionTag <= 0) {
       throw new Error('[WatermelonDB][Sync] configure requires a database/adapter or a numeric connectionTag > 0.')
     }
+  }
+
+  private static emit(event: SyncEvent): void {
+    SyncManager.jsListeners.forEach((listener) => {
+      try {
+        listener(event)
+      } catch {
+        // Avoid breaking other listeners
+      }
+    })
   }
 
   private static resolveConnectionTag(
@@ -229,12 +298,16 @@ export class SyncManager {
       return
     }
     const adapter = SyncManager.adapter
+    const database = SyncManager.database
+    if (!database) {
+      return
+    }
     if (!adapter || typeof adapter.getLocal !== 'function') {
       return
     }
     let sequenceId: string | null | undefined = null
     try {
-      sequenceId = await getLastPulledAt(SyncManager.database as Database, true) as string
+      sequenceId = await getLastPulledAt(database as Database, true) as string
     } catch {
       return
     }

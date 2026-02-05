@@ -81,6 +81,21 @@ export default function subscribeToSimpleQuery<Record extends Model>(
     // Observe changes to the collection
     const debugInfo = { name: 'subscribeToSimpleQuery', query, subscriber } as const
     unsubscribe = query.collection.experimentalSubscribe(function observeQueryCollectionChanged(changeSet): undefined {
+      // Empty changeset means external change (e.g., native CDC) - refetch to get fresh data
+      if (changeSet.length === 0) {
+        query.collection._fetchQuery(query, refetchResult => {
+          if (unsubscribed || (refetchResult as any).error) {
+            return
+          }
+          const freshRecords = (refetchResult as any).value as Record[]
+          // Update matchingRecords array in place
+          matchingRecords.length = 0
+          freshRecords.forEach(r => matchingRecords.push(r))
+          emitCopy()
+        })
+        return
+      }
+
       const shouldEmit = processChangeSet(changeSet, matcher, matchingRecords)
       if (shouldEmit || alwaysEmit) {
         emitCopy()

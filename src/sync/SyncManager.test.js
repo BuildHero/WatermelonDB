@@ -1,9 +1,9 @@
 const makeModule = () => {
   jest.resetModules()
-
   const nativeSync = {
     configureSync: jest.fn(),
     startSync: jest.fn(),
+    syncDatabaseAsync: jest.fn(() => Promise.resolve()),
     setSyncPullUrl: jest.fn(),
     getSyncState: jest.fn(() => ({ state: 'idle' })),
     addSyncListener: jest.fn(),
@@ -30,12 +30,6 @@ const makeModule = () => {
 const flushMicrotasks = () => new Promise(resolve => setImmediate(resolve))
 
 describe('SyncManager', () => {
-  it('throws if start is called before configure', () => {
-    const { SyncManager } = makeModule()
-    expect(() => SyncManager.start('test')).toThrow(
-      '[WatermelonDB][Sync] SyncManager.configure(...) must be called before start.',
-    )
-  })
 
   it('validates config in configure', () => {
     const { SyncManager } = makeModule()
@@ -91,6 +85,41 @@ describe('SyncManager', () => {
     })
   })
 
+  it('auto-initializes socket when socketioUrl is provided', () => {
+    const { SyncManager, nativeSync } = makeModule()
+    SyncManager.configure({
+      adapter: { _tag: 1 },
+      pushChangesProvider: jest.fn(),
+      pullChangesUrl: 'https://example.com/pull',
+      socketioUrl: 'wss://socket.example.com',
+    })
+    expect(nativeSync.initSyncSocket).toHaveBeenCalledWith('wss://socket.example.com')
+  })
+
+  it('emits error when authTokenProvider rejects during socket auth', async () => {
+    const { SyncManager, nativeSync } = makeModule()
+    const provider = jest.fn().mockRejectedValue(new Error('boom'))
+    const listener = jest.fn()
+
+    nativeSync.addSyncListener.mockReturnValue(() => { })
+
+    SyncManager.subscribe(listener)
+    SyncManager.configure({
+      adapter: { _tag: 1 },
+      authTokenProvider: provider,
+      pushChangesProvider: jest.fn(),
+      pullChangesUrl: 'https://example.com/pull',
+      socketioUrl: 'wss://example.com',
+    })
+
+    await flushMicrotasks()
+
+    expect(listener).toHaveBeenCalledWith({
+      type: 'error',
+      message: 'socket_auth_token_provider_failed',
+      error: 'boom',
+    })
+  })
 
   it('uses authTokenProvider and registers with native', async () => {
     const { SyncManager, nativeSync } = makeModule()
@@ -147,17 +176,6 @@ describe('SyncManager', () => {
     )
   })
 
-  it('starts sync after configure', async () => {
-    const { SyncManager, nativeSync } = makeModule()
-    SyncManager.configure({
-      adapter: { _tag: 1 },
-      pushChangesProvider: jest.fn(),
-      pullChangesUrl: 'https://example.com/pull',
-    })
-    SyncManager.start('manual')
-    await flushMicrotasks()
-    expect(nativeSync.startSync).toHaveBeenCalledWith('manual')
-  })
 
   it('passes socket methods through to native', () => {
     const { SyncManager, nativeSync } = makeModule()
@@ -165,9 +183,10 @@ describe('SyncManager', () => {
       adapter: { _tag: 1 },
       pushChangesProvider: jest.fn(),
       pullChangesUrl: 'https://example.com/pull',
+      socketioUrl: 'wss://example.com',
     })
 
-    SyncManager.initSocket('wss://example.com')
+    SyncManager.initSocket()
     SyncManager.authenticateSocket('token')
     SyncManager.disconnectSocket()
 
@@ -176,7 +195,53 @@ describe('SyncManager', () => {
     expect(nativeSync.syncSocketDisconnect).toHaveBeenCalledWith()
   })
 
-  it('passes start and getState through after configure', async () => {
+  it('reconnects socket', () => {
+    const { SyncManager, nativeSync } = makeModule()
+    SyncManager.configure({
+      adapter: { _tag: 1 },
+      pushChangesProvider: jest.fn(),
+      pullChangesUrl: 'https://example.com/pull',
+      socketioUrl: 'wss://example.com',
+    })
+
+    SyncManager.reconnectSocket()
+
+    expect(nativeSync.syncSocketDisconnect).toHaveBeenCalledWith()
+    expect(nativeSync.initSyncSocket).toHaveBeenCalledWith('wss://example.com')
+  })
+
+  it('authenticates socket using authTokenProvider', async () => {
+    const { SyncManager, nativeSync } = makeModule()
+    const provider = jest.fn().mockResolvedValue('socket-token')
+    SyncManager.configure({
+      adapter: { _tag: 1 },
+      authTokenProvider: provider,
+      pushChangesProvider: jest.fn(),
+      pullChangesUrl: 'https://example.com/pull',
+    })
+
+    SyncManager.initSocket('wss://example.com')
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(provider).toHaveBeenCalled()
+    expect(nativeSync.syncSocketAuthenticate).toHaveBeenCalledWith('socket-token')
+  })
+
+  it('throws if initSocket has no url', () => {
+    const { SyncManager } = makeModule()
+    SyncManager.configure({
+      adapter: { _tag: 1 },
+      pushChangesProvider: jest.fn(),
+      pullChangesUrl: 'https://example.com/pull',
+    })
+
+    expect(() => SyncManager.initSocket()).toThrow(
+      '[WatermelonDB][Sync] initSocket requires socketUrl in configure or as a parameter.',
+    )
+  })
+
+  it('passes getState through after configure', async () => {
     const { SyncManager, nativeSync } = makeModule()
     nativeSync.getSyncState.mockReturnValue({ state: 'configured' })
 
@@ -185,15 +250,12 @@ describe('SyncManager', () => {
       pushChangesProvider: jest.fn(),
       pullChangesUrl: 'https://example.com/pull',
     })
-    SyncManager.start('manual')
-    await flushMicrotasks()
     const state = SyncManager.getState()
 
-    expect(nativeSync.startSync).toHaveBeenCalledWith('manual')
     expect(state).toEqual({ state: 'configured' })
   })
 
-  it('updates pullChangesUrl with sequenceId before start', async () => {
+  it('updates pullChangesUrl with sequenceId before syncDatabaseAsync', async () => {
     const { SyncManager, nativeSync, impl } = makeModule()
     impl.getLastPulledAt.mockResolvedValue('seq-123')
     const database = {}
@@ -205,12 +267,12 @@ describe('SyncManager', () => {
       pullChangesUrl: 'https://example.com/pull',
     })
 
-    SyncManager.start('manual')
+    await SyncManager.syncDatabaseAsync('manual')
     await flushMicrotasks()
     await flushMicrotasks()
 
     expect(nativeSync.setSyncPullUrl).toHaveBeenCalledWith('https://example.com/pull?sequenceId=seq-123')
-    expect(nativeSync.startSync).toHaveBeenCalledWith('manual')
+    expect(nativeSync.syncDatabaseAsync).toHaveBeenCalledWith('manual')
   })
 
   it('routes importRemoteSlice through to native', async () => {
@@ -223,5 +285,29 @@ describe('SyncManager', () => {
 
     await SyncManager.importRemoteSlice('https://example.com/slice')
     expect(nativeSync.importRemoteSlice).toHaveBeenCalledWith(7, 'https://example.com/slice')
+  })
+
+  it('syncDatabaseAsync resolves', async () => {
+    const { SyncManager, nativeSync } = makeModule()
+    SyncManager.configure({
+      adapter: { _tag: 1 },
+      pushChangesProvider: jest.fn(),
+      pullChangesUrl: 'https://example.com/pull',
+    })
+
+    await expect(SyncManager.syncDatabaseAsync('manual')).resolves.toBeUndefined()
+    expect(nativeSync.syncDatabaseAsync).toHaveBeenCalledWith('manual')
+  })
+
+  it('syncDatabaseAsync rejects on error', async () => {
+    const { SyncManager, nativeSync } = makeModule()
+    SyncManager.configure({
+      adapter: { _tag: 1 },
+      pushChangesProvider: jest.fn(),
+      pullChangesUrl: 'https://example.com/pull',
+    })
+
+    nativeSync.syncDatabaseAsync.mockRejectedValue(new Error('boom'))
+    await expect(SyncManager.syncDatabaseAsync('manual')).rejects.toThrow('boom')
   })
 })

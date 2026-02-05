@@ -84,6 +84,25 @@ export default function subscribeToQueryWithColumns<Record extends Model>(
   const debugInfo = { name: 'subscribeToQueryWithColumns', query, columnNames } as const
   const collectionUnsubscribe = query.collection.experimentalSubscribe(
     function observeWithColumnsCollectionChanged(changeSet: CollectionChangeSet<Record>): undefined {
+      // Empty changeset means external change (e.g., native CDC) - check all observed records
+      if (changeSet.length === 0) {
+        let hasColumnChanges = false
+        observedRecords.forEach(record => {
+          const previousState = recordStates.get(record.id)
+          if (previousState) {
+            const newState = getRecordState(record, columnNames)
+            if (!recordStatesEqual(previousState, newState)) {
+              recordStates.set(record.id, newState)
+              hasColumnChanges = true
+            }
+          }
+        })
+        if (hasColumnChanges) {
+          hasPendingColumnChanges = true
+        }
+        return
+      }
+
       let hasColumnChanges = false
       // Can't use `Array.some`, because then we'd skip saving record state for relevant records
       changeSet.forEach(({ record, type }) => {

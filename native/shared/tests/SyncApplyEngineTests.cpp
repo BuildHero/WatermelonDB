@@ -4,6 +4,12 @@
 #include <string>
 #include <iostream>
 
+namespace watermelondb::platform {
+
+void consoleLog(std::string) {}
+
+} // namespace watermelondb::platform
+
 namespace {
 
 static int gFailures = 0;
@@ -63,10 +69,13 @@ void test_insert_and_update() {
     std::string error;
     execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT, count INTEGER)", error);
 
-    std::string payload = R"([
-        { "table": "tasks", "row": { "id": "t1", "name": "alpha", "count": 1 } },
-        { "table": "tasks", "row": { "id": "t1", "name": "beta", "count": 2 } }
-      ])";
+    std::string payload = R"({
+        "count": 2,
+        "items": [
+          { "_table": "tasks", "row": { "id": "t1", "name": "alpha", "count": 1 } },
+          { "_table": "tasks", "row": { "id": "t1", "name": "beta", "count": 2 } }
+        ]
+      })";
 
     bool ok = watermelondb::applySyncPayload(db, payload, error);
     expectTrue(ok, "applySyncPayload should succeed for created/updated");
@@ -87,9 +96,12 @@ void test_update_inserts_when_missing() {
     std::string error;
     execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT)", error);
 
-    std::string payload = R"([
-        { "table": "tasks", "row": { "id": "t2", "name": "gamma" } }
-      ])";
+    std::string payload = R"({
+        "count": 1,
+        "items": [
+          { "_table": "tasks", "row": { "id": "t2", "name": "gamma" } }
+        ]
+      })";
 
     bool ok = watermelondb::applySyncPayload(db, payload, error);
     expectTrue(ok, "applySyncPayload should insert on updated when missing");
@@ -108,9 +120,12 @@ void test_deletes() {
     execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT)", error);
     execSql(db, "INSERT INTO tasks (id, name) VALUES ('t3', 'delta')", error);
 
-    std::string payload = R"([
-        { "table": "tasks", "deleted": true, "id": "t3" }
-      ])";
+    std::string payload = R"({
+        "count": 1,
+        "items": [
+          { "_table": "tasks", "_deleted": true, "id": "t3" }
+        ]
+      })";
 
     bool ok = watermelondb::applySyncPayload(db, payload, error);
     expectTrue(ok, "applySyncPayload should delete rows");
@@ -137,14 +152,17 @@ void test_json_types_as_text() {
     std::string error;
     execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, meta TEXT, flag INTEGER)", error);
 
-    std::string payload = R"([
-        { "table": "tasks", "row": {
-            "id": "t4",
-            "meta": { "nested": true, "values": [1, 2, 3] },
-            "flag": true
+    std::string payload = R"({
+        "count": 1,
+        "items": [
+          { "_table": "tasks", "row": {
+              "id": "t4",
+              "meta": { "nested": true, "values": [1, 2, 3] },
+              "flag": true
+            }
           }
-        }
-      ])";
+        ]
+      })";
 
     bool ok = watermelondb::applySyncPayload(db, payload, error);
     expectTrue(ok, "applySyncPayload should accept objects/arrays");
@@ -169,18 +187,12 @@ void test_delete_chunking() {
         execSql(db, "INSERT INTO tasks (id) VALUES ('x')", error);
     }
 
-    std::string ids = "[";
-    for (int i = 0; i < 1000; i++) {
-        if (i) ids += ",";
-        ids += "\"x\"";
-    }
-    ids += "]";
-    std::string payload = "[";
+    std::string payload = R"({"count": 1000, "items":[)";
     for (int i = 0; i < 1000; i++) {
         if (i) payload += ",";
-        payload += "{\"table\":\"tasks\",\"deleted\":true,\"id\":\"x\"}";
+        payload += "{\"_table\":\"tasks\",\"_deleted\":true,\"id\":\"x\"}";
     }
-    payload += "]";
+    payload += "]}";
 
     bool ok = watermelondb::applySyncPayload(db, payload, error);
     expectTrue(ok, "applySyncPayload should delete in chunks");
@@ -197,9 +209,12 @@ void test_rollback_on_error() {
     std::string error;
     execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT)", error);
 
-    std::string payload = R"([
-        { "table": "tasks", "row": { "name": "missing_id" } }
-      ])";
+    std::string payload = R"({
+        "count": 1,
+        "items": [
+          { "_table": "tasks", "row": { "name": "missing_id" } }
+        ]
+      })";
 
     bool ok = watermelondb::applySyncPayload(db, payload, error);
     expectTrue(!ok, "applySyncPayload should fail on missing id");
@@ -210,38 +225,39 @@ void test_rollback_on_error() {
     sqlite3_close(db);
 }
 
-void test_payload_requires_array() {
-    sqlite3* db = nullptr;
-    sqlite3_open(":memory:", &db);
-    std::string error;
-    execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT)", error);
-
-    std::string payload = R"({
-        "tasks": {
-          "created": [{ "id": "t6", "name": "direct" }]
-        }
-      })";
-
-    bool ok = watermelondb::applySyncPayload(db, payload, error);
-    expectTrue(!ok, "applySyncPayload should require array payload");
-
-    sqlite3_close(db);
-}
-
-void test_array_payload_upserts_and_deletes() {
+void test_payload_requires_envelope_object() {
     sqlite3* db = nullptr;
     sqlite3_open(":memory:", &db);
     std::string error;
     execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT)", error);
 
     std::string payload = R"([
-        { "table": "tasks", "row": { "id": "a1", "name": "alpha" } },
-        { "tableName": "tasks", "row": { "id": "b2", "name": "bravo" } },
-        { "table": "tasks", "deleted": true, "id": "a1" }
+        { "_table": "tasks", "row": { "id": "t6", "name": "direct" } }
       ])";
 
     bool ok = watermelondb::applySyncPayload(db, payload, error);
-    expectTrue(ok, "applySyncPayload should accept array payload");
+    expectTrue(!ok, "applySyncPayload should require object envelope payload");
+
+    sqlite3_close(db);
+}
+
+void test_envelope_payload_upserts_and_deletes() {
+    sqlite3* db = nullptr;
+    sqlite3_open(":memory:", &db);
+    std::string error;
+    execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT)", error);
+
+    std::string payload = R"({
+        "count": 3,
+        "items": [
+          { "_table": "tasks", "row": { "id": "a1", "name": "alpha" } },
+          { "_table": "tasks", "row": { "id": "b2", "name": "bravo" } },
+          { "_table": "tasks", "_deleted": true, "id": "a1" }
+        ]
+      })";
+
+    bool ok = watermelondb::applySyncPayload(db, payload, error);
+    expectTrue(ok, "applySyncPayload should accept envelope payload");
 
     int count = querySingleInt(db, "SELECT COUNT(*) FROM tasks");
     expectTrue(count == 1, "only one row should remain after delete");
@@ -260,23 +276,22 @@ void test_updates_last_sequence_id_ulid() {
     execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT)", error);
     execSql(db, "CREATE TABLE local_storage (key TEXT PRIMARY KEY, value TEXT)", error);
 
-    std::string payload = R"([
-        { "table": "tasks", "row": { "id": "u1", "name": "alpha" }, "sequenceId": "01ARZ3NDEKTSV4RRFFQ69G5FAV" },
-        { "table": "tasks", "row": { "id": "u2", "name": "beta" }, "sequenceId": "01ARZ3NDEKTSV4RRFFQ69G5FAW" },
-        { "table": "tasks", "row": { "id": "u3", "name": "gamma" }, "sequenceId": "01ARZ3NDEKTSV4RRFFQ69G5FAU" }
-      ])";
+    std::string payload = R"({
+        "count": 3,
+        "items": [
+          { "_table": "tasks", "row": { "id": "u1", "name": "alpha" }, "_sequence_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+          { "_table": "tasks", "row": { "id": "u2", "name": "beta" }, "_sequence_id": "01ARZ3NDEKTSV4RRFFQ69G5FAW" },
+          { "_table": "tasks", "row": { "id": "u3", "name": "gamma" }, "_sequence_id": "01ARZ3NDEKTSV4RRFFQ69G5FAU" }
+        ]
+      })";
 
     bool ok = watermelondb::applySyncPayload(db, payload, error);
     expectTrue(ok, "applySyncPayload should update last_sequence_id for ULIDs");
 
     std::string sequenceId;
     expectTrue(querySingleText(db, "SELECT value FROM local_storage WHERE key='__watermelon_last_sequence_id'", sequenceId),
-               "last_pulled_at should be stored");
+               "last_sequence_id should be stored");
     expectTrue(sequenceId == "01ARZ3NDEKTSV4RRFFQ69G5FAW", "last_sequence_id should be the highest ULID");
-
-    std::string lastSequenceId;
-    expectTrue(!querySingleText(db, "SELECT value FROM local_storage WHERE key='__watermelon_last_sequence_id'", lastSequenceId),
-               "last_sequence_id should not be updated");
 
     sqlite3_close(db);
 }
@@ -291,8 +306,8 @@ int main() {
     test_json_types_as_text();
     test_delete_chunking();
     test_rollback_on_error();
-    test_payload_requires_array();
-    test_array_payload_upserts_and_deletes();
+    test_payload_requires_envelope_object();
+    test_envelope_payload_upserts_and_deletes();
     test_updates_last_sequence_id_ulid();
 
     if (gFailures > 0) {

@@ -1,6 +1,225 @@
 import { mockDatabase } from '../__tests__/testModels'
 import * as Q from '../QueryDescription'
 
+// Mock the WatermelonDBEvents emitter for CDC tests
+const mockEventEmitter = {
+  listeners: {},
+  addListener: jest.fn((event, callback) => {
+    mockEventEmitter.listeners[event] = callback
+    return { remove: jest.fn(() => { delete mockEventEmitter.listeners[event] }) }
+  }),
+  emit: (event, data) => {
+    if (mockEventEmitter.listeners[event]) {
+      mockEventEmitter.listeners[event](data)
+    }
+  },
+}
+
+jest.mock('../adapters/sqlite/makeDispatcher/WatermelonEventEmitter', () => ({
+  WatermelonDBEvents: mockEventEmitter,
+}))
+
+describe('database.enableNativeCDC()', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockEventEmitter.listeners = {}
+  })
+
+  it('subscribes to SQLITE_UPDATE_HOOK events and calls notify', async () => {
+    const { database } = mockDatabase({ actionsEnabled: true })
+
+    // Mock enableNativeCDC on adapter
+    database.adapter.underlyingAdapter.enableNativeCDC = jest.fn((callback) => {
+      callback({ value: undefined })
+    })
+
+    const subscriber = jest.fn()
+    database.experimentalSubscribe(['mock_tasks'], subscriber)
+
+    await database.enableNativeCDC()
+
+    // Simulate native hook emitting affected tables
+    mockEventEmitter.emit('SQLITE_UPDATE_HOOK', ['mock_tasks'])
+
+    expect(subscriber).toHaveBeenCalledTimes(1)
+  })
+
+  it('handles multiple tables from SQLITE_UPDATE_HOOK', async () => {
+    const { database } = mockDatabase({ actionsEnabled: true })
+
+    database.adapter.underlyingAdapter.enableNativeCDC = jest.fn((callback) => {
+      callback({ value: undefined })
+    })
+
+    const taskSubscriber = jest.fn()
+    const commentSubscriber = jest.fn()
+    database.experimentalSubscribe(['mock_tasks'], taskSubscriber)
+    database.experimentalSubscribe(['mock_comments'], commentSubscriber)
+
+    await database.enableNativeCDC()
+
+    // Simulate native hook emitting multiple affected tables
+    mockEventEmitter.emit('SQLITE_UPDATE_HOOK', ['mock_tasks', 'mock_comments'])
+
+    expect(taskSubscriber).toHaveBeenCalledTimes(1)
+    expect(commentSubscriber).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not subscribe multiple times if called twice', async () => {
+    const { database } = mockDatabase({ actionsEnabled: true })
+
+    database.adapter.underlyingAdapter.enableNativeCDC = jest.fn((callback) => {
+      callback({ value: undefined })
+    })
+
+    await database.enableNativeCDC()
+    await database.enableNativeCDC()
+
+    expect(mockEventEmitter.addListener).toHaveBeenCalledTimes(1)
+  })
+
+  it('disableNativeCDC removes the subscription', async () => {
+    const { database } = mockDatabase({ actionsEnabled: true })
+
+    database.adapter.underlyingAdapter.enableNativeCDC = jest.fn((callback) => {
+      callback({ value: undefined })
+    })
+
+    const subscriber = jest.fn()
+    database.experimentalSubscribe(['mock_tasks'], subscriber)
+
+    await database.enableNativeCDC()
+
+    // Emit should work
+    mockEventEmitter.emit('SQLITE_UPDATE_HOOK', ['mock_tasks'])
+    expect(subscriber).toHaveBeenCalledTimes(1)
+
+    database.disableNativeCDC()
+
+    // Emit should no longer trigger notify
+    mockEventEmitter.emit('SQLITE_UPDATE_HOOK', ['mock_tasks'])
+    expect(subscriber).toHaveBeenCalledTimes(1) // Still 1, not 2
+  })
+
+  it('enableNativeCDC calls setCDCEnabled(true) on adapter', async () => {
+    const { database } = mockDatabase({ actionsEnabled: true })
+
+    database.adapter.underlyingAdapter.enableNativeCDC = jest.fn((callback) => {
+      callback({ value: undefined })
+    })
+    database.adapter.underlyingAdapter.setCDCEnabled = jest.fn()
+
+    await database.enableNativeCDC()
+
+    expect(database.adapter.underlyingAdapter.setCDCEnabled).toHaveBeenCalledWith(true)
+  })
+
+  it('disableNativeCDC calls setCDCEnabled(false) on adapter', async () => {
+    const { database } = mockDatabase({ actionsEnabled: true })
+
+    database.adapter.underlyingAdapter.enableNativeCDC = jest.fn((callback) => {
+      callback({ value: undefined })
+    })
+    database.adapter.underlyingAdapter.setCDCEnabled = jest.fn()
+
+    await database.enableNativeCDC()
+
+    // Clear mock to verify disableNativeCDC call
+    database.adapter.underlyingAdapter.setCDCEnabled.mockClear()
+
+    database.disableNativeCDC()
+
+    expect(database.adapter.underlyingAdapter.setCDCEnabled).toHaveBeenCalledWith(false)
+  })
+
+  it('ignores empty table arrays from SQLITE_UPDATE_HOOK', async () => {
+    const { database } = mockDatabase({ actionsEnabled: true })
+
+    database.adapter.underlyingAdapter.enableNativeCDC = jest.fn((callback) => {
+      callback({ value: undefined })
+    })
+
+    const subscriber = jest.fn()
+    database.experimentalSubscribe(['mock_tasks'], subscriber)
+
+    await database.enableNativeCDC()
+
+    // Simulate native hook emitting empty array
+    mockEventEmitter.emit('SQLITE_UPDATE_HOOK', [])
+
+    expect(subscriber).not.toHaveBeenCalled()
+  })
+
+  it('batch() skips notify when native CDC is enabled', async () => {
+    const { database, tasks } = mockDatabase({ actionsEnabled: true })
+
+    database.adapter.underlyingAdapter.enableNativeCDC = jest.fn((callback) => {
+      callback({ value: undefined })
+    })
+
+    await database.enableNativeCDC()
+
+    const subscriber = jest.fn()
+    database.experimentalSubscribe(['mock_tasks'], subscriber)
+
+    // batch() should NOT call notify directly when CDC is enabled
+    await database.action(async () => {
+      await tasks.create()
+    })
+
+    // Subscriber should NOT have been called by batch()
+    // (in real scenario, the SQLITE_UPDATE_HOOK would trigger it)
+    expect(subscriber).not.toHaveBeenCalled()
+
+    // But if we simulate the hook, it should work
+    mockEventEmitter.emit('SQLITE_UPDATE_HOOK', ['mock_tasks'])
+    expect(subscriber).toHaveBeenCalledTimes(1)
+  })
+
+  it('batch() calls notify when native CDC is disabled', async () => {
+    const { database, tasks } = mockDatabase({ actionsEnabled: true })
+
+    // CDC not enabled - batch should call notify
+    const subscriber = jest.fn()
+    database.experimentalSubscribe(['mock_tasks'], subscriber)
+
+    await database.action(async () => {
+      await tasks.create()
+    })
+
+    // Subscriber SHOULD have been called by batch()
+    expect(subscriber).toHaveBeenCalled()
+  })
+
+  it('batch() resumes calling notify after disableNativeCDC', async () => {
+    const { database, tasks } = mockDatabase({ actionsEnabled: true })
+
+    database.adapter.underlyingAdapter.enableNativeCDC = jest.fn((callback) => {
+      callback({ value: undefined })
+    })
+
+    await database.enableNativeCDC()
+
+    const subscriber = jest.fn()
+    database.experimentalSubscribe(['mock_tasks'], subscriber)
+
+    // batch() should NOT call notify when CDC is enabled
+    await database.action(async () => {
+      await tasks.create()
+    })
+    expect(subscriber).not.toHaveBeenCalled()
+
+    // Disable CDC
+    database.disableNativeCDC()
+
+    // Now batch() should call notify again
+    await database.action(async () => {
+      await tasks.create()
+    })
+    expect(subscriber).toHaveBeenCalled()
+  })
+})
+
 describe('database.notify()', () => {
   describe('Basic Functionality', () => {
     it('notifies with single table name', async () => {

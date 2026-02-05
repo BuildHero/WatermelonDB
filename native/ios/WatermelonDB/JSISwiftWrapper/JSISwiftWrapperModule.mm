@@ -240,6 +240,36 @@ void JSISwiftWrapperModule::startSync(jsi::Runtime &rt, jsi::String reason) {
     }
 }
 
+jsi::Value JSISwiftWrapperModule::syncDatabaseAsync(jsi::Runtime &rt, jsi::String reason) {
+    auto state = syncEventState_;
+    if (state) {
+        const std::lock_guard<std::mutex> lock(state->mutex);
+        state->runtime = &rt;
+    }
+    auto engine = syncEngine_;
+    auto jsInvoker = jsInvoker_;
+    const std::string reasonUtf8 = reason.utf8(rt);
+    
+    return createPromiseAsJSIValue(rt, [engine, jsInvoker, reasonUtf8](jsi::Runtime &rt2, std::shared_ptr<Promise> promise) {
+        if (!engine) {
+            jsInvoker->invokeAsync([promise]() mutable {
+                promise->reject("Sync engine not available");
+            });
+            return;
+        }
+        engine->startWithCompletion(reasonUtf8, [jsInvoker, promise](bool success, const std::string& errorMessage) mutable {
+            jsInvoker->invokeAsync([promise, success, errorMessage]() mutable {
+                if (!success) {
+                    const std::string message = errorMessage.empty() ? "Sync failed" : errorMessage;
+                    promise->reject(message);
+                } else {
+                    promise->resolve(jsi::Value::undefined());
+                }
+            });
+        });
+    });
+}
+
 void JSISwiftWrapperModule::setSyncPullUrl(jsi::Runtime &rt, jsi::String pullEndpointUrl) {
     if (syncEngine_) {
         syncEngine_->setPullEndpointUrl(pullEndpointUrl.utf8(rt));
@@ -479,6 +509,7 @@ void JSISwiftWrapperModule::requestPushChangesFromJs(
         {
             const std::lock_guard<std::mutex> lock(state->mutex);
             if (!state->alive || !state->runtime) {
+                (*completionPtr)(false, "Missing JS runtime for pushChanges");
                 return;
             }
             runtime = state->runtime;

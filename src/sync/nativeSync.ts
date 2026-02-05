@@ -6,6 +6,7 @@ import { TurboModule, TurboModuleRegistry } from 'react-native'
 interface NativeSyncModule extends TurboModule {
   configureSync(configJson: string): void
   startSync(reason: string): void
+  syncDatabaseAsync(reason: string): Promise<void>
   setSyncPullUrl(pullEndpointUrl: string): void
   getSyncStateJson(): string
   addSyncListener(listener: (eventJson: string) => void): number
@@ -43,6 +44,11 @@ export function configureSync(config: SyncConfig): void {
 export function startSync(reason: string): void {
   const module = getNativeModule()
   module.startSync(reason ?? 'unknown')
+}
+
+export function syncDatabaseAsync(reason: string): Promise<void> {
+  const module = getNativeModule()
+  return module.syncDatabaseAsync(reason ?? 'unknown')
 }
 
 export function setSyncPullUrl(pullEndpointUrl: string): void {

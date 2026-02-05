@@ -35,6 +35,8 @@ object SyncSocketClient {
     }
     socket = null
     val options = IO.Options()
+    // Discrete marker to identify native sync engine traffic in server logs
+    options.extraHeaders = mapOf("x-sync-engine" to listOf("1"))
 
     val safeInterceptor = Interceptor { chain ->
       try {

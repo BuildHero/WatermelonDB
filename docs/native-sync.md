@@ -28,7 +28,19 @@ const unsubscribe = SyncManager.subscribe((event) => {
 // Call when you no longer need updates.
 unsubscribe()
 
-SyncManager.start('app_launch')
+void SyncManager.syncDatabaseAsync('app_launch')
+```
+
+### Awaiting a sync
+
+`SyncManager.syncDatabaseAsync(reason)` resolves when the sync reaches `done`, and rejects on `error`.
+
+```ts
+try {
+  await SyncManager.syncDatabaseAsync('app_launch')
+} catch (error) {
+  console.warn('[sync] failed', error)
+}
 ```
 
 ## Config fields
@@ -41,12 +53,13 @@ SyncManager.start('app_launch')
 - `adapter` (Adapter, optional): Use this if you don’t want to pass a Database instance. Must expose a numeric `_tag`.
 - `connectionTag` (number, optional): Legacy override; kept for backwards compatibility.
 - `pullChangesUrl` (string, required): Base pull endpoint URL. Native will append `sequenceId` as a query param when available.
+- `socketioUrl` (string, optional): Socket.io base URL (used by `initSocket`).
 - `timeoutMs` (number, optional, default `30000`): HTTP timeout.
 - `maxRetries` (number, optional, default `3`): Retry count for retriable failures.
 - `retryInitialMs` (number, optional, default `1000`): Initial backoff.
 - `retryMaxMs` (number, optional, default `30000`): Max backoff.
 
-`SyncManager.start(reason)` starts a sync using the configured `pullChangesUrl`.
+`SyncManager.syncDatabaseAsync(reason)` starts a sync using the configured `pullChangesUrl`.
 
 ### Sequence ID query param
 
@@ -93,12 +106,15 @@ When socket.io is enabled, events look like:
 
 ## Socket.io (optional)
 
-Initialize the socket when you want it:
+Initialize the socket when you want it. If you pass `socketioUrl` to `configure`, you can call `initSocket()` without arguments:
 
 ```ts
-SyncManager.initSocket('https://api.example.com')
-SyncManager.authenticateSocket('token')
+SyncManager.initSocket()
+// If authTokenProvider is set, initSocket will authenticate automatically.
+// Otherwise, call authenticateSocket with your token:
+// SyncManager.authenticateSocket('token')
 // ...
+SyncManager.reconnectSocket()
 SyncManager.disconnectSocket()
 ```
 
@@ -109,7 +125,7 @@ The `cdc` socket event is intended to trigger a sync: subscribe to events and ca
 Under the hood, JS calls:
 
 - `configureSync(configJson)`
-- `startSync(reason)`
+- `syncDatabaseAsync(reason)`
 - `setSyncPullUrl(pullEndpointUrl)`
 - `getSyncStateJson()`
 - `addSyncListener((eventJson) => ...)`

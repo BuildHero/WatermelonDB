@@ -79,6 +79,7 @@ const dispatcherMethods = [
   'removeLocal',
   'execSqlQuery',
   'enableNativeCDC',
+  'setCDCEnabled',
 ]
 
 const supportedHybridJSIMethods = new Set(['query', 'execSqlQuery'])

@@ -400,6 +400,16 @@ extension DatabaseBridge {
             $0.setUpdateHook(withCallback: self.sqliteUpdateCallback)
         }
     }
+
+    @objc(setCDCEnabled:enabled:resolve:reject:)
+    func setCDCEnabled(tag: ConnectionTag,
+                       enabled: Bool,
+                       resolve: @escaping RCTPromiseResolveBlock,
+                       reject:  @escaping RCTPromiseRejectBlock) {
+        withDriver(tag, resolve, reject) {
+            $0.setCDCEnabled(enabled)
+        }
+    }
 }
 
 // MARK: - Synchronous methods
@@ -505,6 +515,13 @@ extension DatabaseBridge {
     func enableNativeCDCSynchronous(tag: ConnectionTag) -> NSDictionary {
         withDriverSynchronous(tag) {
             $0.setUpdateHook(withCallback: self.sqliteUpdateCallback)
+        }
+    }
+
+    @objc(setCDCEnabledSynchronous:enabled:)
+    func setCDCEnabledSynchronous(tag: ConnectionTag, enabled: Bool) -> NSDictionary {
+        withDriverSynchronous(tag) {
+            $0.setCDCEnabled(enabled)
         }
     }
 }

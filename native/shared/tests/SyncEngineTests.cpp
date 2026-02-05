@@ -304,6 +304,54 @@ void test_auth_token_restart() {
     expectTrue(recorder.waitForContains("\"type\":\"sync_start\""), "expected restart after auth token");
 }
 
+void test_completion_preserved_after_auth_refresh() {
+    EventRecorder recorder;
+    auto engine = std::make_shared<watermelondb::SyncEngine>();
+    engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
+    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+
+    std::mutex completionMutex;
+    std::condition_variable completionCv;
+    bool completed = false;
+    bool completedSuccess = false;
+
+    static int callCount = 0;
+    callCount = 0;
+    watermelondb::platform::setHttpHandler([&](const watermelondb::platform::HttpRequest&,
+                                               std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        watermelondb::platform::HttpResponse response;
+        if (callCount == 0) {
+            response.statusCode = 401;
+        } else {
+            response.statusCode = 200;
+            response.body = "{}";
+        }
+        callCount++;
+        done(response);
+    });
+
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
+    engine->setAuthToken("expired-token");
+    engine->startWithCompletion("auth_refresh_completion", [&](bool success, const std::string&) {
+        {
+            std::lock_guard<std::mutex> lock(completionMutex);
+            completed = true;
+            completedSuccess = success;
+        }
+        completionCv.notify_all();
+    });
+
+    expectTrue(recorder.waitForContains("\"type\":\"auth_required\""), "expected auth_required event");
+    engine->setAuthToken("new-token");
+
+    std::unique_lock<std::mutex> lock(completionMutex);
+    bool finished = completionCv.wait_for(lock, std::chrono::milliseconds(500), [&]() {
+        return completed;
+    });
+    expectTrue(finished, "expected completion callback to be called after auth refresh");
+    expectTrue(completedSuccess, "expected completion to be successful after auth refresh");
+}
+
 void test_queue_when_in_flight() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
@@ -420,6 +468,7 @@ int main() {
     test_auth_required_resumes_cursor();
     test_shutdown_prevents_events();
     test_auth_token_restart();
+    test_completion_preserved_after_auth_refresh();
     test_queue_when_in_flight();
     test_backoff_delay_cap();
     test_missing_endpoint_error();

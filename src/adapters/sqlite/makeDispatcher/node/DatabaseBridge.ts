@@ -425,6 +425,21 @@ class DatabaseBridge {
       driver.setUpdateHook(this.sqliteUpdateHook.bind(this)),
     )
 
+  setCDCEnabled = (
+    tag: number,
+    enabled: boolean,
+    resolve: (arg1?: any) => void,
+    reject: (arg1: string) => void,
+  ) =>
+    this.withDriver(tag, resolve, reject, 'setCDCEnabled', (driver) =>
+      driver.setCDCEnabled(enabled),
+    )
+
+  setCDCEnabledSynchronous = (tag: number, enabled: boolean) =>
+    this.withDriverSynchronous(tag, 'setCDCEnabled', (driver) =>
+      driver.setCDCEnabled(enabled),
+    )
+
   // MARK: - Helpers
 
   toBatchOperations = (operations: any) => {

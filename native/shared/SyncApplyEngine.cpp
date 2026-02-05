@@ -1,9 +1,11 @@
 #include "SyncApplyEngine.h"
 #include "JsonUtils.h"
+#include "DatabasePlatform.h"
 
 #include <algorithm>
 #include <cctype>
 #include <mutex>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -18,6 +20,14 @@
 
 namespace watermelondb {
 namespace {
+
+static inline void debugLog(const std::string& message) {
+#ifdef NDEBUG
+    (void)message;
+#else
+    platform::consoleLog(message);
+#endif
+}
 
 struct JsonValue {
     enum class Type { Null, Bool, Number, String, Array, Object };
@@ -120,7 +130,7 @@ static bool convertSimdjsonElement(const simdjson::dom::element& element, JsonVa
             out.type = JsonValue::Type::Null;
             return true;
     }
-
+    
     errorMessage = "Unsupported JSON element";
     return false;
 }
@@ -287,7 +297,7 @@ static bool loadTableColumns(sqlite3* db, const std::string& table,
     if (!readSchemaVersion(db, schemaVersion, errorMessage)) {
         return false;
     }
-
+    
     const std::string cacheKey = schemaCacheKey(db, table);
     if (!forceReload) {
         const std::lock_guard<std::mutex> lock(schemaCacheMutex());
@@ -298,14 +308,14 @@ static bool loadTableColumns(sqlite3* db, const std::string& table,
             return true;
         }
     }
-
+    
     std::string pragma = "PRAGMA table_info(" + quoteIdentifier(table) + ")";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db, pragma.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
         errorMessage = "Failed to prepare table_info pragma";
         return false;
     }
-
+    
     std::unordered_set<std::string> columns;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         const unsigned char* name = sqlite3_column_text(stmt, 1);
@@ -314,12 +324,12 @@ static bool loadTableColumns(sqlite3* db, const std::string& table,
         }
     }
     sqlite3_finalize(stmt);
-
+    
     if (columns.empty()) {
         errorMessage = "Failed to load table schema for " + table;
         return false;
     }
-
+    
     {
         const std::lock_guard<std::mutex> lock(schemaCacheMutex());
         auto& cache = schemaCache();
@@ -334,12 +344,12 @@ static bool applyRowObject(sqlite3* db, const std::string& table, const JsonValu
     if (rowValue.type != JsonValue::Type::Object) {
         return true;
     }
-
+    
     std::unordered_set<std::string>* allowedColumns = nullptr;
     if (!loadTableColumns(db, table, allowedColumns, errorMessage)) {
         return false;
     }
-
+    
     auto buildKeys = [&rowValue, &allowedColumns](int& missingCount) {
         std::vector<std::string> keys;
         keys.reserve(rowValue.objectValue.size());
@@ -352,7 +362,7 @@ static bool applyRowObject(sqlite3* db, const std::string& table, const JsonValu
         }
         return keys;
     };
-
+    
     int missingCount = 0;
     std::vector<std::string> keys = buildKeys(missingCount);
     if (missingCount > 0) {
@@ -367,7 +377,7 @@ static bool applyRowObject(sqlite3* db, const std::string& table, const JsonValu
         return false;
     }
     std::sort(keys.begin(), keys.end());
-
+    
     if (allowedColumns->find("id") == allowedColumns->end()) {
         errorMessage = "Table " + table + " missing id column";
         return false;
@@ -376,7 +386,7 @@ static bool applyRowObject(sqlite3* db, const std::string& table, const JsonValu
         errorMessage = "Row missing id for table " + table;
         return false;
     }
-
+    
     std::string columns;
     std::string placeholders;
     columns.reserve(keys.size() * 8);
@@ -389,16 +399,16 @@ static bool applyRowObject(sqlite3* db, const std::string& table, const JsonValu
         columns += quoteIdentifier(keys[i]);
         placeholders += "?";
     }
-
+    
     std::string sql = "INSERT OR REPLACE INTO " + quoteIdentifier(table) +
-                      " (" + columns + ") VALUES (" + placeholders + ")";
-
+    " (" + columns + ") VALUES (" + placeholders + ")";
+    
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
         errorMessage = "Failed to prepare INSERT OR REPLACE";
         return false;
     }
-
+    
     for (size_t i = 0; i < keys.size(); i++) {
         const auto& value = rowValue.objectValue.at(keys[i]);
         if (!bindValue(stmt, static_cast<int>(i + 1), value)) {
@@ -407,7 +417,7 @@ static bool applyRowObject(sqlite3* db, const std::string& table, const JsonValu
             return false;
         }
     }
-
+    
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         sqlite3_finalize(stmt);
         errorMessage = "Failed to execute INSERT OR REPLACE";
@@ -478,7 +488,7 @@ static bool extractSequenceId(const JsonValue& entry, std::string& out) {
         readStringOrNumberField(entry, "sequence", out)) {
         return true;
     }
-
+    
     const JsonValue* row = findRowPayload(entry);
     if (row && row->type == JsonValue::Type::Object) {
         if (readStringOrNumberField(*row, "sequenceId", out) ||
@@ -487,31 +497,7 @@ static bool extractSequenceId(const JsonValue& entry, std::string& out) {
             return true;
         }
     }
-
-    return false;
-}
-
-static bool extractDeleteFlag(const JsonValue& entry, bool& isDeleted) {
-    if (readBoolField(entry, "deleted", isDeleted)) {
-        return true;
-    }
-    if (readBoolField(entry, "isDeleted", isDeleted)) {
-        return true;
-    }
-    if (readBoolField(entry, "is_deleted", isDeleted)) {
-        return true;
-    }
-    std::string type;
-    if (readStringField(entry, "type", type) || readStringField(entry, "op", type) || readStringField(entry, "operation", type)) {
-        if (type == "delete" || type == "deleted") {
-            isDeleted = true;
-            return true;
-        }
-        if (type == "upsert" || type == "insert" || type == "update") {
-            isDeleted = false;
-            return true;
-        }
-    }
+    
     return false;
 }
 
@@ -521,7 +507,7 @@ static bool extractRowFromEntry(const JsonValue& entry, JsonValue& outRow) {
         outRow = *row;
         return true;
     }
-
+    
     if (entry.type != JsonValue::Type::Object) {
         return false;
     }
@@ -530,7 +516,8 @@ static bool extractRowFromEntry(const JsonValue& entry, JsonValue& outRow) {
     for (const auto& kv : entry.objectValue) {
         const std::string& key = kv.first;
         if (key == "table" || key == "tableName" || key == "deleted" || key == "isDeleted" ||
-            key == "is_deleted" || key == "type" || key == "op" || key == "operation") {
+            key == "is_deleted" || key == "type" || key == "op" || key == "operation" ||
+            key == "_table" || key == "_deleted" || key == "_sequence_id") {
             continue;
         }
         outRow.objectValue.emplace(key, kv.second);
@@ -616,6 +603,22 @@ static bool applyDeletes(sqlite3* db, const std::string& table, const JsonValue&
     return true;
 }
 
+static std::string formatTableCounts(const std::unordered_map<std::string, size_t>& counts) {
+    if (counts.empty()) {
+        return "";
+    }
+    std::vector<std::pair<std::string, size_t>> sorted(counts.begin(), counts.end());
+    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::ostringstream out;
+    for (size_t i = 0; i < sorted.size(); i++) {
+        if (i) {
+            out << ", ";
+        }
+        out << sorted[i].first << "=" << sorted[i].second;
+    }
+    return out.str();
+}
+
 } // namespace
 
 bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& errorMessage) {
@@ -630,46 +633,62 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
         }
         return false;
     }
-
-    if (root.type != JsonValue::Type::Array) {
-        errorMessage = "Invalid JSON root";
+    
+    if (root.type != JsonValue::Type::Object) {
+        errorMessage = "Invalid JSON root: expected object envelope";
         return false;
     }
-
+    
+    const JsonValue* items = findObjectField(root, "items");
+    if (!items || items->type != JsonValue::Type::Array) {
+        errorMessage = "Invalid JSON payload: missing 'items' array";
+        return false;
+    }
+    
     if (!execSql(db, "BEGIN IMMEDIATE", errorMessage)) {
         return false;
     }
-
+    
     std::unordered_map<std::string, JsonValue> deletesByTable;
+    std::unordered_map<std::string, size_t> upsertsByTable;
+    std::unordered_map<std::string, size_t> deletesCountByTable;
+    size_t totalItems = 0;
+    size_t totalUpserts = 0;
+    size_t totalDeletes = 0;
     std::string maxSequenceId;
-    for (const auto& entry : root.arrayValue) {
+    for (const auto& entry : items->arrayValue) {
         if (entry.type != JsonValue::Type::Object) {
             continue;
         }
+        totalItems++;
+        
         std::string table;
-        if (!readStringField(entry, "table", table) && !readStringField(entry, "tableName", table)) {
+        
+        if (!readStringField(entry, "_table", table)) {
             errorMessage = "Missing table name in row entry";
             execSql(db, "ROLLBACK", errorMessage);
             return false;
         }
-
+        
         bool isDeleted = false;
-        extractDeleteFlag(entry, isDeleted);
-
+        
+        readBoolField(entry, "_deleted", isDeleted);
+        
         std::string sequenceId;
-        if (extractSequenceId(entry, sequenceId) && !sequenceId.empty()) {
+        
+        if (readStringField(entry, "_sequence_id", sequenceId)) {
             if (sequenceId > maxSequenceId) {
                 maxSequenceId = sequenceId;
             }
         }
-
+        
         JsonValue rowPayload;
         const JsonValue* rowPtr = findRowPayload(entry);
         if (!rowPtr) {
             extractRowFromEntry(entry, rowPayload);
             rowPtr = &rowPayload;
         }
-
+        
         if (isDeleted) {
             JsonValue deleteId;
             if (!extractDeleteId(entry, rowPtr, deleteId)) {
@@ -683,26 +702,30 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
                 deleteArray.arrayValue.clear();
             }
             deleteArray.arrayValue.emplace_back(std::move(deleteId));
+            totalDeletes++;
+            deletesCountByTable[table]++;
         } else {
             if (!rowPtr || rowPtr->type != JsonValue::Type::Object) {
                 errorMessage = "Invalid row payload";
                 execSql(db, "ROLLBACK", errorMessage);
                 return false;
             }
-        if (!applyRowObject(db, table, *rowPtr, errorMessage)) {
-            execSql(db, "ROLLBACK", errorMessage);
-            return false;
+            if (!applyRowObject(db, table, *rowPtr, errorMessage)) {
+                execSql(db, "ROLLBACK", errorMessage);
+                return false;
+            }
+            totalUpserts++;
+            upsertsByTable[table]++;
         }
     }
-    }
-
+    
     for (const auto& entry : deletesByTable) {
         if (!applyDeletes(db, entry.first, entry.second, errorMessage)) {
             execSql(db, "ROLLBACK", errorMessage);
             return false;
         }
     }
-
+    
     if (!maxSequenceId.empty()) {
         // Keep in sync with JS (`SyncManager.refreshPullChangesUrlFromSequenceId`) which reads this key.
         if (!setLocalStorage(db, "__watermelon_last_sequence_id", maxSequenceId, errorMessage)) {
@@ -710,10 +733,24 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
             return false;
         }
     }
-
+    
     if (!execSql(db, "COMMIT", errorMessage)) {
         return false;
     }
+    
+    const std::string upsertsSummary = formatTableCounts(upsertsByTable);
+    const std::string deletesSummary = formatTableCounts(deletesCountByTable);
+    std::string message = "SyncApplyEngine batch applied: items=" + std::to_string(totalItems) +
+                          ", upserts=" + std::to_string(totalUpserts) +
+                          ", deletes=" + std::to_string(totalDeletes);
+    if (!upsertsSummary.empty()) {
+        message += ", upsertsByTable=[" + upsertsSummary + "]";
+    }
+    if (!deletesSummary.empty()) {
+        message += ", deletesByTable=[" + deletesSummary + "]";
+    }
+    debugLog(message);
+    
     return true;
 }
 

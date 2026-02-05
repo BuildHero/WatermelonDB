@@ -15,6 +15,7 @@ public:
     using ApplyCallback = std::function<bool(const std::string& payload, std::string& errorMessage)>;
     using AuthTokenRequestCallback = std::function<void()>;
     using PushChangesCallback = std::function<void(std::function<void(bool success, const std::string& errorMessage)>)>;
+    using CompletionCallback = std::function<void(bool success, const std::string& errorMessage)>;
 
     SyncEngine();
 
@@ -28,6 +29,7 @@ public:
     void clearAuthToken();
     void requestAuthToken();
     void start(const std::string& reason);
+    void startWithCompletion(const std::string& reason, CompletionCallback completion);
     std::string stateJson() const;
     void shutdown();
 
@@ -52,8 +54,12 @@ private:
     bool retryScheduled_ = false;
     int retryCount_ = 0;
     bool authRequestInFlight_ = false;
+    int authRetryCount_ = 0;
+    int maxAuthRetries_ = 3;
     int64_t syncId_ = 0;
     std::string pendingReason_;
+    CompletionCallback completionCallback_;
+    CompletionCallback pendingCompletionCallback_;
     std::string currentReason_;
     bool shutdown_ = false;
 

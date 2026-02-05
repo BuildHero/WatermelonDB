@@ -26,6 +26,7 @@ public:
                                  );
     void configureSync(jsi::Runtime &rt, jsi::String configJson);
     void startSync(jsi::Runtime &rt, jsi::String reason);
+    jsi::Value syncDatabaseAsync(jsi::Runtime &rt, jsi::String reason);
     void setSyncPullUrl(jsi::Runtime &rt, jsi::String pullEndpointUrl);
     jsi::String getSyncStateJson(jsi::Runtime &rt);
     double addSyncListener(jsi::Runtime &rt, jsi::Function listener);

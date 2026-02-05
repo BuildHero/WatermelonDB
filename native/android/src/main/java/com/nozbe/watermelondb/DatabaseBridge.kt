@@ -276,6 +276,10 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
     fun enableNativeCDC(tag: ConnectionTag, promise: Promise) =
         withDriver(tag, promise) { it.setUpdateHook(sqliteUpdateHook) }
 
+    @ReactMethod
+    fun setCDCEnabled(tag: ConnectionTag, enabled: Boolean, promise: Promise) =
+        withDriver(tag, promise) { it.setCDCEnabled(enabled) }
+
     fun getSQLiteConnection(tag: ConnectionTag): Long {
         try {
             val driver = getDriver(tag)

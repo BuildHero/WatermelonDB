@@ -64,9 +64,14 @@ export default class Collection<Record extends Model> {
       invariant(id, `Record ID ${this.table}#${id} was sent over the bridge, but it's not cached`)
     }
 
-    logger.log(
-      `Record ID ${this.table}#${id} was sent over the bridge, but it's not cached. Refetching...`,
-    )
+    // Only log warning if native CDC is not enabled.
+    // When native CDC is enabled, cache misses are expected since records
+    // are created by native sync and not through JS batch().
+    if (!this.database._nativeCDCEnabled) {
+      logger.log(
+        `Record ID ${this.table}#${id} was sent over the bridge, but it's not cached. Refetching...`,
+      )
+    }
 
     // @ts-ignore
     if (!global.WatermelonDB) {

@@ -281,6 +281,7 @@ void SyncEngine::configure(const std::string& configJson) {
     socketioUrl_ = getJsonStringValue(configJson_, "socketioUrl");
     timeoutMs_ = getJsonIntValue(configJson_, "timeoutMs", 30000);
     maxRetries_ = std::max(0, getJsonIntValue(configJson_, "maxRetries", 3));
+    maxAuthRetries_ = std::max(0, getJsonIntValue(configJson_, "maxAuthRetries", 3));
     retryInitialMs_ = std::max(0, getJsonIntValue(configJson_, "retryInitialMs", 1000));
     retryMaxMs_ = std::max(retryInitialMs_, getJsonIntValue(configJson_, "retryMaxMs", 30000));
     stateJson_ = "{\"state\":\"configured\"}";
@@ -299,6 +300,7 @@ void SyncEngine::setPullEndpointUrl(const std::string& url) {
 
 void SyncEngine::setAuthToken(const std::string& token) {
     bool shouldRestart = false;
+    CompletionCallback completion;
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -309,13 +311,19 @@ void SyncEngine::setAuthToken(const std::string& token) {
         authToken_ = token;
 
         authRequestInFlight_ = false;
+        authRetryCount_ = 0; // Reset auth retry count on successful token
 
         if (!syncInFlight_ && stateJson_ == "{\"state\":\"auth_required\"}") {
             shouldRestart = true;
+            completion = std::move(completionCallback_);
         }
     }
     if (shouldRestart) {
-        start("auth_token_updated");
+        if (completion) {
+            startWithCompletion("auth_token_updated", std::move(completion));
+        } else {
+            start("auth_token_updated");
+        }
     }
 }
 
@@ -348,6 +356,10 @@ void SyncEngine::requestAuthToken() {
 }
 
 void SyncEngine::start(const std::string& reason) {
+    startWithCompletion(reason, nullptr);
+}
+
+void SyncEngine::startWithCompletion(const std::string& reason, CompletionCallback completion) {
     bool shouldStart = false;
     int64_t syncId = 0;
     {
@@ -357,13 +369,18 @@ void SyncEngine::start(const std::string& reason) {
         }
         if (syncInFlight_) {
             pendingReason_ = reason;
+            pendingCompletionCallback_ = std::move(completion);
             emitLocked(std::string("{\"type\":\"sync_queued\",\"reason\":\"") + json_utils::escapeJsonString(reason) + "\"}");
             return;
         }
         syncInFlight_ = true;
         retryScheduled_ = false;
         retryCount_ = 0;
+        authRetryCount_ = 0; // Reset auth retry count on new sync
         currentReason_ = reason;
+        if (completion) {
+            completionCallback_ = std::move(completion);
+        }
         const bool resumeFromAuth = (stateJson_ == "{\"state\":\"auth_required\"}") && !currentPullUrl_.empty();
         if (!resumeFromAuth) {
             currentRequestId_ = platform::generateRequestId();
@@ -418,6 +435,10 @@ void SyncEngine::dispatchRequest(int64_t syncId, bool isRetry) {
     int attempt = 1;
     AuthTokenRequestCallback authRequest;
     bool shouldRequestAuth = false;
+    bool missingPullEndpointUrl = false;
+    CompletionCallback completion;
+    CompletionCallback pendingCompletion;
+    std::string completionError;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (shutdown_) {
@@ -444,21 +465,45 @@ void SyncEngine::dispatchRequest(int64_t syncId, bool isRetry) {
             retryScheduled_ = false;
             currentRequestId_.clear();
             currentPullUrl_.clear();
-            return;
+            completion = std::move(completionCallback_);
+            pendingCompletion = std::move(pendingCompletionCallback_);
+            pendingCompletionCallback_ = nullptr;
+            pendingReason_.clear();
+            missingPullEndpointUrl = true;
         }
 
-        if (authToken.empty() && authTokenRequestCallback_) {
-            stateJson_ = "{\"state\":\"auth_required\"}";
-            emitLocked("{\"type\":\"auth_required\"}");
-            emitLocked("{\"type\":\"state\",\"state\":\"auth_required\"}");
-            syncInFlight_ = false;
-            retryScheduled_ = false;
-            retryCount_ = 0;
-            if (!authRequestInFlight_) {
-                authRequestInFlight_ = true;
-                authRequest = authTokenRequestCallback_;
+        if (!missingPullEndpointUrl && authToken.empty() && authTokenRequestCallback_) {
+            if (authRetryCount_ >= maxAuthRetries_) {
+                // Auth retries exhausted
+                emitLocked("{\"type\":\"auth_failed\",\"message\":\"Max auth retries exceeded\"}");
+                emitLocked("{\"type\":\"error\",\"message\":\"Max auth retries exceeded\"}");
+                stateJson_ = "{\"state\":\"auth_failed\"}";
+                emitLocked("{\"type\":\"state\",\"state\":\"auth_failed\"}");
+                syncInFlight_ = false;
+                retryScheduled_ = false;
+                retryCount_ = 0;
+                currentRequestId_.clear();
+                currentPullUrl_.clear();
+                completion = std::move(completionCallback_);
+                pendingCompletion = std::move(pendingCompletionCallback_);
+                pendingCompletionCallback_ = nullptr;
+                pendingReason_.clear();
+                completionError = "Max auth retries exceeded";
+                missingPullEndpointUrl = true; // Reuse this flag to trigger early return
+            } else {
+                stateJson_ = "{\"state\":\"auth_required\"}";
+                emitLocked("{\"type\":\"auth_required\"}");
+                emitLocked("{\"type\":\"state\",\"state\":\"auth_required\"}");
+                syncInFlight_ = false;
+                retryScheduled_ = false;
+                retryCount_ = 0;
+                if (!authRequestInFlight_) {
+                    authRequestInFlight_ = true;
+                    authRetryCount_++;
+                    authRequest = authTokenRequestCallback_;
+                }
+                shouldRequestAuth = true;
             }
-            shouldRequestAuth = true;
         }
 
         if (!shouldRequestAuth) {
@@ -471,6 +516,16 @@ void SyncEngine::dispatchRequest(int64_t syncId, bool isRetry) {
         }
     }
 
+    if (missingPullEndpointUrl) {
+        const std::string& errorMsg = completionError.empty() ? "Missing sync pullEndpointUrl" : completionError;
+        if (completion) {
+            completion(false, errorMsg);
+        }
+        if (pendingCompletion) {
+            pendingCompletion(false, errorMsg);
+        }
+        return;
+    }
     if (shouldRequestAuth) {
         if (authRequest) {
             authRequest();
@@ -488,6 +543,8 @@ void SyncEngine::dispatchRequest(int64_t syncId, bool isRetry) {
     if (!requestId.empty()) {
         request.headers["X-Request-Id"] = requestId;
     }
+    // Discrete marker to identify native sync engine traffic in server logs
+    request.headers["x-sync-engine"] = "1";
 
     platform::httpRequest(request, [self = shared_from_this(), syncId](const platform::HttpResponse& response) {
         self->handleHttpResponse(syncId, response);
@@ -496,6 +553,11 @@ void SyncEngine::dispatchRequest(int64_t syncId, bool isRetry) {
 
 void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse& response) {
     AuthTokenRequestCallback authRequest;
+    CompletionCallback completion;
+    CompletionCallback pendingCompletion;
+    bool shouldReturn = false;
+    bool authRequired = false;
+    std::string completionError;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (shutdown_) {
@@ -518,19 +580,46 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
             retryCount_ = 0;
             currentRequestId_.clear();
             currentPullUrl_.clear();
-            return;
+            completion = std::move(completionCallback_);
+            pendingCompletion = std::move(pendingCompletionCallback_);
+            pendingCompletionCallback_ = nullptr;
+            pendingReason_.clear();
+            completionError = response.errorMessage;
+            shouldReturn = true;
         }
 
         if (response.statusCode == 401 || response.statusCode == 403) {
-            stateJson_ = "{\"state\":\"auth_required\"}";
-            emitLocked("{\"type\":\"auth_required\"}");
-            emitLocked("{\"type\":\"state\",\"state\":\"auth_required\"}");
-            syncInFlight_ = false;
-            retryScheduled_ = false;
-            retryCount_ = 0;
-            if (!authRequestInFlight_) {
-                authRequestInFlight_ = true;
-                authRequest = authTokenRequestCallback_;
+            if (authRetryCount_ >= maxAuthRetries_) {
+                // Auth retries exhausted
+                emitLocked("{\"type\":\"auth_failed\",\"message\":\"Max auth retries exceeded\"}");
+                emitLocked("{\"type\":\"error\",\"message\":\"Max auth retries exceeded\"}");
+                stateJson_ = "{\"state\":\"auth_failed\"}";
+                emitLocked("{\"type\":\"state\",\"state\":\"auth_failed\"}");
+                syncInFlight_ = false;
+                retryScheduled_ = false;
+                retryCount_ = 0;
+                currentRequestId_.clear();
+                currentPullUrl_.clear();
+                completion = std::move(completionCallback_);
+                pendingCompletion = std::move(pendingCompletionCallback_);
+                pendingCompletionCallback_ = nullptr;
+                pendingReason_.clear();
+                completionError = "Max auth retries exceeded";
+                shouldReturn = true;
+            } else {
+                stateJson_ = "{\"state\":\"auth_required\"}";
+                emitLocked("{\"type\":\"auth_required\"}");
+                emitLocked("{\"type\":\"state\",\"state\":\"auth_required\"}");
+                syncInFlight_ = false;
+                retryScheduled_ = false;
+                retryCount_ = 0;
+                if (!authRequestInFlight_) {
+                    authRequestInFlight_ = true;
+                    authRetryCount_++;
+                    authRequest = authTokenRequestCallback_;
+                }
+                authRequired = true;
+                shouldReturn = true;
             }
         } else if (response.statusCode >= 400) {
             if (scheduleRetryLocked(syncId, response.statusCode, std::string("HTTP ") + std::to_string(response.statusCode))) {
@@ -545,17 +634,30 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
             retryCount_ = 0;
             currentRequestId_.clear();
             currentPullUrl_.clear();
-            return;
+            completion = std::move(completionCallback_);
+            pendingCompletion = std::move(pendingCompletionCallback_);
+            pendingCompletionCallback_ = nullptr;
+            pendingReason_.clear();
+            completionError = std::string("HTTP ") + std::to_string(response.statusCode);
+            shouldReturn = true;
         } else {
             emitLocked(std::string("{\"type\":\"http\",\"phase\":\"pull\",\"status\":") +
                        std::to_string(response.statusCode) + "}");
         }
     }
-    if (response.statusCode == 401 || response.statusCode == 403) {
-        if (authRequest) {
-            authRequest();
+    if (shouldReturn) {
+        if (authRequired) {
+            if (authRequest) {
+                authRequest();
+            }
+            return;
         }
-
+        if (completion) {
+            completion(false, completionError);
+        }
+        if (pendingCompletion) {
+            pendingCompletion(false, completionError);
+        }
         return;
     }
     
@@ -581,16 +683,30 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
 
     if (applyCb) {
         if (!applyCb(response.body, applyError)) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            emitLocked(std::string("{\"type\":\"error\",\"message\":\"") +
-                       json_utils::escapeJsonString(applyError) + "\"}");
-            stateJson_ = "{\"state\":\"error\"}";
-            emitLocked("{\"type\":\"state\",\"state\":\"error\"}");
-            syncInFlight_ = false;
-            retryScheduled_ = false;
-            retryCount_ = 0;
-            currentRequestId_.clear();
-            currentPullUrl_.clear();
+            CompletionCallback completionToCall;
+            CompletionCallback pendingToCall;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                emitLocked(std::string("{\"type\":\"error\",\"message\":\"") +
+                           json_utils::escapeJsonString(applyError) + "\"}");
+                stateJson_ = "{\"state\":\"error\"}";
+                emitLocked("{\"type\":\"state\",\"state\":\"error\"}");
+                syncInFlight_ = false;
+                retryScheduled_ = false;
+                retryCount_ = 0;
+                currentRequestId_.clear();
+                currentPullUrl_.clear();
+                completionToCall = std::move(completionCallback_);
+                pendingToCall = std::move(pendingCompletionCallback_);
+                pendingCompletionCallback_ = nullptr;
+                pendingReason_.clear();
+            }
+            if (completionToCall) {
+                completionToCall(false, applyError);
+            }
+            if (pendingToCall) {
+                pendingToCall(false, applyError);
+            }
             return;
         }
     }
@@ -630,6 +746,10 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
 
         pushChangesCb([self, syncId](bool success, const std::string& errorMessage) {
             std::string pendingReason;
+            CompletionCallback completionToCall;
+            CompletionCallback pendingCompletion;
+            bool shouldReturn = false;
+            std::string errorCopy = errorMessage;
             {
                 std::lock_guard<std::mutex> lock(self->mutex_);
                 
@@ -647,22 +767,49 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
                     self->retryCount_ = 0;
                     self->currentRequestId_.clear();
                     self->currentPullUrl_.clear();
-                    return;
+                    completionToCall = std::move(self->completionCallback_);
+                    pendingCompletion = std::move(self->pendingCompletionCallback_);
+                    self->pendingCompletionCallback_ = nullptr;
+                    self->pendingReason_.clear();
+                    shouldReturn = true;
                 }
                
-                self->stateJson_ = "{\"state\":\"done\"}";
-                self->emitLocked("{\"type\":\"state\",\"state\":\"done\"}");
-                self->syncInFlight_ = false;
-                self->retryScheduled_ = false;
-                self->retryCount_ = 0;
-                self->currentRequestId_.clear();
-                self->currentPullUrl_.clear();
-                pendingReason = std::move(self->pendingReason_);
-                self->pendingReason_.clear();
+                if (!shouldReturn) {
+                    self->stateJson_ = "{\"state\":\"done\"}";
+                    self->emitLocked("{\"type\":\"state\",\"state\":\"done\"}");
+                    self->syncInFlight_ = false;
+                    self->retryScheduled_ = false;
+                    self->retryCount_ = 0;
+                    self->currentRequestId_.clear();
+                    self->currentPullUrl_.clear();
+                    pendingReason = std::move(self->pendingReason_);
+                    self->pendingReason_.clear();
+                    completionToCall = std::move(self->completionCallback_);
+                    pendingCompletion = std::move(self->pendingCompletionCallback_);
+                    self->pendingCompletionCallback_ = nullptr;
+                }
+            }
+
+            if (shouldReturn) {
+                if (completionToCall) {
+                    completionToCall(false, errorCopy);
+                }
+                if (pendingCompletion) {
+                    pendingCompletion(false, errorCopy);
+                }
+                return;
+            }
+
+            if (completionToCall) {
+                completionToCall(true, "");
             }
 
             if (!pendingReason.empty()) {
-                self->start(pendingReason);
+                if (pendingCompletion) {
+                    self->startWithCompletion(pendingReason, std::move(pendingCompletion));
+                } else {
+                    self->start(pendingReason);
+                }
             }
         });
         
@@ -670,6 +817,8 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
     }
 
     std::string pendingReason;
+    CompletionCallback completionFinal;
+    CompletionCallback pendingCompletionFinal;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (shutdown_) {
@@ -687,9 +836,19 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
         currentPullUrl_.clear();
         pendingReason = std::move(pendingReason_);
         pendingReason_.clear();
+        completionFinal = std::move(completionCallback_);
+        pendingCompletionFinal = std::move(pendingCompletionCallback_);
+        pendingCompletionCallback_ = nullptr;
+    }
+    if (completionFinal) {
+        completionFinal(true, "");
     }
     if (!pendingReason.empty()) {
-        start(pendingReason);
+        if (pendingCompletionFinal) {
+            startWithCompletion(pendingReason, std::move(pendingCompletionFinal));
+        } else {
+            start(pendingReason);
+        }
     }
 }
 

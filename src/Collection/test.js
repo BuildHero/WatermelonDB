@@ -143,21 +143,21 @@ describe('fetching queries', () => {
 
     adapter.query = jest
       .fn()
-      .mockImplementation((query, cb) => cb({ value: [{ id: 'm1' }, { id: 'm2' }] }))
+      .mockImplementation((query, cb) => cb({ value: [{ id: 'm1', name: 'updated' }, { id: 'm2' }] }))
 
-    const m1 = new MockTask(collection, { id: 'm1' })
+    const m1 = new MockTask(collection, { id: 'm1', name: 'original' })
     collection._cache.add(m1)
 
-    // fetch, check if error occured
-    const spy = jest.spyOn(logger, 'error').mockImplementation(() => {})
+    // fetch - should not log error since we now update cached records with fresh data
     const models = await toPromise(cb => collection._fetchQuery(mockQuery(collection), cb))
-    expect(spy).toHaveBeenCalledTimes(1)
-    spy.mockRestore()
 
-    // check models
+    // check models - cached model should be returned (same reference)
     expect(models.length).toBe(2)
     expect(models[0]).toBe(m1)
     expect(models[1]._raw).toEqual({ id: 'm2' })
+
+    // cached model should be updated with fresh data
+    expect(m1._raw.name).toBe('updated')
   })
   it('fetches counts', async () => {
     const { tasks: collection, adapter } = mockDatabase()
