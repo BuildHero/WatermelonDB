@@ -27,7 +27,6 @@ type NativeWatermelonDBModuleSpec = {
   getSyncStateJson(): string
   addSyncListener(listener: (eventJson: string) => void): number
   removeSyncListener(listenerId: number): void
-  notifyQueueDrained(): void
   setAuthToken(token: string): void
   clearAuthToken(): void
 }
@@ -80,6 +79,7 @@ const dispatcherMethods = [
   'removeLocal',
   'execSqlQuery',
   'enableNativeCDC',
+  'setCDCEnabled',
 ]
 
 const supportedHybridJSIMethods = new Set(['query', 'execSqlQuery'])

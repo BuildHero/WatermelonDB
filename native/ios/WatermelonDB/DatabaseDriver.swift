@@ -228,12 +228,25 @@ class DatabaseDriver {
     // Rewritten to use good ol' mutable Objective C for performance
     // The swifty implementation in debug took >100s to execute on a 65K batch. This: 6ms. Yes. Really.
     private var cachedRecords: NSMutableDictionary /* [TableName: Set<RecordId>] */ = NSMutableDictionary()
-    
+
+    // When CDC is enabled, skip cache optimization to ensure queries
+    // return full records for data created by native sync
+    private var _cdcEnabled: Bool = false
+
     func isCached(_ table: Database.TableName, _ id: RecordId) -> Bool {
+        // When CDC is enabled, always return false to ensure queries return
+        // full records. Native sync creates records that aren't in JS cache.
+        if _cdcEnabled {
+            return false
+        }
         if let set = cachedRecords[table] as? NSSet {
             return set.contains(id)
         }
         return false
+    }
+
+    func setCDCEnabled(_ enabled: Bool) {
+        _cdcEnabled = enabled
     }
     
     func markAsCached(_ table: Database.TableName, _ id: RecordId) {

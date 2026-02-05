@@ -51,6 +51,10 @@ class DatabaseDriver(context: Context, dbName: String) {
 
     private val cachedRecords: MutableMap<TableName, MutableList<RecordID>> = mutableMapOf()
 
+    // When CDC is enabled, skip cache optimization to ensure queries
+    // return full records for data created by native sync
+    private var _cdcEnabled: Boolean = false
+
     fun getDatabase() = database
 
     fun find(table: TableName, id: RecordID): Any? {
@@ -291,8 +295,18 @@ class DatabaseDriver(context: Context, dbName: String) {
         cachedRecords[table] = cache
     }
 
-    fun isCached(table: TableName, id: RecordID): Boolean =
-            cachedRecords[table]?.contains(id) ?: false
+    fun isCached(table: TableName, id: RecordID): Boolean {
+        // When CDC is enabled, always return false to ensure queries return
+        // full records. Native sync creates records that aren't in JS cache.
+        if (_cdcEnabled) {
+            return false
+        }
+        return cachedRecords[table]?.contains(id) ?: false
+    }
+
+    fun setCDCEnabled(enabled: Boolean) {
+        _cdcEnabled = enabled
+    }
 
     private fun removeFromCache(table: TableName, id: RecordID) = cachedRecords[table]?.remove(id)
 

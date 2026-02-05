@@ -4,6 +4,7 @@
 
 #include <ReactCommon/TurboModuleUtils.h>
 
+#import <Foundation/Foundation.h>
 #import <React/RCTBridge+Private.h>
 #import <React/RCTBridgeModule.h>
 
@@ -11,6 +12,8 @@
 #import <SliceImporter.h>
 #import <sqlite3.h>
 #include "SyncApplyEngine.h"
+
+#include <exception>
 
 namespace facebook::react {
 
@@ -63,6 +66,12 @@ JSISwiftWrapperModule::JSISwiftWrapperModule(std::shared_ptr<CallInvoker> jsInvo
             }
             return watermelondb::applySyncPayload(sqlite, payload, errorMessage);
         }
+    });
+    syncEngine_->setAuthTokenRequestCallback([this]() {
+        requestAuthTokenFromJs();
+    });
+    syncEngine_->setPushChangesCallback([this](std::function<void(bool success, const std::string& errorMessage)> completion) {
+        requestPushChangesFromJs(std::move(completion));
     });
 
     socketStatusObserver_ = (__bridge_retained void*)[[NSNotificationCenter defaultCenter]
@@ -231,6 +240,42 @@ void JSISwiftWrapperModule::startSync(jsi::Runtime &rt, jsi::String reason) {
     }
 }
 
+jsi::Value JSISwiftWrapperModule::syncDatabaseAsync(jsi::Runtime &rt, jsi::String reason) {
+    auto state = syncEventState_;
+    if (state) {
+        const std::lock_guard<std::mutex> lock(state->mutex);
+        state->runtime = &rt;
+    }
+    auto engine = syncEngine_;
+    auto jsInvoker = jsInvoker_;
+    const std::string reasonUtf8 = reason.utf8(rt);
+    
+    return createPromiseAsJSIValue(rt, [engine, jsInvoker, reasonUtf8](jsi::Runtime &rt2, std::shared_ptr<Promise> promise) {
+        if (!engine) {
+            jsInvoker->invokeAsync([promise]() mutable {
+                promise->reject("Sync engine not available");
+            });
+            return;
+        }
+        engine->startWithCompletion(reasonUtf8, [jsInvoker, promise](bool success, const std::string& errorMessage) mutable {
+            jsInvoker->invokeAsync([promise, success, errorMessage]() mutable {
+                if (!success) {
+                    const std::string message = errorMessage.empty() ? "Sync failed" : errorMessage;
+                    promise->reject(message);
+                } else {
+                    promise->resolve(jsi::Value::undefined());
+                }
+            });
+        });
+    });
+}
+
+void JSISwiftWrapperModule::setSyncPullUrl(jsi::Runtime &rt, jsi::String pullEndpointUrl) {
+    if (syncEngine_) {
+        syncEngine_->setPullEndpointUrl(pullEndpointUrl.utf8(rt));
+    }
+}
+
 jsi::String JSISwiftWrapperModule::getSyncStateJson(jsi::Runtime &rt) {
     auto state = syncEventState_;
     if (state) {
@@ -265,17 +310,6 @@ void JSISwiftWrapperModule::removeSyncListener(jsi::Runtime &rt, double listener
     state->listeners.erase(static_cast<int64_t>(listenerId));
 }
 
-void JSISwiftWrapperModule::notifyQueueDrained(jsi::Runtime &rt) {
-    auto state = syncEventState_;
-    if (state) {
-        const std::lock_guard<std::mutex> lock(state->mutex);
-        state->runtime = &rt;
-    }
-    if (syncEngine_) {
-        syncEngine_->notifyQueueDrained();
-    }
-}
-
 void JSISwiftWrapperModule::setAuthToken(jsi::Runtime &rt, jsi::String token) {
     auto state = syncEventState_;
     if (state) {
@@ -295,6 +329,25 @@ void JSISwiftWrapperModule::clearAuthToken(jsi::Runtime &rt) {
     }
     if (syncEngine_) {
         syncEngine_->clearAuthToken();
+    }
+}
+
+void JSISwiftWrapperModule::setAuthTokenProvider(jsi::Runtime &rt, jsi::Function provider) {
+    auto state = syncEventState_;
+    if (state) {
+        const std::lock_guard<std::mutex> lock(state->mutex);
+        state->runtime = &rt;
+        authTokenProvider_ = std::make_shared<jsi::Function>(std::move(provider));
+    }
+    requestAuthTokenFromJs();
+}
+
+void JSISwiftWrapperModule::setPushChangesProvider(jsi::Runtime &rt, jsi::Function provider) {
+    auto state = syncEventState_;
+    if (state) {
+        const std::lock_guard<std::mutex> lock(state->mutex);
+        state->runtime = &rt;
+        pushChangesProvider_ = std::make_shared<jsi::Function>(std::move(provider));
     }
 }
 
@@ -347,6 +400,180 @@ void JSISwiftWrapperModule::emitSyncEventLocked(const std::string &eventJson) {
         for (auto &entry : state->listeners) {
             entry.second.call(rt, jsi::String::createFromUtf8(rt, eventJson));
         }
+    });
+}
+
+void JSISwiftWrapperModule::requestAuthTokenFromJs() {
+    auto state = syncEventState_;
+    if (!state || !state->jsInvoker) {
+        return;
+    }
+    auto engineWeak = std::weak_ptr<watermelondb::SyncEngine>(syncEngine_);
+    state->jsInvoker->invokeAsync([state, engineWeak, this]() {
+        jsi::Runtime* runtime = nullptr;
+        std::shared_ptr<jsi::Function> provider;
+        {
+            const std::lock_guard<std::mutex> lock(state->mutex);
+            if (!state->alive || !state->runtime) {
+                return;
+            }
+            runtime = state->runtime;
+            provider = authTokenProvider_;
+        }
+        if (!runtime || !provider) {
+            return;
+        }
+        jsi::Runtime& rt = *runtime;
+        jsi::Value result;
+        try {
+            result = provider->call(rt);
+        } catch (...) {
+            if (auto engine = engineWeak.lock()) {
+                engine->clearAuthToken();
+            }
+            return;
+        }
+
+        if (result.isString()) {
+            if (auto engine = engineWeak.lock()) {
+                engine->setAuthToken(result.asString(rt).utf8(rt));
+            }
+            return;
+        }
+        if (!result.isObject()) {
+            if (auto engine = engineWeak.lock()) {
+                engine->clearAuthToken();
+            }
+            return;
+        }
+
+        jsi::Object promiseObj = result.asObject(rt);
+        if (!promiseObj.hasProperty(rt, "then")) {
+            if (auto engine = engineWeak.lock()) {
+                engine->clearAuthToken();
+            }
+            return;
+        }
+
+        jsi::Value thenVal = promiseObj.getProperty(rt, "then");
+        if (!thenVal.isObject() || !thenVal.asObject(rt).isFunction(rt)) {
+            if (auto engine = engineWeak.lock()) {
+                engine->clearAuthToken();
+            }
+            return;
+        }
+
+        jsi::Function thenFn = thenVal.asObject(rt).asFunction(rt);
+
+        auto onFulfilled = jsi::Function::createFromHostFunction(
+            rt,
+            jsi::PropNameID::forAscii(rt, "onFulfilled"),
+            1,
+            [engineWeak](jsi::Runtime& rt2, const jsi::Value&, const jsi::Value* argv, size_t argc) -> jsi::Value {
+                if (argc >= 1 && argv[0].isString()) {
+                    if (auto engine = engineWeak.lock()) {
+                        engine->setAuthToken(argv[0].asString(rt2).utf8(rt2));
+                    }
+                } else if (auto engine = engineWeak.lock()) {
+                    engine->clearAuthToken();
+                }
+                return jsi::Value::undefined();
+            });
+
+        auto onRejected = jsi::Function::createFromHostFunction(
+            rt,
+            jsi::PropNameID::forAscii(rt, "onRejected"),
+            1,
+            [engineWeak](jsi::Runtime& rt2, const jsi::Value&, const jsi::Value* argv, size_t argc) -> jsi::Value {
+                if (auto engine = engineWeak.lock()) {
+                    engine->clearAuthToken();
+                }
+                return jsi::Value::undefined();
+            });
+
+        thenFn.callWithThis(rt, promiseObj, onFulfilled, onRejected);
+    });
+}
+
+void JSISwiftWrapperModule::requestPushChangesFromJs(
+    std::function<void(bool success, const std::string& errorMessage)> completion) {
+    auto state = syncEventState_;
+    if (!state || !state->jsInvoker) {
+        completion(false, "Missing JS runtime for pushChanges");
+        return;
+    }
+    auto completionPtr = std::make_shared<std::function<void(bool, const std::string&)>>(std::move(completion));
+    state->jsInvoker->invokeAsync([state, completionPtr, this]() {
+        jsi::Runtime* runtime = nullptr;
+        std::shared_ptr<jsi::Function> provider;
+        {
+            const std::lock_guard<std::mutex> lock(state->mutex);
+            if (!state->alive || !state->runtime) {
+                (*completionPtr)(false, "Missing JS runtime for pushChanges");
+                return;
+            }
+            runtime = state->runtime;
+            provider = pushChangesProvider_;
+        }
+        if (!runtime || !provider) {
+            (*completionPtr)(false, "Missing pushChanges provider");
+            return;
+        }
+        jsi::Runtime& rt = *runtime;
+        jsi::Value result;
+        try {
+            result = provider->call(rt);
+        } catch (const jsi::JSError& e) {
+            (*completionPtr)(false, e.what());
+            return;
+        } catch (const std::exception& e) {
+            (*completionPtr)(false, e.what());
+            return;
+        } catch (...) {
+            (*completionPtr)(false, "pushChangesProvider threw");
+            return;
+        }
+        if (result.isObject()) {
+            try {
+                jsi::Object resultObj = result.asObject(rt);
+                jsi::Value thenValue = resultObj.getProperty(rt, "then");
+                if (thenValue.isObject() && thenValue.asObject(rt).isFunction(rt)) {
+                    jsi::Function thenFunc = thenValue.asObject(rt).asFunction(rt);
+                    auto resolve = jsi::Function::createFromHostFunction(
+                        rt,
+                        jsi::PropNameID::forUtf8(rt, "resolve"),
+                        1,
+                        [completionPtr](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                            (*completionPtr)(true, "");
+                            return jsi::Value::undefined();
+                        });
+                    auto reject = jsi::Function::createFromHostFunction(
+                        rt,
+                        jsi::PropNameID::forUtf8(rt, "reject"),
+                        1,
+                        [completionPtr](jsi::Runtime& rt2, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                            std::string message = "pushChanges rejected";
+                            if (count > 0 && args[0].isString()) {
+                                message = args[0].asString(rt2).utf8(rt2);
+                            }
+                            (*completionPtr)(false, message);
+                            return jsi::Value::undefined();
+                        });
+                    thenFunc.callWithThis(rt, resultObj, resolve, reject);
+                    return;
+                }
+            } catch (const jsi::JSError& e) {
+                (*completionPtr)(false, e.what());
+                return;
+            } catch (const std::exception& e) {
+                (*completionPtr)(false, e.what());
+                return;
+            } catch (...) {
+                (*completionPtr)(false, "pushChangesProvider promise handling threw");
+                return;
+            }
+        }
+        (*completionPtr)(true, "");
     });
 }
 

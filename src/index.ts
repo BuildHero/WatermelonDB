@@ -31,3 +31,4 @@ export {
 } from './sync/nativeSync'
 
 export { SyncManager } from './sync/SyncManager'
+export type { SyncUnsubscribe } from './sync/SyncManager'

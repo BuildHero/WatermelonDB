@@ -19,7 +19,11 @@ import SocketIO
         }
         socketClient = nil
         socketManager = nil
-        let config: SocketIOClientConfiguration = debug ? [.log(true), .compress] : [.log(false), .compress]
+        // Discrete marker to identify native sync engine traffic in server logs
+        let headers = ["x-sync-engine": "1"]
+        let config: SocketIOClientConfiguration = debug
+            ? [.log(true), .compress, .extraHeaders(headers)]
+            : [.log(false), .compress, .extraHeaders(headers)]
         socketManager = SocketManager(socketURL: URL(string: socketUrl)!, config: config)
         socketClient = socketManager?.defaultSocket
 

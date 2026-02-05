@@ -23,12 +23,15 @@ public:
     jsi::Value importRemoteSlice(jsi::Runtime &rt, double tag, jsi::String sliceUrl);
     void configureSync(jsi::Runtime &rt, jsi::String configJson);
     void startSync(jsi::Runtime &rt, jsi::String reason);
+    jsi::Value syncDatabaseAsync(jsi::Runtime &rt, jsi::String reason);
+    void setSyncPullUrl(jsi::Runtime &rt, jsi::String pullEndpointUrl);
     jsi::String getSyncStateJson(jsi::Runtime &rt);
     double addSyncListener(jsi::Runtime &rt, jsi::Function listener);
     void removeSyncListener(jsi::Runtime &rt, double listenerId);
-    void notifyQueueDrained(jsi::Runtime &rt);
     void setAuthToken(jsi::Runtime &rt, jsi::String token);
     void clearAuthToken(jsi::Runtime &rt);
+    void setAuthTokenProvider(jsi::Runtime &rt, jsi::Function provider);
+    void setPushChangesProvider(jsi::Runtime &rt, jsi::Function provider);
     void initSyncSocket(jsi::Runtime &rt, jsi::String socketUrl);
     void syncSocketAuthenticate(jsi::Runtime &rt, jsi::String token);
     void syncSocketDisconnect(jsi::Runtime &rt);
@@ -47,6 +50,8 @@ private:
     int64_t nextSyncListenerId_ = 1;
     std::shared_ptr<watermelondb::SyncEngine> syncEngine_;
     std::shared_ptr<SyncEventState> syncEventState_;
+    std::shared_ptr<jsi::Function> authTokenProvider_;
+    std::shared_ptr<jsi::Function> pushChangesProvider_;
     int64_t syncConnectionTag_ = 0;
     
     jobject globalDatabaseBridge_ = nullptr;
@@ -56,6 +61,8 @@ private:
     jobject findDatabaseBridgeFromContext();
     
     void emitSyncEventLocked(const std::string &eventJson);
+    void requestAuthTokenFromJs();
+    void requestPushChangesFromJs(std::function<void(bool success, const std::string& errorMessage)> completion);
 };
 
 } // namespace facebook::react

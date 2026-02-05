@@ -1,12 +1,14 @@
 const makeTurboModule = () => ({
   configureSync: jest.fn(),
   startSync: jest.fn(),
+  setSyncPullUrl: jest.fn(),
   getSyncStateJson: jest.fn(() => '{"state":"idle"}'),
   addSyncListener: jest.fn(),
   removeSyncListener: jest.fn(),
-  notifyQueueDrained: jest.fn(),
   setAuthToken: jest.fn(),
   clearAuthToken: jest.fn(),
+  setAuthTokenProvider: jest.fn(),
+  setPushChangesProvider: jest.fn(),
   initSyncSocket: jest.fn(),
   syncSocketAuthenticate: jest.fn(),
   syncSocketDisconnect: jest.fn(),
@@ -41,9 +43,9 @@ describe('nativeSync', () => {
   it('configures sync with JSON string', () => {
     const moduleInstance = makeTurboModule()
     const nativeSync = setupModule(moduleInstance)
-    nativeSync.configureSync({ pullEndpointUrl: 'x', connectionTag: 1 })
+    nativeSync.configureSync({ connectionTag: 1 })
     expect(moduleInstance.configureSync).toHaveBeenCalledWith(
-      JSON.stringify({ pullEndpointUrl: 'x', connectionTag: 1 }),
+      JSON.stringify({ connectionTag: 1 }),
     )
   })
 
@@ -81,18 +83,22 @@ describe('nativeSync', () => {
     const nativeSync = setupModule(moduleInstance)
 
     nativeSync.startSync('reason')
-    nativeSync.notifyQueueDrained()
+    nativeSync.setSyncPullUrl('https://example.com/pull')
     nativeSync.setAuthToken('token')
     nativeSync.clearAuthToken()
+    nativeSync.setAuthTokenProvider(() => 'token')
+    nativeSync.setPushChangesProvider(() => {})
     nativeSync.initSyncSocket('wss://example.com')
     nativeSync.syncSocketAuthenticate('token')
     nativeSync.syncSocketDisconnect()
     nativeSync.importRemoteSlice(3, 'https://example.com/slice')
 
     expect(moduleInstance.startSync).toHaveBeenCalledWith('reason')
-    expect(moduleInstance.notifyQueueDrained).toHaveBeenCalledWith()
+    expect(moduleInstance.setSyncPullUrl).toHaveBeenCalledWith('https://example.com/pull')
     expect(moduleInstance.setAuthToken).toHaveBeenCalledWith('token')
     expect(moduleInstance.clearAuthToken).toHaveBeenCalledWith()
+    expect(moduleInstance.setAuthTokenProvider).toHaveBeenCalledTimes(1)
+    expect(moduleInstance.setPushChangesProvider).toHaveBeenCalledTimes(1)
     expect(moduleInstance.initSyncSocket).toHaveBeenCalledWith('wss://example.com')
     expect(moduleInstance.syncSocketAuthenticate).toHaveBeenCalledWith('token')
     expect(moduleInstance.syncSocketDisconnect).toHaveBeenCalledWith()

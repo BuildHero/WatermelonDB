@@ -22,6 +22,7 @@ struct HttpResponse {
 };
 
 void httpRequest(const HttpRequest& request, std::function<void(const HttpResponse&)> onComplete);
+std::string generateRequestId();
 
 } // namespace platform
 } // namespace watermelondb

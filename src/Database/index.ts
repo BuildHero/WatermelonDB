@@ -16,6 +16,24 @@ import type { TableName, AppSchema } from '../Schema'
 import CollectionMap from './CollectionMap'
 import ActionQueue, { ActionInterface } from './ActionQueue'
 
+// Lazy-loaded event emitter to avoid circular dependencies
+let _eventEmitter: any = null
+let _eventEmitterLoaded = false
+
+const getEventEmitter = () => {
+  if (!_eventEmitterLoaded) {
+    _eventEmitterLoaded = true
+
+    try {
+      const { WatermelonDBEvents } = require('../adapters/sqlite/makeDispatcher/WatermelonEventEmitter')
+      _eventEmitter = WatermelonDBEvents
+    } catch {
+      _eventEmitter = null
+    }
+  }
+  return _eventEmitter
+}
+
 type DatabaseProps = {
   adapter: DatabaseAdapter
   modelClasses: Array<typeof Model>
@@ -51,7 +69,7 @@ export default class Database {
     this._actionsEnabled = actionsEnabled
 
     if (this.adapter.underlyingAdapter && 'setDatabase' in this.adapter.underlyingAdapter) {
-      ;(this.adapter.underlyingAdapter as any).setDatabase(this)
+      ; (this.adapter.underlyingAdapter as any).setDatabase(this)
     }
   }
 
@@ -72,8 +90,52 @@ export default class Database {
     this.notify(tables)
   }
 
+  _cdcSubscription: { remove: () => void } | null = null
+
+  _nativeCDCEnabled: boolean = false
+
   enableNativeCDC = async () => {
-    return this.adapter.enableNativeCDC()
+    await this.adapter.enableNativeCDC()
+
+    // Tell native adapter to skip cache optimization (always return full records).
+    // This is needed because native sync creates records that aren't in JS cache,
+    // and we don't want per-record refetches for thousands of records.
+    const underlyingAdapter = this.adapter.underlyingAdapter
+
+    if (underlyingAdapter && typeof underlyingAdapter.setCDCEnabled === 'function') {
+      underlyingAdapter.setCDCEnabled(true)
+    }
+
+    // Subscribe to SQLITE_UPDATE_HOOK events and call notify() with changed tables
+    const emitter = getEventEmitter()
+
+    if (emitter && !this._cdcSubscription) {
+      this._cdcSubscription = emitter.addListener(
+        'SQLITE_UPDATE_HOOK',
+        (tables: string[]) => {
+          if (tables && tables.length > 0) {
+            this.notify(tables as TableName<any>[])
+          }
+        },
+      )
+    }
+
+    this._nativeCDCEnabled = !!this._cdcSubscription
+  }
+
+  disableNativeCDC = () => {
+    if (this._cdcSubscription) {
+      this._cdcSubscription.remove()
+      this._cdcSubscription = null
+    }
+
+    // Re-enable cache optimization
+    const underlyingAdapter = this.adapter.underlyingAdapter
+    if (underlyingAdapter && typeof underlyingAdapter.setCDCEnabled === 'function') {
+      underlyingAdapter.setCDCEnabled(false)
+    }
+
+    this._nativeCDCEnabled = false
   }
 
   // Executes multiple prepared operations
@@ -144,7 +206,10 @@ export default class Database {
       batchOperations.length = 0
     }
 
-    this.notify(changeNotifications)
+    // Skip notify if native CDC is enabled - the sqlite update hook will handle it
+    if (!this._nativeCDCEnabled) {
+      this.notify(changeNotifications)
+    }
     return undefined // shuts up flow
   }
 
@@ -286,6 +351,9 @@ export default class Database {
       this._isBeingReset = true
       // First kill actions, to ensure no more traffic to adapter happens
       this._actionQueue._abortPendingActions()
+
+      // Clean up CDC subscription
+      this.disableNativeCDC()
 
       // Kill ability to call adapter methods during reset (to catch bugs if someone does this)
       const { adapter } = this

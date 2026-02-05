@@ -64,6 +64,10 @@ class DatabaseDriver {
 
   cachedRecords: any = {}
 
+  // When CDC is enabled, skip cache optimization to ensure queries
+  // return full records for data created by native sync
+  _cdcEnabled: boolean = false
+
   initialize = (dbName: string, schemaVersion: number) => {
     this.init(dbName)
     this.isCompatible(schemaVersion)
@@ -261,6 +265,11 @@ class DatabaseDriver {
     Object.prototype.hasOwnProperty.call(this.cachedRecords, table)
 
   isCached = (table: string, id: string) => {
+    // When CDC is enabled, always return false to ensure queries return
+    // full records. Native sync creates records that aren't in JS cache.
+    if (this._cdcEnabled) {
+      return false
+    }
     if (this.hasCachedTable(table)) {
       return this.cachedRecords[table].has(id)
     }
@@ -278,6 +287,10 @@ class DatabaseDriver {
     if (this.hasCachedTable(table) && this.cachedRecords[table].has(id)) {
       this.cachedRecords[table].delete(id)
     }
+  }
+
+  setCDCEnabled = (enabled: boolean) => {
+    this._cdcEnabled = enabled
   }
 
   // MARK: - Other private details

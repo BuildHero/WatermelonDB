@@ -368,6 +368,15 @@ export default class SQLiteAdapter implements DatabaseAdapter, SQLDatabaseAdapte
     this._dispatcher.enableNativeCDC(callback)
   }
 
+  setCDCEnabled(enabled: boolean): void {
+    // Tell native adapter to skip cache optimization when CDC is enabled.
+    // This ensures queries return full records (not just IDs) for records
+    // created by native sync that aren't in the JS cache.
+    if (this._dispatcher.setCDCEnabled) {
+      this._dispatcher.setCDCEnabled(enabled)
+    }
+  }
+
   _encodedSchema(): SQL {
     const { encodeSchema } = require('./encodeSchema')
     return encodeSchema(this.schema)

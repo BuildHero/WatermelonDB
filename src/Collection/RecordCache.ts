@@ -6,6 +6,7 @@ import type { RecordId } from '../Model'
 import type { CachedQueryResult } from '../adapters/type'
 import type { TableName } from '../Schema'
 import type { RawRecord } from '../RawRecord'
+import { sanitizedRaw } from '../RawRecord'
 
 type Instantiator<T> = (arg1: RawRecord) => T;
 
@@ -94,13 +95,20 @@ export default class RecordCache<Record extends Model> {
   }
 
   _modelForRaw(raw: RawRecord): Record {
-    // Sanity check: is this already cached?
-    const cachedRecord = this.map.get(raw.id)
+    // Check if already cached (using get() to respect cache versioning)
+    const cachedRecord = this.get(raw.id)
 
     if (cachedRecord) {
-      logError(
-        `Record ${this.tableName}#${cachedRecord.id} is cached, but full raw object was sent over the bridge`,
-      )
+      // When native CDC is enabled, we receive full records for data that may already be cached.
+      // Update the cached record with fresh data and notify observers so Model.observe() works.
+      const sanitized = sanitizedRaw(raw, cachedRecord.collection.schema)
+
+      // Only update and notify if data actually changed
+      if (JSON.stringify(cachedRecord._raw) !== JSON.stringify(sanitized)) {
+        ;(cachedRecord as any)._raw = sanitized
+        cachedRecord._notifyChanged()
+      }
+
       return cachedRecord
     }
 

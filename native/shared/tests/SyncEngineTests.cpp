@@ -37,6 +37,12 @@ void httpRequest(const HttpRequest& request, std::function<void(const HttpRespon
     onComplete(response);
 }
 
+std::string generateRequestId() {
+    static int counter = 0;
+    counter++;
+    return "test-request-id-" + std::to_string(counter);
+}
+
 } // namespace watermelondb::platform
 
 namespace {
@@ -81,6 +87,9 @@ void test_success_flow() {
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
     engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setPushChangesCallback([&](std::function<void(bool, const std::string&)> completion) {
+        completion(true, "");
+    });
 
     watermelondb::platform::setHttpHandler([](const watermelondb::platform::HttpRequest&,
                                               std::function<void(const watermelondb::platform::HttpResponse&)> done) {
@@ -93,8 +102,6 @@ void test_success_flow() {
     engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
     engine->start("test");
 
-    expectTrue(recorder.waitForContains("\"type\":\"drain_queue\""), "expected drain_queue event");
-    engine->notifyQueueDrained();
     expectTrue(recorder.waitForContains("\"state\":\"done\""), "expected done state");
 }
 
@@ -122,11 +129,26 @@ void test_retry_flow() {
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
     engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setPushChangesCallback([&](std::function<void(bool, const std::string&)> completion) {
+        completion(true, "");
+    });
 
     static int callCount = 0;
+    static std::string requestId;
     callCount = 0;
-    watermelondb::platform::setHttpHandler([](const watermelondb::platform::HttpRequest&,
+    requestId.clear();
+    watermelondb::platform::setHttpHandler([](const watermelondb::platform::HttpRequest& request,
                                               std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        auto headerIt = request.headers.find("X-Request-Id");
+        expectTrue(headerIt != request.headers.end(), "expected X-Request-Id header");
+        if (headerIt != request.headers.end()) {
+            expectTrue(!headerIt->second.empty(), "expected X-Request-Id to be non-empty");
+            if (callCount == 0) {
+                requestId = headerIt->second;
+            } else {
+                expectTrue(headerIt->second == requestId, "expected X-Request-Id stable across retries");
+            }
+        }
         watermelondb::platform::HttpResponse response;
         if (callCount == 0) {
             response.statusCode = 500;
@@ -143,7 +165,93 @@ void test_retry_flow() {
     engine->start("retry");
 
     expectTrue(recorder.waitForContains("\"type\":\"retry_scheduled\""), "expected retry_scheduled event");
-    expectTrue(recorder.waitForContains("\"type\":\"drain_queue\""), "expected drain_queue after retry");
+    expectTrue(recorder.waitForContains("\"state\":\"done\""), "expected done after retry");
+}
+
+void test_cursor_pagination() {
+    EventRecorder recorder;
+    auto engine = std::make_shared<watermelondb::SyncEngine>();
+    engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
+    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setPushChangesCallback([&](std::function<void(bool, const std::string&)> completion) {
+        completion(true, "");
+    });
+
+    static int callCount = 0;
+    callCount = 0;
+    watermelondb::platform::setHttpHandler([](const watermelondb::platform::HttpRequest& request,
+                                              std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        watermelondb::platform::HttpResponse response;
+        if (callCount == 0) {
+            response.statusCode = 200;
+            response.body = "{\"changes\":{},\"next\":{\"foo\":\"bar\"}}";
+            expectTrue(request.url.find("sequenceId=seq-1") != std::string::npos,
+                       "expected sequenceId param on first page");
+        } else {
+            response.statusCode = 200;
+            response.body = "{\"changes\":{},\"next\":null}";
+            expectTrue(request.url.find("cursor=%7B%22foo%22%3A%22bar%22%7D") != std::string::npos,
+                       "expected cursor param on next page");
+        }
+        callCount++;
+        done(response);
+    });
+
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull?sequenceId=seq-1\",\"connectionTag\":1}");
+    engine->start("pagination");
+
+    expectTrue(recorder.waitForContains("\"state\":\"done\""), "expected done after pagination");
+}
+
+void test_auth_required_resumes_cursor() {
+    EventRecorder recorder;
+    auto engine = std::make_shared<watermelondb::SyncEngine>();
+    engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
+    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+
+    engine->setAuthTokenRequestCallback([engine]() { engine->setAuthToken("token-2"); });
+    engine->setAuthToken("token-1");
+
+    static int callCount = 0;
+    callCount = 0;
+    std::string requestId;
+    watermelondb::platform::setHttpHandler([&](const watermelondb::platform::HttpRequest& request,
+                                               std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        auto headerIt = request.headers.find("X-Request-Id");
+        expectTrue(headerIt != request.headers.end(), "expected X-Request-Id header");
+        if (headerIt != request.headers.end()) {
+            if (requestId.empty()) {
+                requestId = headerIt->second;
+            } else {
+                expectTrue(headerIt->second == requestId, "expected X-Request-Id stable across auth retry");
+            }
+        }
+
+        watermelondb::platform::HttpResponse response;
+        if (callCount == 0) {
+            response.statusCode = 200;
+            response.body = "{\"changes\":{},\"next\":\"cursor-token\"}";
+            expectTrue(request.url.find("sequenceId=seq-1") != std::string::npos,
+                       "expected sequenceId param on first page");
+        } else if (callCount == 1) {
+            response.statusCode = 401;
+        } else {
+            response.statusCode = 200;
+            response.body = "{\"changes\":{},\"next\":null}";
+            expectTrue(request.url.find("cursor=cursor-token") != std::string::npos,
+                       "expected cursor param after auth refresh");
+            auto authIt = request.headers.find("Authorization");
+            expectTrue(authIt != request.headers.end() && authIt->second == "token-2",
+                       "expected refreshed auth token");
+        }
+        callCount++;
+        done(response);
+    });
+
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull?sequenceId=seq-1\",\"connectionTag\":1}");
+    engine->start("auth_pagination");
+
+    expectTrue(recorder.waitForContains("\"state\":\"done\""), "expected done after auth refresh");
 }
 
 void test_shutdown_prevents_events() {
@@ -196,11 +304,63 @@ void test_auth_token_restart() {
     expectTrue(recorder.waitForContains("\"type\":\"sync_start\""), "expected restart after auth token");
 }
 
+void test_completion_preserved_after_auth_refresh() {
+    EventRecorder recorder;
+    auto engine = std::make_shared<watermelondb::SyncEngine>();
+    engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
+    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+
+    std::mutex completionMutex;
+    std::condition_variable completionCv;
+    bool completed = false;
+    bool completedSuccess = false;
+
+    static int callCount = 0;
+    callCount = 0;
+    watermelondb::platform::setHttpHandler([&](const watermelondb::platform::HttpRequest&,
+                                               std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        watermelondb::platform::HttpResponse response;
+        if (callCount == 0) {
+            response.statusCode = 401;
+        } else {
+            response.statusCode = 200;
+            response.body = "{}";
+        }
+        callCount++;
+        done(response);
+    });
+
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
+    engine->setAuthToken("expired-token");
+    engine->startWithCompletion("auth_refresh_completion", [&](bool success, const std::string&) {
+        {
+            std::lock_guard<std::mutex> lock(completionMutex);
+            completed = true;
+            completedSuccess = success;
+        }
+        completionCv.notify_all();
+    });
+
+    expectTrue(recorder.waitForContains("\"type\":\"auth_required\""), "expected auth_required event");
+    engine->setAuthToken("new-token");
+
+    std::unique_lock<std::mutex> lock(completionMutex);
+    bool finished = completionCv.wait_for(lock, std::chrono::milliseconds(500), [&]() {
+        return completed;
+    });
+    expectTrue(finished, "expected completion callback to be called after auth refresh");
+    expectTrue(completedSuccess, "expected completion to be successful after auth refresh");
+}
+
 void test_queue_when_in_flight() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
     engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    std::function<void(bool, const std::string&)> pushCompletion;
+    engine->setPushChangesCallback([&](std::function<void(bool, const std::string&)> completion) {
+        pushCompletion = std::move(completion);
+    });
 
     watermelondb::platform::setHttpHandler([](const watermelondb::platform::HttpRequest&,
                                               std::function<void(const watermelondb::platform::HttpResponse&)> done) {
@@ -215,7 +375,9 @@ void test_queue_when_in_flight() {
     engine->start("second");
 
     expectTrue(recorder.waitForContains("\"type\":\"sync_queued\""), "expected sync_queued event");
-    engine->notifyQueueDrained();
+    if (pushCompletion) {
+        pushCompletion(true, "");
+    }
     expectTrue(recorder.waitForContains("\"reason\":\"second\""), "expected second reason to run");
 }
 
@@ -302,8 +464,11 @@ int main() {
     test_success_flow();
     test_auth_required();
     test_retry_flow();
+    test_cursor_pagination();
+    test_auth_required_resumes_cursor();
     test_shutdown_prevents_events();
     test_auth_token_restart();
+    test_completion_preserved_after_auth_refresh();
     test_queue_when_in_flight();
     test_backoff_delay_cap();
     test_missing_endpoint_error();

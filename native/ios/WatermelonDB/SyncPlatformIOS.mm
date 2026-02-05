@@ -32,6 +32,10 @@ void httpRequest(const HttpRequest& request,
         }
 
         NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
+
+        // Disable cookies for now. We don't need them and they can cause issues with the sync engine and sticky sessions.
+        config.HTTPShouldSetCookies = NO;
+
         NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
 
         NSURLSessionDataTask *task = [session dataTaskWithRequest:urlRequest
@@ -54,6 +58,17 @@ void httpRequest(const HttpRequest& request,
             onComplete(resp);
         }];
         [task resume];
+    }
+}
+
+std::string generateRequestId() {
+    @autoreleasepool {
+        NSUUID *uuid = [NSUUID UUID];
+        NSString *uuidString = [uuid UUIDString];
+        if (!uuidString) {
+            return "";
+        }
+        return [uuidString UTF8String];
     }
 }
 

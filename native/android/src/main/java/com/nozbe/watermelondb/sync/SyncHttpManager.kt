@@ -1,6 +1,7 @@
 package com.nozbe.watermelondb.sync
 
 import okhttp3.Call
+import okhttp3.CookieJar
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -10,7 +11,9 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 object SyncHttpManager {
-    private val client: OkHttpClient = OkHttpClient.Builder().build()
+    private val client: OkHttpClient = OkHttpClient.Builder()
+        .cookieJar(CookieJar.NO_COOKIES)
+        .build()
     private val calls: ConcurrentHashMap<Long, Call> = ConcurrentHashMap()
 
     @JvmStatic
@@ -24,6 +27,7 @@ object SyncHttpManager {
         handle: Long
     ) {
         val builder = client.newBuilder()
+            .cookieJar(CookieJar.NO_COOKIES)
             .connectTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
             .readTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
             .writeTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
