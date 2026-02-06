@@ -11,6 +11,7 @@
 #import <WatermelonDB-Swift.h>
 #import <SliceImporter.h>
 #import <sqlite3.h>
+#import "ZstdFileUtil.h"
 #include "SyncApplyEngine.h"
 
 #include <exception>
@@ -383,6 +384,33 @@ void JSISwiftWrapperModule::syncSocketDisconnect(jsi::Runtime &rt) {
         state->runtime = &rt;
     }
     [SyncSocketClient.shared disconnect];
+}
+
+jsi::Value JSISwiftWrapperModule::decompressZstd(jsi::Runtime &rt, jsi::String src, jsi::String dest) {
+    const std::string srcUtf8 = src.utf8(rt);
+    const std::string destUtf8 = dest.utf8(rt);
+
+    auto jsInvoker = jsInvoker_;
+
+    return createPromiseAsJSIValue(rt, [srcUtf8, destUtf8, jsInvoker](jsi::Runtime &rt2, std::shared_ptr<Promise> promise) {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            @autoreleasepool {
+                NSString *srcPath = [NSString stringWithUTF8String:srcUtf8.c_str()];
+                NSString *destPath = [NSString stringWithUTF8String:destUtf8.c_str()];
+
+                NSError *error = nil;
+                [ZstdFileUtil decompressZstdWithSrc:srcPath dest:destPath error:&error];
+
+                jsInvoker->invokeAsync([promise, error]() mutable {
+                    if (error) {
+                        promise->reject([[error localizedDescription] UTF8String]);
+                    } else {
+                        promise->resolve(jsi::Value::undefined());
+                    }
+                });
+            }
+        });
+    });
 }
 
 void JSISwiftWrapperModule::emitSyncEventLocked(const std::string &eventJson) {

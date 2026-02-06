@@ -35,6 +35,7 @@ public:
     void initSyncSocket(jsi::Runtime &rt, jsi::String socketUrl);
     void syncSocketAuthenticate(jsi::Runtime &rt, jsi::String token);
     void syncSocketDisconnect(jsi::Runtime &rt);
+    jsi::Value decompressZstd(jsi::Runtime &rt, jsi::String src, jsi::String dest);
     void emitSyncEventFromNative(const std::string &eventJson);
 
 private:

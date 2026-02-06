@@ -609,6 +609,82 @@ void JSIAndroidBridgeModule::syncSocketDisconnect(jsi::Runtime &rt) {
     }
 }
 
+jsi::Value JSIAndroidBridgeModule::decompressZstd(jsi::Runtime &rt, jsi::String src, jsi::String dest) {
+    const std::string srcUtf8 = src.utf8(rt);
+    const std::string destUtf8 = dest.utf8(rt);
+
+    auto jsInvoker = jsInvoker_;
+
+    return createPromiseAsJSIValue(rt, [srcUtf8, destUtf8, jsInvoker](jsi::Runtime &rt2, std::shared_ptr<Promise> promise) {
+        JNIEnv* env = watermelondb::getEnv();
+        if (!env) {
+            jsInvoker->invokeAsync([promise]() mutable {
+                promise->reject("JNI environment not available");
+            });
+            return;
+        }
+
+        jclass cls = env->FindClass("com/nozbe/watermelondb/ZstdFileUtil");
+        if (!cls) {
+            env->ExceptionClear();
+            jsInvoker->invokeAsync([promise]() mutable {
+                promise->reject("ZstdFileUtil class not found");
+            });
+            return;
+        }
+
+        jmethodID method = env->GetStaticMethodID(cls, "decompressZstd", "(Ljava/lang/String;Ljava/lang/String;)V");
+        if (!method) {
+            env->ExceptionClear();
+            env->DeleteLocalRef(cls);
+            jsInvoker->invokeAsync([promise]() mutable {
+                promise->reject("decompressZstd method not found");
+            });
+            return;
+        }
+
+        jstring jsrc = env->NewStringUTF(srcUtf8.c_str());
+        jstring jdest = env->NewStringUTF(destUtf8.c_str());
+        env->CallStaticVoidMethod(cls, method, jsrc, jdest);
+
+        std::string errorMessage;
+        if (env->ExceptionCheck()) {
+            jthrowable exception = env->ExceptionOccurred();
+            env->ExceptionClear();
+            if (exception) {
+                jclass throwableClass = env->FindClass("java/lang/Throwable");
+                jmethodID getMessageMethod = env->GetMethodID(throwableClass, "getMessage", "()Ljava/lang/String;");
+                jstring jmsg = (jstring)env->CallObjectMethod(exception, getMessageMethod);
+                if (jmsg) {
+                    const char* chars = env->GetStringUTFChars(jmsg, nullptr);
+                    if (chars) {
+                        errorMessage = chars;
+                        env->ReleaseStringUTFChars(jmsg, chars);
+                    }
+                    env->DeleteLocalRef(jmsg);
+                }
+                env->DeleteLocalRef(throwableClass);
+                env->DeleteLocalRef(exception);
+            }
+            if (errorMessage.empty()) {
+                errorMessage = "Zstd decompression failed";
+            }
+        }
+
+        env->DeleteLocalRef(jsrc);
+        env->DeleteLocalRef(jdest);
+        env->DeleteLocalRef(cls);
+
+        jsInvoker->invokeAsync([promise, errorMessage]() mutable {
+            if (!errorMessage.empty()) {
+                promise->reject(errorMessage);
+            } else {
+                promise->resolve(jsi::Value::undefined());
+            }
+        });
+    });
+}
+
 void JSIAndroidBridgeModule::emitSyncEventFromNative(const std::string &eventJson) {
     emitSyncEventLocked(eventJson);
 }

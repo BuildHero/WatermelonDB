@@ -27,6 +27,16 @@ include_directories(
 
 # Optional simdjson headers from node_modules
 set(SIMDJSON_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../../../node_modules/@nozbe/simdjson")
+
+# Fallback: use NODE_MODULES_DIR passed from Gradle (handles yarn workspace hoisting)
+if (DEFINED NODE_MODULES_DIR AND NOT EXISTS "${SIMDJSON_DIR}/simdjson.h")
+  set(SIMDJSON_DIR_ALT "${NODE_MODULES_DIR}/@nozbe/simdjson")
+  if (EXISTS "${SIMDJSON_DIR_ALT}")
+    set(SIMDJSON_DIR "${SIMDJSON_DIR_ALT}")
+    message(STATUS "Using hoisted simdjson from NODE_MODULES_DIR: ${SIMDJSON_DIR}")
+  endif ()
+endif ()
+
 set(SIMDJSON_INCLUDE_DIR "${SIMDJSON_DIR}/include")
 set(SIMDJSON_SRC_DIR "${SIMDJSON_DIR}/src")
 if (EXISTS "${SIMDJSON_DIR}/simdjson.h")

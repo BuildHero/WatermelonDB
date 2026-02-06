@@ -21,6 +21,7 @@ export interface Spec extends TurboModule {
   initSyncSocket(socketUrl: string): void
   syncSocketAuthenticate(token: string): void
   syncSocketDisconnect(): void
+  decompressZstd(src: string, dest: string): Promise<void>
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>('NativeWatermelonDBModule')
