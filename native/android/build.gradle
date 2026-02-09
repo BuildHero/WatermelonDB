@@ -8,18 +8,6 @@ def DEFAULT_TARGET_SDK_VERSION = 33
 
 def newArchEnabled = project.hasProperty("newArchEnabled") && project.newArchEnabled == "true"
 
-// Resolve node_modules root by walking up from project dir
-def resolvedNodeModulesDir = null
-def searchDir = projectDir
-while (searchDir != null) {
-    def candidate = new File(searchDir, "node_modules/@nozbe/simdjson")
-    if (candidate.exists()) {
-        resolvedNodeModulesDir = new File(searchDir, "node_modules").absolutePath
-        break
-    }
-    searchDir = searchDir.parentFile
-}
-
 android {
     namespace "com.nozbe.watermelondb"
 
@@ -35,9 +23,6 @@ android {
         externalNativeBuild {
             cmake {
                 arguments "-DANDROID_STL=c++_shared", "-DREACT_NATIVE_NEW_ARCH_ENABLED=${newArchEnabled ? 1 : 0}"
-                if (resolvedNodeModulesDir != null) {
-                    arguments "-DNODE_MODULES_DIR=${resolvedNodeModulesDir}"
-                }
                 cppFlags '-std=c++17 -O2'
             }
         }
@@ -74,12 +59,10 @@ android {
     }
 }
 
-// Apply React plugin only if available (not available in test environments)
-if (plugins.hasPlugin('com.facebook.react') || project.hasProperty('react.gradle.plugin.enabled')) {
+if (newArchEnabled) {
     apply plugin: 'com.facebook.react'
-    
+
     react {
-        codegenDir = file("$rootDir/../node_modules/react-native-codegen")
         jsRootDir = file("../specs")
         libraryName = "WatermelonDBSpec"
         codegenJavaPackageName = "com.watermelondb.specs"

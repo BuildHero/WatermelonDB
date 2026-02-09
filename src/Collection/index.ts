@@ -18,6 +18,7 @@ import logger from '../utils/common/logger'
 import encodeQuery from '../adapters/sqlite/encodeQuery'
 // @ts-ignore
 import { mapToGraph } from './helpers'
+// @ts-ignore
 import { CachedFindResult } from 'adapters/type'
 
 type CollectionChangeType = 'created' | 'updated' | 'destroyed'
@@ -241,8 +242,8 @@ export default class Collection<Record extends Model> {
       result:
         | Result<CachedFindResult>
         | {
-            value: CachedFindResult
-          },
+          value: CachedFindResult
+        },
     ) => {
       return mapValue((rawRecord) => {
         invariant(rawRecord, `Record ${this.table}#${id} not found`)

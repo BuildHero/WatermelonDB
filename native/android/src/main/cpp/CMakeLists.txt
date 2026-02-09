@@ -25,16 +25,20 @@ include_directories(
     ../../../../shared
 )
 
-# Optional simdjson headers from node_modules
-set(SIMDJSON_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../../../node_modules/@nozbe/simdjson")
-
-# Fallback: use NODE_MODULES_DIR passed from Gradle (handles yarn workspace hoisting)
-if (DEFINED NODE_MODULES_DIR AND NOT EXISTS "${SIMDJSON_DIR}/simdjson.h")
-  set(SIMDJSON_DIR_ALT "${NODE_MODULES_DIR}/@nozbe/simdjson")
-  if (EXISTS "${SIMDJSON_DIR_ALT}")
-    set(SIMDJSON_DIR "${SIMDJSON_DIR_ALT}")
-    message(STATUS "Using hoisted simdjson from NODE_MODULES_DIR: ${SIMDJSON_DIR}")
+# Resolve simdjson headers — walk up from this file to find node_modules/@nozbe/simdjson
+set(SIMDJSON_DIR "")
+set(_SIMDJSON_SEARCH_DIR "${CMAKE_CURRENT_LIST_DIR}")
+foreach(_i RANGE 12)
+  set(_CANDIDATE "${_SIMDJSON_SEARCH_DIR}/node_modules/@nozbe/simdjson")
+  if (EXISTS "${_CANDIDATE}")
+    set(SIMDJSON_DIR "${_CANDIDATE}")
+    break()
   endif ()
+  get_filename_component(_SIMDJSON_SEARCH_DIR "${_SIMDJSON_SEARCH_DIR}" DIRECTORY)
+endforeach()
+
+if (SIMDJSON_DIR STREQUAL "")
+  message(FATAL_ERROR "simdjson headers not found. Please add @nozbe/simdjson to your dependencies.")
 endif ()
 
 set(SIMDJSON_INCLUDE_DIR "${SIMDJSON_DIR}/include")
@@ -49,7 +53,7 @@ elseif (EXISTS "${SIMDJSON_SRC_DIR}/simdjson.h")
   include_directories("${SIMDJSON_SRC_DIR}")
   message(STATUS "Using simdjson headers: ${SIMDJSON_SRC_DIR}")
 else ()
-  message(FATAL_ERROR "simdjson headers not found. Please add @nozbe/simdjson or provide simdjson headers.")
+  message(FATAL_ERROR "simdjson package found at ${SIMDJSON_DIR} but no headers. Check @nozbe/simdjson installation.")
 endif ()
 
 # Configure sqlite-android manually using AAR extraction
@@ -197,7 +201,7 @@ set(SOURCE_FILES
     ../../../../shared/SliceDecoder.cpp
     ../../../../shared/SliceImportEngine.cpp
     ../../../../shared/SyncEngine.cpp
-    ../../../../shared/Simdjson.cpp
+    ../../../../shared/SimdjsonImpl.cpp
     ../../../../shared/SyncApplyEngine.cpp
     ../../../../shared/SqliteInsertHelper.cpp
     # List C/C++ source files with relative paths to this CMakeLists.txt.
