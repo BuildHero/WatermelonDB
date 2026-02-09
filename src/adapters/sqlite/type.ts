@@ -83,7 +83,7 @@ export type NativeDispatcher = {
   copyTables: (tables: any, srcDB: any, callback: ResultCallback<undefined>) => void
   execSqlQuery: (arg1: SQL, arg2: SQLiteArg[], arg3: ResultCallback<DirtyQueryResult>) => void
   enableNativeCDC: (arg1: ResultCallback<undefined>) => void
-  setCDCEnabled?: (enabled: boolean) => void
+  setCDCEnabled?: (enabled: boolean, callback: ResultCallback<undefined>) => void
   obliterateDatabase: (arg1: ResultCallback<undefined>) => void
 }
 

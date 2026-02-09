@@ -60,7 +60,7 @@ export interface DatabaseAdapter {
   // When CDC is enabled, the adapter should skip cache optimizations
   // (always return full records instead of just IDs) since JS cache
   // won't have records created by native sync.
-  setCDCEnabled?(enabled: boolean): void;
+  setCDCEnabled?(enabled: boolean, callback: ResultCallback<undefined>): void;
   _hybridJSIEnabled?: boolean;
   _tag?: ConnectionTag;
   testClone(options: any): Promise<any>;

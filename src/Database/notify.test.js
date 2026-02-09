@@ -107,11 +107,13 @@ describe('database.enableNativeCDC()', () => {
     database.adapter.underlyingAdapter.enableNativeCDC = jest.fn((callback) => {
       callback({ value: undefined })
     })
-    database.adapter.underlyingAdapter.setCDCEnabled = jest.fn()
+    database.adapter.underlyingAdapter.setCDCEnabled = jest.fn((enabled, callback) => {
+      callback({ value: undefined })
+    })
 
     await database.enableNativeCDC()
 
-    expect(database.adapter.underlyingAdapter.setCDCEnabled).toHaveBeenCalledWith(true)
+    expect(database.adapter.underlyingAdapter.setCDCEnabled).toHaveBeenCalledWith(true, expect.any(Function))
   })
 
   it('disableNativeCDC calls setCDCEnabled(false) on adapter', async () => {
@@ -120,7 +122,9 @@ describe('database.enableNativeCDC()', () => {
     database.adapter.underlyingAdapter.enableNativeCDC = jest.fn((callback) => {
       callback({ value: undefined })
     })
-    database.adapter.underlyingAdapter.setCDCEnabled = jest.fn()
+    database.adapter.underlyingAdapter.setCDCEnabled = jest.fn((enabled, callback) => {
+      callback({ value: undefined })
+    })
 
     await database.enableNativeCDC()
 
@@ -129,7 +133,7 @@ describe('database.enableNativeCDC()', () => {
 
     database.disableNativeCDC()
 
-    expect(database.adapter.underlyingAdapter.setCDCEnabled).toHaveBeenCalledWith(false)
+    expect(database.adapter.underlyingAdapter.setCDCEnabled).toHaveBeenCalledWith(false, expect.any(Function))
   })
 
   it('ignores empty table arrays from SQLITE_UPDATE_HOOK', async () => {

@@ -4,6 +4,7 @@ import { Observable, startWith, merge as merge$ } from '../utils/rx'
 import { Unsubscribe } from '../utils/subscriptions'
 import { invariant } from '../utils/common'
 import { noop } from '../utils/fp'
+import { toPromise } from '../utils/fp/Result'
 
 import type { DatabaseAdapter, BatchOperation } from '../adapters/type'
 import DatabaseAdapterCompat from '../adapters/compat'
@@ -103,7 +104,7 @@ export default class Database {
     const underlyingAdapter = this.adapter.underlyingAdapter
 
     if (underlyingAdapter && typeof underlyingAdapter.setCDCEnabled === 'function') {
-      underlyingAdapter.setCDCEnabled(true)
+      await toPromise(callback => underlyingAdapter.setCDCEnabled!(true, callback))
     }
 
     // Subscribe to SQLITE_UPDATE_HOOK events and call notify() with changed tables
@@ -132,7 +133,7 @@ export default class Database {
     // Re-enable cache optimization
     const underlyingAdapter = this.adapter.underlyingAdapter
     if (underlyingAdapter && typeof underlyingAdapter.setCDCEnabled === 'function') {
-      underlyingAdapter.setCDCEnabled(false)
+      underlyingAdapter.setCDCEnabled(false, () => {})
     }
 
     this._nativeCDCEnabled = false
