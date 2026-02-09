@@ -18,8 +18,7 @@ import logger from '../utils/common/logger'
 import encodeQuery from '../adapters/sqlite/encodeQuery'
 // @ts-ignore
 import { mapToGraph } from './helpers'
-// @ts-ignore
-import { CachedFindResult } from 'adapters/type'
+import { CachedFindResult } from '../adapters/type'
 
 type CollectionChangeType = 'created' | 'updated' | 'destroyed'
 
