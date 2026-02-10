@@ -4,27 +4,48 @@ import Foundation
 @objc(DatabaseBridge)
 final public class DatabaseBridge: RCTEventEmitter {
     private let _methodQueue = DispatchQueue(label: "com.nozbe.watermelondb.database", qos: .userInteractive)
-    
+
     private var hasListeners = false
-    
+
     public typealias ConnectionTag = NSNumber
-    
-    
+
+
     @objc
     public override class func requiresMainQueueSetup() -> Bool {
         return false
     }
-    
+
     @objc
     public override var methodQueue: DispatchQueue {
         get {
             return _methodQueue
         }
     }
-    
+
     @objc
     public override func supportedEvents() -> [String] {
         ["SQLITE_UPDATE_HOOK"]      // etc.
+    }
+
+    deinit {
+        // Clean up resources when bridge is destroyed
+        cleanupCDC()
+    }
+
+    private var _cdcCleanedUp = false
+
+    private func cleanupCDC() {
+        cdcLock.lock()
+        // Prevent re-entrant cleanup (e.g., from both deinit and disableNativeCDC)
+        guard !_cdcCleanedUp else {
+            cdcLock.unlock()
+            return
+        }
+        _cdcCleanedUp = true
+        batchTimer?.invalidate()
+        batchTimer = nil
+        affectedTables.removeAll()
+        cdcLock.unlock()
     }
     
     @objc
@@ -90,16 +111,20 @@ final public class DatabaseBridge: RCTEventEmitter {
     private var affectedTables = Set<String>()
     private var batchTimer: Timer?
     private let batchInterval: TimeInterval = 0.1 // 100 milliseconds
+    private let cdcLock = NSLock() // Synchronization for CDC state
 }
 
 // MARK: - Native CDC helpers
 extension DatabaseBridge {
     private func bufferTableName(_ tableName: String) {
-        // Add the table name to the set of affected tables (duplicates will be ignored)
+        // Thread-safe access to shared mutable state
+        cdcLock.lock()
         affectedTables.insert(tableName)
+        cdcLock.unlock()
     }
-    
+
     private func resetBatchTimer() {
+        cdcLock.lock()
         batchTimer?.invalidate() // Cancel the existing timer if it's running
 
         if #available(iOS 10.0, *) {
@@ -113,21 +138,27 @@ extension DatabaseBridge {
                                               userInfo: nil,
                                               repeats: false)
         }
+        cdcLock.unlock()
     }
-    
+
     private func emitAffectedTables() {
-        if !affectedTables.isEmpty {
-            let params = affectedTables.map { $0 as NSString } as [NSString]
-            
-            if (hasListeners) {
-                sendEvent(withName: "SQLITE_UPDATE_HOOK", body: params)
-            }
-            
-            affectedTables.removeAll() // Clear the buffer after emitting
+        // Copy state under lock to avoid holding lock during event emission
+        cdcLock.lock()
+        guard !affectedTables.isEmpty else {
+            cdcLock.unlock()
+            return
         }
-        
+        let tables = Array(affectedTables)
+        affectedTables.removeAll()
         batchTimer?.invalidate()
         batchTimer = nil
+        cdcLock.unlock()
+
+        let params = tables.map { $0 as NSString } as [NSString]
+
+        if (hasListeners) {
+            sendEvent(withName: "SQLITE_UPDATE_HOOK", body: params)
+        }
     }
     
     // This function handles SQLite update events
@@ -396,8 +427,25 @@ extension DatabaseBridge {
     func enableNativeCDC(tag: ConnectionTag,
                          resolve: @escaping RCTPromiseResolveBlock,
                          reject:  @escaping RCTPromiseRejectBlock) {
+        // Reset cleanup flag when re-enabling CDC
+        cdcLock.lock()
+        _cdcCleanedUp = false
+        cdcLock.unlock()
+
         withDriver(tag, resolve, reject) {
             $0.setUpdateHook(withCallback: self.sqliteUpdateCallback)
+        }
+    }
+
+    @objc(disableNativeCDC:resolve:reject:)
+    func disableNativeCDC(tag: ConnectionTag,
+                          resolve: @escaping RCTPromiseResolveBlock,
+                          reject:  @escaping RCTPromiseRejectBlock) {
+        // Clean up the batch timer FIRST to prevent race conditions
+        cleanupCDC()
+
+        withDriver(tag, resolve, reject) {
+            $0.disableUpdateHook()
         }
     }
 
@@ -513,8 +561,23 @@ extension DatabaseBridge {
     
     @objc(enableNativeCDCSynchronous:)
     func enableNativeCDCSynchronous(tag: ConnectionTag) -> NSDictionary {
-        withDriverSynchronous(tag) {
+        // Reset cleanup flag when re-enabling CDC
+        cdcLock.lock()
+        _cdcCleanedUp = false
+        cdcLock.unlock()
+
+        return withDriverSynchronous(tag) {
             $0.setUpdateHook(withCallback: self.sqliteUpdateCallback)
+        }
+    }
+
+    @objc(disableNativeCDCSynchronous:)
+    func disableNativeCDCSynchronous(tag: ConnectionTag) -> NSDictionary {
+        // Clean up the batch timer FIRST to prevent race conditions
+        cleanupCDC()
+
+        return withDriverSynchronous(tag) {
+            $0.disableUpdateHook()
         }
     }
 

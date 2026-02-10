@@ -188,6 +188,50 @@ class Database {
       }
     })
   }
+
+  disableUpdateHook = () => {
+    // Guard against invalid database state
+    if (!this.instance || !this.instance.open) {
+      console.warn('Cannot disable update hook - database is not open')
+      return
+    }
+
+    // Query to get all table names in the database
+    const tables = this.instance
+      .prepare(
+        `
+    SELECT name FROM sqlite_master
+    WHERE type = 'table'
+    AND name NOT LIKE 'sqlite_%'
+    AND sql NOT LIKE '%VIRTUAL%'
+    AND sql NOT LIKE '%virtual%';
+  `,
+      )
+      .all()
+
+    const errors: Array<{ table: string; error: any }> = []
+
+    // Drop triggers for each table
+    tables.forEach(({ name: tableName }: { name: string }) => {
+      try {
+        this.instance.prepare(`DROP TRIGGER IF EXISTS updateHook_${tableName}`).run()
+        this.instance.prepare(`DROP TRIGGER IF EXISTS insertHook_${tableName}`).run()
+        this.instance.prepare(`DROP TRIGGER IF EXISTS deleteHook_${tableName}`).run()
+      } catch (error) {
+        console.error('Error dropping trigger for table:', tableName, error)
+        errors.push({ table: tableName, error })
+      }
+    })
+
+    // Propagate errors to caller if any triggers failed to drop
+    if (errors.length > 0) {
+      throw new Error(
+        `Failed to disable update hooks for ${errors.length} table(s): ${errors
+          .map((e) => e.table)
+          .join(', ')}`,
+      )
+    }
+  }
 }
 
 export default Database

@@ -67,6 +67,7 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
 
     private val affectedTables = mutableSetOf<String>()
     private var batchTimer: Timer? = null
+    private var batchTimerTask: TimerTask? = null
     private val batchInterval = 100L // milliseconds
 
     private val sqliteUpdateHook = SQLiteUpdateHook { _, _, tableName, _ ->
@@ -74,36 +75,81 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
         resetBatchTimer()
     }
 
+    override fun invalidate() {
+        super.invalidate()
+        // Clean up resources when module is destroyed
+        cleanupCDC()
+    }
+
+    private fun cleanupCDC() {
+        synchronized(this) {
+            // Safely cancel timer task
+            try {
+                batchTimerTask?.cancel()
+                batchTimerTask = null
+            } catch (e: Exception) {
+                android.util.Log.w("WatermelonDB", "Error canceling timer task: ${e.message}")
+            }
+
+            // Safely cleanup timer
+            try {
+                batchTimer?.cancel()
+                batchTimer?.purge()
+                batchTimer = null
+            } catch (e: Exception) {
+                android.util.Log.w("WatermelonDB", "Error cleaning up timer: ${e.message}")
+            }
+
+            affectedTables.clear()
+        }
+    }
+
     private fun bufferTableName(tableName: String) {
         // Add the table name to the set of affected tables (duplicates will be ignored)
-        affectedTables.add(tableName)
+        // Thread-safe access to shared mutable state
+        synchronized(this) {
+            affectedTables.add(tableName)
+        }
     }
 
     private fun resetBatchTimer() {
-        batchTimer?.cancel() // Cancel the existing timer if it's running
+        // Thread-safe timer management - reuse single Timer to avoid thread leaks
+        synchronized(this) {
+            // Cancel existing task
+            batchTimerTask?.cancel()
 
-        batchTimer = Timer().apply {
-            schedule(object : TimerTask() {
+            // Create Timer if it doesn't exist (lazy initialization)
+            if (batchTimer == null) {
+                batchTimer = Timer("WatermelonDB-CDC-Timer", true) // daemon thread
+            }
+
+            // Schedule new task
+            batchTimerTask = object : TimerTask() {
                 override fun run() {
                     emitAffectedTables()
                 }
-            }, batchInterval)
+            }
+            batchTimer?.schedule(batchTimerTask, batchInterval)
         }
     }
 
     private fun emitAffectedTables() {
-        if (affectedTables.isNotEmpty()) {
-            val params = Arguments.createArray().apply {
-                affectedTables.forEach { pushString(it) }
+        // Copy state under lock to avoid holding lock during event emission
+        val tables: List<String>
+        synchronized(this) {
+            if (affectedTables.isEmpty()) {
+                return
             }
-
-            sendEvent(reactContext, "SQLITE_UPDATE_HOOK", params)
-
-            affectedTables.clear() // Clear the buffer after emitting
+            tables = affectedTables.toList()
+            affectedTables.clear()
+            batchTimerTask = null
         }
 
-        batchTimer?.cancel()
-        batchTimer = null
+        val params = Arguments.createArray().apply {
+            tables.forEach { pushString(it) }
+        }
+
+        sendEvent(reactContext, "SQLITE_UPDATE_HOOK", params)
     }
 
     private fun sendEvent(reactContext: ReactContext, eventName: String, params: WritableArray?) {
@@ -275,6 +321,15 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     fun enableNativeCDC(tag: ConnectionTag, promise: Promise) =
         withDriver(tag, promise) { it.setUpdateHook(sqliteUpdateHook) }
+
+    @ReactMethod
+    fun disableNativeCDC(tag: ConnectionTag, promise: Promise) {
+        // Clean up the batch timer and affected tables FIRST to prevent race conditions
+        // This must happen before disabling the hook to ensure no events fire during cleanup
+        cleanupCDC()
+
+        withDriver(tag, promise) { it.disableUpdateHook() }
+    }
 
     @ReactMethod
     fun setCDCEnabled(tag: ConnectionTag, enabled: Boolean, promise: Promise) =

@@ -36,6 +36,12 @@ public class Database {
         }
         open()
     }
+
+    deinit {
+        // CRITICAL: Clean up SQLite update hook before deallocation
+        // If we don't do this, the hook callback can fire on a dangling pointer causing crashes
+        disableUpdateHook()
+    }
     
     private func open() {
         guard writer.open() else {
@@ -127,6 +133,13 @@ public class Database {
     }
 
     func disableUpdateHook() {
+        // Guard against invalid database state
+        guard writer.open else {
+            consoleLog("Warning: Cannot disable update hook - database is not open")
+            self.updateHookCallback = nil
+            return
+        }
+
         let sqliteHandle = OpaquePointer(writer.sqliteHandle)
         // Per SQLite docs: pass NULL to disable the hook
         sqlite3_update_hook(sqliteHandle, nil, nil)

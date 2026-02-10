@@ -84,6 +84,9 @@ describe('database.enableNativeCDC()', () => {
     database.adapter.underlyingAdapter.enableNativeCDC = jest.fn((callback) => {
       callback({ value: undefined })
     })
+    database.adapter.underlyingAdapter.disableNativeCDC = jest.fn((callback) => {
+      callback({ value: undefined })
+    })
 
     const subscriber = jest.fn()
     database.experimentalSubscribe(['mock_tasks'], subscriber)
@@ -94,7 +97,7 @@ describe('database.enableNativeCDC()', () => {
     mockEventEmitter.emit('SQLITE_UPDATE_HOOK', ['mock_tasks'])
     expect(subscriber).toHaveBeenCalledTimes(1)
 
-    database.disableNativeCDC()
+    await database.disableNativeCDC()
 
     // Emit should no longer trigger notify
     mockEventEmitter.emit('SQLITE_UPDATE_HOOK', ['mock_tasks'])
@@ -122,6 +125,9 @@ describe('database.enableNativeCDC()', () => {
     database.adapter.underlyingAdapter.enableNativeCDC = jest.fn((callback) => {
       callback({ value: undefined })
     })
+    database.adapter.underlyingAdapter.disableNativeCDC = jest.fn((callback) => {
+      callback({ value: undefined })
+    })
     database.adapter.underlyingAdapter.setCDCEnabled = jest.fn((enabled, callback) => {
       callback({ value: undefined })
     })
@@ -131,7 +137,7 @@ describe('database.enableNativeCDC()', () => {
     // Clear mock to verify disableNativeCDC call
     database.adapter.underlyingAdapter.setCDCEnabled.mockClear()
 
-    database.disableNativeCDC()
+    await database.disableNativeCDC()
 
     expect(database.adapter.underlyingAdapter.setCDCEnabled).toHaveBeenCalledWith(false, expect.any(Function))
   })
@@ -201,6 +207,9 @@ describe('database.enableNativeCDC()', () => {
     database.adapter.underlyingAdapter.enableNativeCDC = jest.fn((callback) => {
       callback({ value: undefined })
     })
+    database.adapter.underlyingAdapter.disableNativeCDC = jest.fn((callback) => {
+      callback({ value: undefined })
+    })
 
     await database.enableNativeCDC()
 
@@ -214,7 +223,7 @@ describe('database.enableNativeCDC()', () => {
     expect(subscriber).not.toHaveBeenCalled()
 
     // Disable CDC
-    database.disableNativeCDC()
+    await database.disableNativeCDC()
 
     // Now batch() should call notify again
     await database.action(async () => {

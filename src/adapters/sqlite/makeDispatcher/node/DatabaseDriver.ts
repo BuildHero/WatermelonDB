@@ -351,6 +351,10 @@ class DatabaseDriver {
     this.database.setUpdateHook(updateHook)
   }
 
+  disableUpdateHook = () => {
+    this.database.disableUpdateHook()
+  }
+
   localStorageSchema: string = `
       create table local_storage (
       key varchar(16) primary key not null,

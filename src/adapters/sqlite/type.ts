@@ -83,6 +83,7 @@ export type NativeDispatcher = {
   copyTables: (tables: any, srcDB: any, callback: ResultCallback<undefined>) => void
   execSqlQuery: (arg1: SQL, arg2: SQLiteArg[], arg3: ResultCallback<DirtyQueryResult>) => void
   enableNativeCDC: (arg1: ResultCallback<undefined>) => void
+  disableNativeCDC: (arg1: ResultCallback<undefined>) => void
   setCDCEnabled?: (enabled: boolean, callback: ResultCallback<undefined>) => void
   obliterateDatabase: (arg1: ResultCallback<undefined>) => void
 }
@@ -119,6 +120,7 @@ export type NativeBridgeType = {
   setLocal: (arg1: ConnectionTag, arg2: string, arg3: string) => Promise<void>
   removeLocal: (arg1: ConnectionTag, arg2: string) => Promise<void>
   enableNativeCDC: (arg1: ConnectionTag) => Promise<void>
+  disableNativeCDC: (arg1: ConnectionTag) => Promise<void>
   execSqlQuery: (arg1: ConnectionTag, arg2: SQL, arg3: SQLiteArg[]) => Promise<DirtyQueryResult>
   // Synchronous methods
   initializeSynchronous?: (

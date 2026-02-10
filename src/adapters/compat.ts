@@ -91,6 +91,10 @@ export default class DatabaseAdapterCompat {
     return toPromise(callback => this.underlyingAdapter.enableNativeCDC(callback))
   }
 
+  disableNativeCDC(): Promise<void> {
+    return toPromise(callback => this.underlyingAdapter.disableNativeCDC(callback))
+  }
+
   unsafeSqlQuery: ((tableName: TableName<any>, sql: string) => Promise<CachedQueryResult>) | null | undefined;
 
   // untyped - test-only code

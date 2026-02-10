@@ -286,6 +286,8 @@ class DatabaseDriver(context: Context, dbName: String) {
 
     fun setUpdateHook(updateHook: SQLiteUpdateHook?) = database.setUpdateHook(updateHook)
 
+    fun disableUpdateHook() = database.setUpdateHook(null)
+
     fun close() = database.close()
 
     fun markAsCached(table: TableName, id: RecordID) {

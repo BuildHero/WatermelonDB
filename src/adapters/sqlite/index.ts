@@ -368,6 +368,10 @@ export default class SQLiteAdapter implements DatabaseAdapter, SQLDatabaseAdapte
     this._dispatcher.enableNativeCDC(callback)
   }
 
+  disableNativeCDC(callback: ResultCallback<undefined>): void {
+    this._dispatcher.disableNativeCDC(callback)
+  }
+
   setCDCEnabled(enabled: boolean, callback: ResultCallback<undefined>): void {
     // Tell native adapter to skip cache optimization when CDC is enabled.
     // This ensures queries return full records (not just IDs) for records

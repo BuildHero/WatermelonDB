@@ -124,7 +124,13 @@ export default class Database {
     this._nativeCDCEnabled = !!this._cdcSubscription
   }
 
-  disableNativeCDC = () => {
+  disableNativeCDC = async () => {
+    // Disable the native SQLite update hook
+    if (this.adapter.disableNativeCDC) {
+      await this.adapter.disableNativeCDC()
+    }
+
+    // Remove the event listener subscription
     if (this._cdcSubscription) {
       this._cdcSubscription.remove()
       this._cdcSubscription = null
@@ -133,7 +139,7 @@ export default class Database {
     // Re-enable cache optimization
     const underlyingAdapter = this.adapter.underlyingAdapter
     if (underlyingAdapter && typeof underlyingAdapter.setCDCEnabled === 'function') {
-      underlyingAdapter.setCDCEnabled(false, () => {})
+      await toPromise(callback => underlyingAdapter.setCDCEnabled!(false, callback))
     }
 
     this._nativeCDCEnabled = false
@@ -353,8 +359,10 @@ export default class Database {
       // First kill actions, to ensure no more traffic to adapter happens
       this._actionQueue._abortPendingActions()
 
-      // Clean up CDC subscription
-      this.disableNativeCDC()
+      // Clean up CDC subscription only if it was enabled
+      if (this._nativeCDCEnabled) {
+        await this.disableNativeCDC()
+      }
 
       // Kill ability to call adapter methods during reset (to catch bugs if someone does this)
       const { adapter } = this

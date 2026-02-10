@@ -193,6 +193,10 @@ export default class LokiJSAdapter implements DatabaseAdapter {
     throw new Error('enableNativeCDC not implemented in LOKIJS')
   }
 
+  disableNativeCDC(_callback: ResultCallback<undefined>): void {
+    throw new Error('disableNativeCDC not implemented in LOKIJS')
+  }
+
   execSqlQuery(
     _sql: string,
     _params: any[],

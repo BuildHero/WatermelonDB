@@ -361,6 +361,9 @@ class DatabaseBridge {
       driver.setUpdateHook(this.sqliteUpdateHook.bind(this)),
     )
 
+  disableNativeCDC = (tag: number, resolve: (arg1?: any) => void, reject: (arg1: string) => void) =>
+    this.withDriver(tag, resolve, reject, 'disableNativeCDC', (driver) => driver.disableUpdateHook())
+
   execSqlQuerySynchronous = (tag: number, query: string, params: any[]): any =>
     this.withDriverSynchronous(tag, 'execSqlQuerySynchronous', (driver) =>
       driver.execSqlQuery(query, params),
@@ -424,6 +427,9 @@ class DatabaseBridge {
     this.withDriverSynchronous(tag, 'enableNativeCDC', (driver) =>
       driver.setUpdateHook(this.sqliteUpdateHook.bind(this)),
     )
+
+  disableNativeCDCSynchronous = (tag: number) =>
+    this.withDriverSynchronous(tag, 'disableNativeCDC', (driver) => driver.disableUpdateHook())
 
   setCDCEnabled = (
     tag: number,

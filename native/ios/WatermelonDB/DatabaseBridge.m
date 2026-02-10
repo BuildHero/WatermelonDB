@@ -98,5 +98,12 @@ RCT_EXTERN_METHOD(enableNativeCDC:(nonnull NSNumber *)connectionTag
 
 RCT_EXTERN__BLOCKING_SYNCHRONOUS_METHOD(WMELON_CONCAT(enableNativeCDC, Synchronous):(nonnull NSNumber *)connectionTag)
 
+RCT_EXTERN_METHOD(disableNativeCDC:(nonnull NSNumber *)connectionTag
+  resolve:(RCTPromiseResolveBlock)resolve
+  reject:(RCTPromiseRejectBlock)reject
+)
+
+RCT_EXTERN__BLOCKING_SYNCHRONOUS_METHOD(WMELON_CONCAT(disableNativeCDC, Synchronous):(nonnull NSNumber *)connectionTag)
+
 
 @end

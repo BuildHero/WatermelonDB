@@ -79,6 +79,7 @@ const dispatcherMethods = [
   'removeLocal',
   'execSqlQuery',
   'enableNativeCDC',
+  'disableNativeCDC',
   'setCDCEnabled',
 ]
 

@@ -82,6 +82,10 @@ class DatabaseDriver {
     func setUpdateHook(withCallback callback: @escaping (UnsafeMutableRawPointer?, Int32, UnsafePointer<Int8>?, UnsafePointer<Int8>?, Int64) -> Void) {
         return database.setUpdateHook(withCallback: callback)
     }
+
+    func disableUpdateHook() {
+        return database.disableUpdateHook()
+    }
     
     enum Operation {
         case copy(table: Database.TableName, attachPath: String)
