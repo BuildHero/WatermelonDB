@@ -284,7 +284,7 @@ class DatabaseDriver(context: Context, dbName: String) {
         setUpSchema(schema)
     }
 
-    fun setUpdateHook(updateHook: SQLiteUpdateHook) = database.setUpdateHook(updateHook)
+    fun setUpdateHook(updateHook: SQLiteUpdateHook?) = database.setUpdateHook(updateHook)
 
     fun close() = database.close()
 

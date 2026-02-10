@@ -113,17 +113,24 @@ public class Database {
     
     func setUpdateHook(withCallback callback: @escaping (UnsafeMutableRawPointer?, Int32, UnsafePointer<Int8>?, UnsafePointer<Int8>?, Int64) -> Void) {
         self.updateHookCallback = callback
-        
+
         let sqliteHandle = OpaquePointer(writer.sqliteHandle)
         let userData: UnsafeMutableRawPointer? = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
-        
+
         sqlite3_update_hook(sqliteHandle, { (userData, opcode, dbName, tableName, rowId) -> Void in
             guard let userData = userData else { return }
             let handler = Unmanaged<Database>.fromOpaque(userData).takeUnretainedValue()
-            
+
             // Call the instance's callback method
             handler.updateHookCallback?(userData, opcode, dbName, tableName, rowId)
         }, userData)
+    }
+
+    func disableUpdateHook() {
+        let sqliteHandle = OpaquePointer(writer.sqliteHandle)
+        // Per SQLite docs: pass NULL to disable the hook
+        sqlite3_update_hook(sqliteHandle, nil, nil)
+        self.updateHookCallback = nil
     }
     
     func queryRaw(_ query: SQL, _ args: QueryArgs = []) throws -> AnyIterator<FMResultSet> {
@@ -242,6 +249,14 @@ public class Database {
     private func setWalMode(on db: FMDatabase) throws {
         let result = try db.executeQuery("pragma journal_mode=wal", values: [])
         result.close()
+
+        // Only set performance pragmas on writer connection
+        if db === writer {
+            // Critical performance settings for WAL mode
+            try db.executeQuery("pragma synchronous=NORMAL", values: []).close()  // FULL is too slow, NORMAL is safe with WAL
+            try db.executeQuery("pragma temp_store=MEMORY", values: []).close()   // Faster temp operations
+            try db.executeQuery("pragma mmap_size=268435456", values: []).close() // 256MB memory-mapped I/O
+        }
     }
     
     private func setQueryOnly(on db: FMDatabase) throws {

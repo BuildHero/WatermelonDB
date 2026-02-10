@@ -22,6 +22,10 @@ class Database(private val name: String, private val context: Context) {
     private val writerDb: SQLiteDatabase by lazy {
         SQLiteDatabase.openOrCreateDatabase(databasePath, null).also {
             runPragma(it, "PRAGMA journal_mode=WAL")
+            // Critical performance settings for WAL mode
+            runPragma(it, "PRAGMA synchronous=NORMAL")  // FULL is too slow, NORMAL is safe with WAL
+            runPragma(it, "PRAGMA temp_store=MEMORY")   // Faster temp operations
+            runPragma(it, "PRAGMA mmap_size=268435456") // 256MB memory-mapped I/O
         }
     }
 
@@ -226,7 +230,7 @@ class Database(private val name: String, private val context: Context) {
         }
     }
 
-    fun setUpdateHook(updateHook: SQLiteUpdateHook) = writerDb.setUpdateHook(updateHook)
+    fun setUpdateHook(updateHook: SQLiteUpdateHook?) = writerDb.setUpdateHook(updateHook)
 
     private fun resolveDatabasePath(): String {
         // TODO: This SUCKS. Seems like Android doesn't like sqlite `?mode=memory&cache=shared` mode. To avoid random breakages, save the file to /tmp, but this is slow.
