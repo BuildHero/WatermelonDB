@@ -955,6 +955,32 @@ void test_rapid_cancel_and_restart() {
     watermelondb::platform::setHttpHandler(nullptr);
 }
 
+void test_shutdown_calls_completion() {
+    std::cout << "[TEST] shutdown calls completion instead of silently dropping\n";
+
+    auto engine = std::make_shared<watermelondb::SyncEngine>();
+    engine->configure("{\"pullEndpointUrl\":\"http://test/sync\"}");
+
+    // Shutdown the engine
+    engine->shutdown();
+
+    // Now call startWithCompletion — previously this silently dropped the completion
+    bool completionCalled = false;
+    bool completionSuccess = true;
+    std::string completionError;
+
+    engine->startWithCompletion("after_shutdown",
+        [&](bool s, const std::string& err) {
+            completionCalled = true;
+            completionSuccess = s;
+            completionError = err;
+        });
+
+    expectTrue(completionCalled, "completion must be called even when engine is shutdown");
+    expectTrue(!completionSuccess, "completion should report failure on shutdown");
+    expectTrue(completionError == "sync_engine_shutdown", "error should indicate shutdown");
+}
+
 } // namespace
 
 int main() {
@@ -980,6 +1006,7 @@ int main() {
     test_foreground_overrides_background_sync();
     test_cancel_during_http_allows_new_sync();
     test_rapid_cancel_and_restart();
+    test_shutdown_calls_completion();
 
     if (gFailures > 0) {
         std::cerr << gFailures << " test(s) failed\n";

@@ -366,39 +366,49 @@ void SyncEngine::start(const std::string& reason) {
 
 void SyncEngine::startWithCompletion(const std::string& reason, CompletionCallback completion) {
     bool shouldStart = false;
+    bool isShutdown = false;
     int64_t syncId = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (shutdown_) {
-            return;
-        }
-        if (syncInFlight_) {
+            isShutdown = true;
+        } else if (syncInFlight_) {
             pendingReason_ = reason;
             pendingCompletionCallback_ = std::move(completion);
             emitLocked(std::string("{\"type\":\"sync_queued\",\"reason\":\"") + json_utils::escapeJsonString(reason) + "\"}");
             return;
+        } else {
+            syncInFlight_ = true;
+            retryScheduled_ = false;
+            retryCount_ = 0;
+            authRetryCount_ = 0; // Reset auth retry count on new sync
+            currentReason_ = reason;
+            if (completion) {
+                completionCallback_ = std::move(completion);
+            }
+            const bool resumeFromAuth = (stateJson_ == "{\"state\":\"auth_required\"}") && !currentPullUrl_.empty();
+            if (!resumeFromAuth) {
+                currentRequestId_ = platform::generateRequestId();
+                currentPullUrl_ = pullEndpointUrl_;
+            } else if (currentRequestId_.empty()) {
+                currentRequestId_ = platform::generateRequestId();
+            }
+            stateJson_ = "{\"state\":\"sync_requested\"}";
+            emitLocked("{\"type\":\"state\",\"state\":\"sync_requested\"}");
+            emitLocked(std::string("{\"type\":\"sync_start\",\"reason\":\"") + json_utils::escapeJsonString(reason) + "\"}");
+            syncId_++;
+            syncId = syncId_;
+            shouldStart = true;
         }
-        syncInFlight_ = true;
-        retryScheduled_ = false;
-        retryCount_ = 0;
-        authRetryCount_ = 0; // Reset auth retry count on new sync
-        currentReason_ = reason;
+    }
+    if (isShutdown) {
+        // Call completion outside the lock to avoid potential deadlock.
+        // Previously this silently dropped the completion, leaving callers
+        // (e.g., background sync BGTask/WorkManager) hanging indefinitely.
         if (completion) {
-            completionCallback_ = std::move(completion);
+            completion(false, "sync_engine_shutdown");
         }
-        const bool resumeFromAuth = (stateJson_ == "{\"state\":\"auth_required\"}") && !currentPullUrl_.empty();
-        if (!resumeFromAuth) {
-            currentRequestId_ = platform::generateRequestId();
-            currentPullUrl_ = pullEndpointUrl_;
-        } else if (currentRequestId_.empty()) {
-            currentRequestId_ = platform::generateRequestId();
-        }
-        stateJson_ = "{\"state\":\"sync_requested\"}";
-        emitLocked("{\"type\":\"state\",\"state\":\"sync_requested\"}");
-        emitLocked(std::string("{\"type\":\"sync_start\",\"reason\":\"") + json_utils::escapeJsonString(reason) + "\"}");
-        syncId_++;
-        syncId = syncId_;
-        shouldStart = true;
+        return;
     }
     if (shouldStart) {
         dispatchRequest(syncId, false);

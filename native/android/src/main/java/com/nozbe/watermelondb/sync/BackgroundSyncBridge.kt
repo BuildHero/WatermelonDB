@@ -119,6 +119,12 @@ object BackgroundSyncBridge {
         callback: NativeSyncCallback
     )
 
+    /**
+     * JNI method: cancels any in-flight background sync via SyncEngine::cancelSync().
+     * Called from the foreground lifecycle observer.
+     */
+    private external fun nativeCancelBackgroundSync(enginePtr: Long)
+
     init {
         try {
             System.loadLibrary("watermelon-jsi-android-bridge")

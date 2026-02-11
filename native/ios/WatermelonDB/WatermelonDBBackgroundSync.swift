@@ -110,10 +110,31 @@ import BackgroundTasks
     private static func handleBackgroundTask(_ task: BGTask) {
         NSLog("[WatermelonDB][BackgroundSync] Background task started: %@", task.identifier)
 
-        // Set expiration handler to avoid OS penalty
+        // Guard against double-completion: both the expiration handler and performSync
+        // completion can fire (e.g., expiration triggers cancelSync which fires the
+        // SyncEngine completion). Calling setTaskCompleted twice is undefined behavior.
+        let completionLock = NSLock()
+        var taskCompleted = false
+
+        let completeTask: (Bool) -> Void = { success in
+            completionLock.lock()
+            defer { completionLock.unlock() }
+            guard !taskCompleted else { return }
+            taskCompleted = true
+            task.setTaskCompleted(success: success)
+
+            // Re-schedule if still enabled
+            if _enabled {
+                schedulePeriodicSync()
+            }
+        }
+
+        // Set expiration handler: cancel the native sync to free resources,
+        // then complete the task as failure to avoid OS penalty.
         task.expirationHandler = {
-            NSLog("[WatermelonDB][BackgroundSync] Background task expired")
-            task.setTaskCompleted(success: false)
+            NSLog("[WatermelonDB][BackgroundSync] Background task expired — cancelling sync")
+            BackgroundSyncBridge.cancelSync()
+            completeTask(false)
         }
 
         // Perform pull-only sync via the ObjC++ bridge
@@ -123,12 +144,7 @@ import BackgroundTasks
             } else {
                 NSLog("[WatermelonDB][BackgroundSync] Sync completed successfully")
             }
-            task.setTaskCompleted(success: success)
-
-            // Re-schedule if still enabled
-            if _enabled {
-                schedulePeriodicSync()
-            }
+            completeTask(success)
         }
     }
 

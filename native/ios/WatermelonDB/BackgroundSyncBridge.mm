@@ -96,4 +96,15 @@ static std::shared_ptr<watermelondb::SyncEngine> sSyncEngine;
     );
 }
 
++ (void)cancelSync {
+    std::shared_ptr<watermelondb::SyncEngine> engine;
+    {
+        std::lock_guard<std::mutex> lock(sBridgeMutex);
+        engine = sSyncEngine;
+    }
+    if (engine) {
+        engine->cancelSync();
+    }
+}
+
 @end
