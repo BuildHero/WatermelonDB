@@ -15,6 +15,10 @@ const makeModule = () => {
     syncSocketAuthenticate: jest.fn(),
     syncSocketDisconnect: jest.fn(),
     importRemoteSlice: jest.fn(() => Promise.resolve()),
+    cancelSync: jest.fn(),
+    configureBackgroundSync: jest.fn(),
+    enableBackgroundSync: jest.fn(),
+    disableBackgroundSync: jest.fn(),
   }
 
   jest.doMock('./nativeSync', () => nativeSync)
@@ -309,5 +313,96 @@ describe('SyncManager', () => {
 
     nativeSync.syncDatabaseAsync.mockRejectedValue(new Error('boom'))
     await expect(SyncManager.syncDatabaseAsync('manual')).rejects.toThrow('boom')
+  })
+
+  it('cancelSync calls native cancelSync', () => {
+    const { SyncManager, nativeSync } = makeModule()
+    SyncManager.configure({
+      adapter: { _tag: 1 },
+      pushChangesProvider: jest.fn(),
+      pullChangesUrl: 'https://example.com/pull',
+    })
+
+    SyncManager.cancelSync()
+    expect(nativeSync.cancelSync).toHaveBeenCalledWith()
+  })
+
+  it('throws if cancelSync is called before configure', () => {
+    const { SyncManager } = makeModule()
+    expect(() => SyncManager.cancelSync()).toThrow(
+      '[WatermelonDB][Sync] SyncManager.configure(...) must be called before cancelSync.',
+    )
+  })
+
+  it('enableBackgroundSync calls native enableBackgroundSync', () => {
+    const { SyncManager, nativeSync } = makeModule()
+    SyncManager.configure({
+      adapter: { _tag: 1 },
+      pushChangesProvider: jest.fn(),
+      pullChangesUrl: 'https://example.com/pull',
+    })
+
+    SyncManager.enableBackgroundSync()
+    expect(nativeSync.enableBackgroundSync).toHaveBeenCalledWith()
+  })
+
+  it('disableBackgroundSync calls native disableBackgroundSync', () => {
+    const { SyncManager, nativeSync } = makeModule()
+    SyncManager.configure({
+      adapter: { _tag: 1 },
+      pushChangesProvider: jest.fn(),
+      pullChangesUrl: 'https://example.com/pull',
+    })
+
+    SyncManager.disableBackgroundSync()
+    expect(nativeSync.disableBackgroundSync).toHaveBeenCalledWith()
+  })
+
+  it('configures background sync when backgroundSyncTaskId is provided', () => {
+    const { SyncManager, nativeSync } = makeModule()
+    SyncManager.configure({
+      adapter: { _tag: 1 },
+      pushChangesProvider: jest.fn(),
+      pullChangesUrl: 'https://example.com/pull',
+      backgroundSyncTaskId: 'com.test.sync',
+      backgroundSyncMinIntervalMinutes: 30,
+      backgroundSyncRequiresNetwork: false,
+      backgroundSyncMutationQueueTable: 'mutations',
+    })
+
+    expect(nativeSync.configureBackgroundSync).toHaveBeenCalledWith({
+      taskId: 'com.test.sync',
+      intervalMinutes: 30,
+      requiresNetwork: false,
+      mutationQueueTable: 'mutations',
+    })
+  })
+
+  it('uses defaults for background sync config', () => {
+    const { SyncManager, nativeSync } = makeModule()
+    SyncManager.configure({
+      adapter: { _tag: 1 },
+      pushChangesProvider: jest.fn(),
+      pullChangesUrl: 'https://example.com/pull',
+      backgroundSyncTaskId: 'com.test.sync',
+    })
+
+    expect(nativeSync.configureBackgroundSync).toHaveBeenCalledWith({
+      taskId: 'com.test.sync',
+      intervalMinutes: 15,
+      requiresNetwork: true,
+      mutationQueueTable: null,
+    })
+  })
+
+  it('does not configure background sync without backgroundSyncTaskId', () => {
+    const { SyncManager, nativeSync } = makeModule()
+    SyncManager.configure({
+      adapter: { _tag: 1 },
+      pushChangesProvider: jest.fn(),
+      pullChangesUrl: 'https://example.com/pull',
+    })
+
+    expect(nativeSync.configureBackgroundSync).not.toHaveBeenCalled()
   })
 })

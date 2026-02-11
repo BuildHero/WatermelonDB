@@ -18,6 +18,10 @@
 
 namespace facebook::react {
 
+// Static SyncEngine reference for background sync (survives module destruction)
+static std::mutex gBackgroundSyncMutex;
+static std::shared_ptr<watermelondb::SyncEngine> gBackgroundSyncEngine;
+
 namespace {
 std::mutex gImportMutex;
 std::unordered_map<void*, std::shared_ptr<watermelondb::SliceImportEngine>> gActiveImports;
@@ -82,6 +86,105 @@ Java_com_nozbe_watermelondb_sync_SyncSocketManager_nativeOnCdc(
     jclass
 ) {
     emitSocketEvent("{\"status\":\"cdc\"}");
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_nozbe_watermelondb_sync_BackgroundSyncBridge_nativePerformBackgroundSync(
+    JNIEnv* env,
+    jclass,
+    jlong enginePtr,
+    jobject callback
+) {
+    if (!callback) {
+        return;
+    }
+
+    // Use the static shared_ptr directly instead of the raw pointer for safety.
+    // The pointer passed from Kotlin points to gBackgroundSyncEngine, but accessing
+    // the static directly avoids any risk of stale pointers.
+    std::shared_ptr<watermelondb::SyncEngine> engine;
+    {
+        std::lock_guard<std::mutex> lock(gBackgroundSyncMutex);
+        engine = gBackgroundSyncEngine;
+    }
+    if (!engine) {
+        jclass cbClass = env->GetObjectClass(callback);
+        jmethodID onComplete = env->GetMethodID(cbClass, "onComplete", "(ZLjava/lang/String;)V");
+        if (onComplete) {
+            jstring error = env->NewStringUTF("SyncEngine is null");
+            env->CallVoidMethod(callback, onComplete, JNI_FALSE, error);
+            env->DeleteLocalRef(error);
+        }
+        env->DeleteLocalRef(cbClass);
+        return;
+    }
+
+    // Save existing push callback, set no-op for pull-only background sync.
+    // Safety: The foreground observer (ProcessLifecycleOwner ON_START in BackgroundSyncBridge.kt)
+    // calls cancelSync() which fires this completion synchronously, restoring the push
+    // callback before any foreground sync can start. SyncEngine queuing also prevents
+    // concurrent runs.
+    auto savedPushCallback = engine->getPushChangesCallback();
+    engine->setPushChangesCallback([](std::function<void(bool, const std::string&)> pushCompletion) {
+        if (pushCompletion) {
+            pushCompletion(true, "");
+        }
+    });
+
+    // Get a global ref to the callback so it survives across threads
+    JavaVM* jvm = nullptr;
+    env->GetJavaVM(&jvm);
+    jobject globalCallback = env->NewGlobalRef(callback);
+
+    // Start pull-only sync. The SyncEngine will use its normal auth flow:
+    // if authToken_ is empty it calls authTokenRequestCallback_ which reaches
+    // the JS auth provider (works when JS runtime is still alive in background).
+    engine->startWithCompletion("background_task",
+        [jvm, globalCallback, engine, savedPushCallback](bool success, const std::string& errorMessage) {
+            // Restore the original push callback so foreground sync can push
+            if (savedPushCallback) {
+                engine->setPushChangesCallback(savedPushCallback);
+            }
+            JNIEnv* cbEnv = nullptr;
+            bool attached = false;
+            if (jvm->GetEnv(reinterpret_cast<void**>(&cbEnv), JNI_VERSION_1_6) != JNI_OK) {
+                jvm->AttachCurrentThread(&cbEnv, nullptr);
+                attached = true;
+            }
+            if (cbEnv) {
+                jclass cbClass = cbEnv->GetObjectClass(globalCallback);
+                jmethodID onComplete = cbEnv->GetMethodID(cbClass, "onComplete", "(ZLjava/lang/String;)V");
+                if (onComplete) {
+                    jstring error = errorMessage.empty() ? nullptr : cbEnv->NewStringUTF(errorMessage.c_str());
+                    cbEnv->CallVoidMethod(globalCallback, onComplete, success ? JNI_TRUE : JNI_FALSE, error);
+                    if (error) {
+                        cbEnv->DeleteLocalRef(error);
+                    }
+                }
+                cbEnv->DeleteLocalRef(cbClass);
+                cbEnv->DeleteGlobalRef(globalCallback);
+                if (attached) {
+                    jvm->DetachCurrentThread();
+                }
+            }
+        }
+    );
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_nozbe_watermelondb_sync_BackgroundSyncBridge_nativeCancelBackgroundSync(
+    JNIEnv*,
+    jclass,
+    jlong enginePtr
+) {
+    std::shared_ptr<watermelondb::SyncEngine> engine;
+    {
+        std::lock_guard<std::mutex> lock(gBackgroundSyncMutex);
+        engine = gBackgroundSyncEngine;
+    }
+    if (engine) {
+        engine->cancelSync();
+    }
 }
 
 static sqlite3* acquireSqlite(jobject bridge, jint tag, std::string& errorMessage) {
@@ -493,8 +596,9 @@ void JSIAndroidBridgeModule::setAuthToken(jsi::Runtime &rt, jsi::String token) {
         const std::lock_guard<std::mutex> lock(state->mutex);
         state->runtime = &rt;
     }
+    std::string tokenUtf8 = token.utf8(rt);
     if (syncEngine_) {
-        syncEngine_->setAuthToken(token.utf8(rt));
+        syncEngine_->setAuthToken(tokenUtf8);
     }
 }
 
@@ -597,6 +701,143 @@ void JSIAndroidBridgeModule::syncSocketDisconnect(jsi::Runtime &rt) {
         return;
     }
     jmethodID method = env->GetStaticMethodID(cls, "disconnect", "()V");
+    if (!method) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(cls);
+        return;
+    }
+    env->CallStaticVoidMethod(cls, method);
+    env->DeleteLocalRef(cls);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+}
+
+void JSIAndroidBridgeModule::cancelSync(jsi::Runtime &rt) {
+    if (syncEngine_) {
+        syncEngine_->cancelSync();
+    }
+}
+
+void JSIAndroidBridgeModule::configureBackgroundSync(jsi::Runtime &rt, jsi::String configJson) {
+    JNIEnv* env = getEnv();
+
+    // Configure scheduler with JSON config
+    jclass schedulerCls = env->FindClass("com/nozbe/watermelondb/sync/BackgroundSyncScheduler");
+    if (schedulerCls) {
+        jmethodID configMethod = env->GetStaticMethodID(schedulerCls, "configure", "(Ljava/lang/String;)V");
+        if (configMethod) {
+            std::string config = configJson.utf8(rt);
+            jstring jconfig = env->NewStringUTF(config.c_str());
+            env->CallStaticVoidMethod(schedulerCls, configMethod, jconfig);
+            env->DeleteLocalRef(jconfig);
+        } else {
+            env->ExceptionClear();
+        }
+        env->DeleteLocalRef(schedulerCls);
+    } else {
+        env->ExceptionClear();
+    }
+
+    // Copy SyncEngine shared_ptr into a static so it survives module destruction.
+    // This mirrors the iOS approach (sSyncEngine in BackgroundSyncBridge.mm).
+    if (syncEngine_) {
+        {
+            std::lock_guard<std::mutex> lock(gBackgroundSyncMutex);
+            gBackgroundSyncEngine = syncEngine_;
+        }
+        jclass bridgeCls = env->FindClass("com/nozbe/watermelondb/sync/BackgroundSyncBridge");
+        if (bridgeCls) {
+            jmethodID bridgeConfigMethod = env->GetStaticMethodID(bridgeCls, "configure", "(J)V");
+            if (bridgeConfigMethod) {
+                jlong ptr = reinterpret_cast<jlong>(&gBackgroundSyncEngine);
+                env->CallStaticVoidMethod(bridgeCls, bridgeConfigMethod, ptr);
+            } else {
+                env->ExceptionClear();
+            }
+            env->DeleteLocalRef(bridgeCls);
+        } else {
+            env->ExceptionClear();
+        }
+    }
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+}
+
+void JSIAndroidBridgeModule::enableBackgroundSync(jsi::Runtime &rt) {
+    JNIEnv* env = getEnv();
+
+    // Configure DatabaseBridge with mutation queue table from scheduler config
+    jclass schedulerCls = env->FindClass("com/nozbe/watermelondb/sync/BackgroundSyncScheduler");
+    if (schedulerCls) {
+        jmethodID getTableMethod = env->GetStaticMethodID(schedulerCls, "getMutationQueueTable", "()Ljava/lang/String;");
+        if (getTableMethod) {
+            jstring jtable = (jstring)env->CallStaticObjectMethod(schedulerCls, getTableMethod);
+            // Configure DatabaseBridge if we have a bridge instance
+            jobject bridge = getDatabaseBridge();
+            if (bridge) {
+                jclass bridgeCls = env->GetObjectClass(bridge);
+                jmethodID configMethod = env->GetMethodID(bridgeCls, "configureBackgroundSync", "(Ljava/lang/String;)V");
+                if (configMethod) {
+                    env->CallVoidMethod(bridge, configMethod, jtable);
+                } else {
+                    env->ExceptionClear();
+                }
+                env->DeleteLocalRef(bridgeCls);
+            }
+            if (jtable) env->DeleteLocalRef(jtable);
+        } else {
+            env->ExceptionClear();
+        }
+        env->DeleteLocalRef(schedulerCls);
+    } else {
+        env->ExceptionClear();
+    }
+
+    // Schedule periodic sync
+    jclass cls = env->FindClass("com/nozbe/watermelondb/sync/BackgroundSyncScheduler");
+    if (!cls) {
+        env->ExceptionClear();
+        return;
+    }
+    jmethodID method = env->GetStaticMethodID(cls, "enablePeriodicSync", "()V");
+    if (!method) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(cls);
+        return;
+    }
+    env->CallStaticVoidMethod(cls, method);
+    env->DeleteLocalRef(cls);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+}
+
+void JSIAndroidBridgeModule::disableBackgroundSync(jsi::Runtime &rt) {
+    JNIEnv* env = getEnv();
+
+    // Reset DatabaseBridge's _backgroundSyncEnabled flag so the SQLite update hook
+    // stops scheduling mutation-driven one-shot work after WorkManager tasks are cancelled.
+    jobject bridge = getDatabaseBridge();
+    if (bridge) {
+        jclass bridgeCls = env->GetObjectClass(bridge);
+        jmethodID configMethod = env->GetMethodID(bridgeCls, "configureBackgroundSync", "(Ljava/lang/String;)V");
+        if (configMethod) {
+            env->CallVoidMethod(bridge, configMethod, nullptr);
+        } else {
+            env->ExceptionClear();
+        }
+        env->DeleteLocalRef(bridgeCls);
+    }
+
+    // Cancel all scheduled WorkManager tasks
+    jclass cls = env->FindClass("com/nozbe/watermelondb/sync/BackgroundSyncScheduler");
+    if (!cls) {
+        env->ExceptionClear();
+        return;
+    }
+    jmethodID method = env->GetStaticMethodID(cls, "cancelAll", "()V");
     if (!method) {
         env->ExceptionClear();
         env->DeleteLocalRef(cls);

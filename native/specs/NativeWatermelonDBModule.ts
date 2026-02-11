@@ -21,6 +21,10 @@ export interface Spec extends TurboModule {
   initSyncSocket(socketUrl: string): void
   syncSocketAuthenticate(token: string): void
   syncSocketDisconnect(): void
+  cancelSync(): void
+  configureBackgroundSync(configJson: string): void
+  enableBackgroundSync(): void
+  disableBackgroundSync(): void
   decompressZstd(src: string, dest: string): Promise<void>
 }
 

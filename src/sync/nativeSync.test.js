@@ -13,6 +13,11 @@ const makeTurboModule = () => ({
   syncSocketAuthenticate: jest.fn(),
   syncSocketDisconnect: jest.fn(),
   importRemoteSlice: jest.fn(() => Promise.resolve()),
+  cancelSync: jest.fn(),
+  configureBackgroundSync: jest.fn(),
+  enableBackgroundSync: jest.fn(),
+  disableBackgroundSync: jest.fn(),
+  syncDatabaseAsync: jest.fn(() => Promise.resolve()),
 })
 
 const setupModule = (moduleInstance = makeTurboModule()) => {
@@ -103,5 +108,53 @@ describe('nativeSync', () => {
     expect(moduleInstance.syncSocketAuthenticate).toHaveBeenCalledWith('token')
     expect(moduleInstance.syncSocketDisconnect).toHaveBeenCalledWith()
     expect(moduleInstance.importRemoteSlice).toHaveBeenCalledWith(3, 'https://example.com/slice')
+  })
+
+  it('passes through cancelSync', () => {
+    const moduleInstance = makeTurboModule()
+    const nativeSync = setupModule(moduleInstance)
+
+    nativeSync.cancelSync()
+    expect(moduleInstance.cancelSync).toHaveBeenCalledWith()
+  })
+
+  it('passes through enableBackgroundSync and disableBackgroundSync', () => {
+    const moduleInstance = makeTurboModule()
+    const nativeSync = setupModule(moduleInstance)
+
+    nativeSync.enableBackgroundSync()
+    nativeSync.disableBackgroundSync()
+
+    expect(moduleInstance.enableBackgroundSync).toHaveBeenCalledWith()
+    expect(moduleInstance.disableBackgroundSync).toHaveBeenCalledWith()
+  })
+
+  it('serializes configureBackgroundSync as JSON', () => {
+    const moduleInstance = makeTurboModule()
+    const nativeSync = setupModule(moduleInstance)
+
+    nativeSync.configureBackgroundSync({
+      taskId: 'com.test.sync',
+      intervalMinutes: 15,
+      requiresNetwork: true,
+      mutationQueueTable: 'mutations',
+    })
+
+    expect(moduleInstance.configureBackgroundSync).toHaveBeenCalledWith(
+      JSON.stringify({
+        taskId: 'com.test.sync',
+        intervalMinutes: 15,
+        requiresNetwork: true,
+        mutationQueueTable: 'mutations',
+      }),
+    )
+  })
+
+  it('passes through syncDatabaseAsync', async () => {
+    const moduleInstance = makeTurboModule()
+    const nativeSync = setupModule(moduleInstance)
+
+    await nativeSync.syncDatabaseAsync('manual')
+    expect(moduleInstance.syncDatabaseAsync).toHaveBeenCalledWith('manual')
   })
 })

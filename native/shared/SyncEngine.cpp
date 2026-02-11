@@ -271,6 +271,11 @@ void SyncEngine::setPushChangesCallback(PushChangesCallback callback) {
     pushChangesCallback_ = std::move(callback);
 }
 
+SyncEngine::PushChangesCallback SyncEngine::getPushChangesCallback() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pushChangesCallback_;
+}
+
 void SyncEngine::configure(const std::string& configJson) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (shutdown_) {
@@ -361,39 +366,49 @@ void SyncEngine::start(const std::string& reason) {
 
 void SyncEngine::startWithCompletion(const std::string& reason, CompletionCallback completion) {
     bool shouldStart = false;
+    bool isShutdown = false;
     int64_t syncId = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (shutdown_) {
-            return;
-        }
-        if (syncInFlight_) {
+            isShutdown = true;
+        } else if (syncInFlight_) {
             pendingReason_ = reason;
             pendingCompletionCallback_ = std::move(completion);
             emitLocked(std::string("{\"type\":\"sync_queued\",\"reason\":\"") + json_utils::escapeJsonString(reason) + "\"}");
             return;
+        } else {
+            syncInFlight_ = true;
+            retryScheduled_ = false;
+            retryCount_ = 0;
+            authRetryCount_ = 0; // Reset auth retry count on new sync
+            currentReason_ = reason;
+            if (completion) {
+                completionCallback_ = std::move(completion);
+            }
+            const bool resumeFromAuth = (stateJson_ == "{\"state\":\"auth_required\"}") && !currentPullUrl_.empty();
+            if (!resumeFromAuth) {
+                currentRequestId_ = platform::generateRequestId();
+                currentPullUrl_ = pullEndpointUrl_;
+            } else if (currentRequestId_.empty()) {
+                currentRequestId_ = platform::generateRequestId();
+            }
+            stateJson_ = "{\"state\":\"sync_requested\"}";
+            emitLocked("{\"type\":\"state\",\"state\":\"sync_requested\"}");
+            emitLocked(std::string("{\"type\":\"sync_start\",\"reason\":\"") + json_utils::escapeJsonString(reason) + "\"}");
+            syncId_++;
+            syncId = syncId_;
+            shouldStart = true;
         }
-        syncInFlight_ = true;
-        retryScheduled_ = false;
-        retryCount_ = 0;
-        authRetryCount_ = 0; // Reset auth retry count on new sync
-        currentReason_ = reason;
+    }
+    if (isShutdown) {
+        // Call completion outside the lock to avoid potential deadlock.
+        // Previously this silently dropped the completion, leaving callers
+        // (e.g., background sync BGTask/WorkManager) hanging indefinitely.
         if (completion) {
-            completionCallback_ = std::move(completion);
+            completion(false, "sync_engine_shutdown");
         }
-        const bool resumeFromAuth = (stateJson_ == "{\"state\":\"auth_required\"}") && !currentPullUrl_.empty();
-        if (!resumeFromAuth) {
-            currentRequestId_ = platform::generateRequestId();
-            currentPullUrl_ = pullEndpointUrl_;
-        } else if (currentRequestId_.empty()) {
-            currentRequestId_ = platform::generateRequestId();
-        }
-        stateJson_ = "{\"state\":\"sync_requested\"}";
-        emitLocked("{\"type\":\"state\",\"state\":\"sync_requested\"}");
-        emitLocked(std::string("{\"type\":\"sync_start\",\"reason\":\"") + json_utils::escapeJsonString(reason) + "\"}");
-        syncId_++;
-        syncId = syncId_;
-        shouldStart = true;
+        return;
     }
     if (shouldStart) {
         dispatchRequest(syncId, false);
@@ -403,6 +418,46 @@ void SyncEngine::startWithCompletion(const std::string& reason, CompletionCallba
 std::string SyncEngine::stateJson() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return stateJson_;
+}
+
+void SyncEngine::cancelSync() {
+    CompletionCallback completion;
+    CompletionCallback pendingCompletion;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (shutdown_) {
+            return;
+        }
+        // Also cancel if completionCallback_ is set (e.g. auth_required state where
+        // syncInFlight_ is false but a background sync completion handler is pending).
+        // Without this, the completion handler is lost when foreground overwrites it,
+        // causing the push callback to stay permanently as no-op.
+        if (!syncInFlight_ && pendingReason_.empty() && !completionCallback_) {
+            return;
+        }
+        syncId_++;
+        syncInFlight_ = false;
+        retryScheduled_ = false;
+        retryCount_ = 0;
+        authRequestInFlight_ = false;
+        authRetryCount_ = 0;
+        currentRequestId_.clear();
+        currentPullUrl_.clear();
+        pendingReason_.clear();
+        currentReason_.clear();
+        completion = std::move(completionCallback_);
+        completionCallback_ = nullptr;
+        pendingCompletion = std::move(pendingCompletionCallback_);
+        pendingCompletionCallback_ = nullptr;
+        stateJson_ = "{\"state\":\"idle\"}";
+        emitLocked("{\"type\":\"sync_cancelled\"}");
+    }
+    if (completion) {
+        completion(false, "cancelled_for_foreground");
+    }
+    if (pendingCompletion) {
+        pendingCompletion(false, "cancelled_for_foreground");
+    }
 }
 
 void SyncEngine::shutdown() {
