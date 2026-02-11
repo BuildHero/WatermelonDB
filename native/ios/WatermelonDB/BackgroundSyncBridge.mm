@@ -63,28 +63,12 @@ static std::shared_ptr<watermelondb::SyncEngine> sSyncEngine;
         return;
     }
 
-    // Save the existing push callback and set no-op for pull-only background sync.
-    // Safety: The foreground observer (UIApplicationWillEnterForegroundNotification above)
-    // calls cancelSync() which fires this completion synchronously, restoring the push
-    // callback before any foreground sync can start. SyncEngine queuing also prevents
-    // concurrent runs.
-    auto savedPushCallback = engine->getPushChangesCallback();
-    engine->setPushChangesCallback([](std::function<void(bool, const std::string&)> pushCompletion) {
-        // No-op: skip push in background, just signal success
-        if (pushCompletion) {
-            pushCompletion(true, "");
-        }
-    });
-
-    // Start pull-only sync. The SyncEngine will use its normal auth flow:
-    // if authToken_ is empty it calls authTokenRequestCallback_ which reaches
-    // the JS auth provider (works when JS runtime is still alive in background).
+    // Start sync (pull + push). The JS runtime is alive during background tasks,
+    // so the existing pushChangesProvider callback works normally. If the OS
+    // expires the task, cancelSync() invalidates in-flight operations and
+    // remaining mutations flush on next foreground sync.
     engine->startWithCompletion("background_task",
-        [completion, engine, savedPushCallback](bool success, const std::string& errorMessage) {
-            // Restore the original push callback so foreground sync can push
-            if (savedPushCallback) {
-                engine->setPushChangesCallback(savedPushCallback);
-            }
+        [completion](bool success, const std::string& errorMessage) {
             NSString *error = nil;
             if (!errorMessage.empty()) {
                 error = [NSString stringWithUTF8String:errorMessage.c_str()];

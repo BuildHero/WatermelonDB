@@ -119,32 +119,17 @@ Java_com_nozbe_watermelondb_sync_BackgroundSyncBridge_nativePerformBackgroundSyn
         return;
     }
 
-    // Save existing push callback, set no-op for pull-only background sync.
-    // Safety: The foreground observer (ProcessLifecycleOwner ON_START in BackgroundSyncBridge.kt)
-    // calls cancelSync() which fires this completion synchronously, restoring the push
-    // callback before any foreground sync can start. SyncEngine queuing also prevents
-    // concurrent runs.
-    auto savedPushCallback = engine->getPushChangesCallback();
-    engine->setPushChangesCallback([](std::function<void(bool, const std::string&)> pushCompletion) {
-        if (pushCompletion) {
-            pushCompletion(true, "");
-        }
-    });
-
     // Get a global ref to the callback so it survives across threads
     JavaVM* jvm = nullptr;
     env->GetJavaVM(&jvm);
     jobject globalCallback = env->NewGlobalRef(callback);
 
-    // Start pull-only sync. The SyncEngine will use its normal auth flow:
-    // if authToken_ is empty it calls authTokenRequestCallback_ which reaches
-    // the JS auth provider (works when JS runtime is still alive in background).
+    // Start sync (pull + push). The JS runtime is alive during background tasks,
+    // so the existing pushChangesProvider callback works normally. If the OS
+    // expires the task, cancelSync() invalidates in-flight operations and
+    // remaining mutations flush on next foreground sync.
     engine->startWithCompletion("background_task",
-        [jvm, globalCallback, engine, savedPushCallback](bool success, const std::string& errorMessage) {
-            // Restore the original push callback so foreground sync can push
-            if (savedPushCallback) {
-                engine->setPushChangesCallback(savedPushCallback);
-            }
+        [jvm, globalCallback](bool success, const std::string& errorMessage) {
             JNIEnv* cbEnv = nullptr;
             bool attached = false;
             if (jvm->GetEnv(reinterpret_cast<void**>(&cbEnv), JNI_VERSION_1_6) != JNI_OK) {
