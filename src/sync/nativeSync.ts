@@ -1,7 +1,7 @@
 // Native sync manager JSI/TurboModule wrapper.
 // Uses JSON strings to keep TurboModule codegen simple and fast.
 // This is a thin layer; native side owns orchestration.
-import { TurboModule, TurboModuleRegistry } from 'react-native'
+import type { TurboModule } from 'react-native'
 
 interface NativeSyncModule extends TurboModule {
   configureSync(configJson: string): void
@@ -18,6 +18,10 @@ interface NativeSyncModule extends TurboModule {
   initSyncSocket(socketUrl: string): void
   syncSocketAuthenticate(token: string): void
   syncSocketDisconnect(): void
+  cancelSync(): void
+  configureBackgroundSync(configJson: string): void
+  enableBackgroundSync(): void
+  disableBackgroundSync(): void
   importRemoteSlice(tag: number, sliceUrl: string): Promise<void>
 }
 
@@ -28,7 +32,9 @@ let nativeModule: NativeSyncModule | null = null
 
 function getNativeModule(): NativeSyncModule {
   if (!nativeModule) {
-    nativeModule = TurboModuleRegistry.get<NativeSyncModule>('NativeWatermelonDBModule')
+    // Lazy require to avoid pulling in react-native when running in Node.js
+    const { TurboModuleRegistry } = require('react-native')
+    nativeModule = TurboModuleRegistry.get('NativeWatermelonDBModule') as NativeSyncModule | null
     if (!nativeModule) {
       throw new Error('[WatermelonDB][Sync] NativeWatermelonDBModule not available')
     }
@@ -112,6 +118,33 @@ export function syncSocketAuthenticate(token: string): void {
 export function syncSocketDisconnect(): void {
   const module = getNativeModule()
   module.syncSocketDisconnect()
+}
+
+export type BackgroundSyncConfig = {
+  taskId: string
+  intervalMinutes: number
+  requiresNetwork: boolean
+  mutationQueueTable?: string | null
+}
+
+export function cancelSync(): void {
+  const module = getNativeModule()
+  module.cancelSync()
+}
+
+export function configureBackgroundSync(config: BackgroundSyncConfig): void {
+  const module = getNativeModule()
+  module.configureBackgroundSync(JSON.stringify(config))
+}
+
+export function enableBackgroundSync(): void {
+  const module = getNativeModule()
+  module.enableBackgroundSync()
+}
+
+export function disableBackgroundSync(): void {
+  const module = getNativeModule()
+  module.disableBackgroundSync()
 }
 
 export function importRemoteSlice(tag: number, sliceUrl: string): Promise<void> {

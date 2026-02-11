@@ -14,6 +14,8 @@ import com.facebook.react.bridge.WritableArray
 import com.facebook.react.bridge.WritableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.nozbe.watermelondb.jsi.JSIAndroidBridgeInstaller
+import com.nozbe.watermelondb.sync.BackgroundSyncBridge
+import com.nozbe.watermelondb.sync.BackgroundSyncScheduler
 import io.requery.android.database.sqlite.SQLiteUpdateHook
 import java.util.Timer
 import java.util.TimerTask
@@ -61,6 +63,13 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
     init {
         setInstance(this)
         android.util.Log.i("WatermelonDB", "DatabaseBridge initialized with ${connections.size} existing connections")
+        // Initialize background sync utilities with application context
+        try {
+            val appContext = reactContext.applicationContext
+            BackgroundSyncScheduler.initContext(appContext)
+        } catch (e: Exception) {
+            android.util.Log.w("WatermelonDB", "Failed to init background sync context: ${e.message}")
+        }
     }
 
     override fun getName(): String = "DatabaseBridge"
@@ -70,9 +79,23 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
     private var batchTimerTask: TimerTask? = null
     private val batchInterval = 100L // milliseconds
 
+    private var _mutationQueueTable: String? = null
+    private var _backgroundSyncEnabled = false
+
     private val sqliteUpdateHook = SQLiteUpdateHook { _, _, tableName, _ ->
         bufferTableName(tableName)
         resetBatchTimer()
+
+        // Schedule background sync when mutation queue table is modified while app is backgrounded
+        if (_backgroundSyncEnabled && tableName == _mutationQueueTable) {
+            try {
+                if (!BackgroundSyncBridge.isAppInForeground()) {
+                    BackgroundSyncScheduler.scheduleMutationDrivenSync()
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("WatermelonDB", "Failed to schedule mutation-driven sync: ${e.message}")
+            }
+        }
     }
 
     override fun invalidate() {
@@ -317,6 +340,11 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     fun removeLocal(tag: ConnectionTag, key: String, promise: Promise) =
         withDriver(tag, promise) { it.removeLocal(key) }
+
+    fun configureBackgroundSync(mutationTable: String?) {
+        _mutationQueueTable = mutationTable
+        _backgroundSyncEnabled = mutationTable != null
+    }
 
     @ReactMethod
     fun enableNativeCDC(tag: ConnectionTag, promise: Promise) =

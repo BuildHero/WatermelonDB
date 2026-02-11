@@ -23,6 +23,7 @@ public:
     void setApplyCallback(ApplyCallback callback);
     void setAuthTokenRequestCallback(AuthTokenRequestCallback callback);
     void setPushChangesCallback(PushChangesCallback callback);
+    PushChangesCallback getPushChangesCallback() const;
     void configure(const std::string& configJson);
     void setPullEndpointUrl(const std::string& url);
     void setAuthToken(const std::string& token);
@@ -30,6 +31,7 @@ public:
     void requestAuthToken();
     void start(const std::string& reason);
     void startWithCompletion(const std::string& reason, CompletionCallback completion);
+    void cancelSync();
     std::string stateJson() const;
     void shutdown();
 

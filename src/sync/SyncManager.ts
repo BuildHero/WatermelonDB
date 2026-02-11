@@ -15,7 +15,12 @@ import {
   syncSocketAuthenticate as nativeSyncSocketAuthenticate,
   syncSocketDisconnect as nativeSyncSocketDisconnect,
   importRemoteSlice as nativeImportRemoteSlice,
+  cancelSync as nativeCancelSync,
+  configureBackgroundSync as nativeConfigureBackgroundSync,
+  enableBackgroundSync as nativeEnableBackgroundSync,
+  disableBackgroundSync as nativeDisableBackgroundSync,
 } from './nativeSync'
+import type { BackgroundSyncConfig } from './nativeSync'
 
 export type SyncState = {
   state?: string
@@ -42,6 +47,10 @@ export type SyncConfig = {
   retryMaxMs?: number
   authTokenProvider?: () => Promise<string> | string
   pushChangesProvider?: () => Promise<void> | void
+  backgroundSyncTaskId?: string | null
+  backgroundSyncMinIntervalMinutes?: number
+  backgroundSyncRequiresNetwork?: boolean
+  backgroundSyncMutationQueueTable?: string | null
   [key: string]: any
 }
 
@@ -94,6 +103,15 @@ export class SyncManager {
       : null
 
     nativeConfigureSync(nativeConfig)
+
+    if (config.backgroundSyncTaskId) {
+      nativeConfigureBackgroundSync({
+        taskId: config.backgroundSyncTaskId,
+        intervalMinutes: config.backgroundSyncMinIntervalMinutes ?? 15,
+        requiresNetwork: config.backgroundSyncRequiresNetwork ?? true,
+        mutationQueueTable: config.backgroundSyncMutationQueueTable ?? null,
+      })
+    }
 
     SyncManager.configured = true
 
@@ -207,6 +225,21 @@ export class SyncManager {
       throw new Error('[WatermelonDB][Sync] importRemoteSlice requires a configured database or adapter.')
     }
     return nativeImportRemoteSlice(tag, sliceUrl)
+  }
+
+  static cancelSync(): void {
+    SyncManager.assertConfigured('cancelSync')
+    nativeCancelSync()
+  }
+
+  static enableBackgroundSync(): void {
+    SyncManager.assertConfigured('enableBackgroundSync')
+    nativeEnableBackgroundSync()
+  }
+
+  static disableBackgroundSync(): void {
+    SyncManager.assertConfigured('disableBackgroundSync')
+    nativeDisableBackgroundSync()
   }
 
   private static assertConfigured(method: string): void {

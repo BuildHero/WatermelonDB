@@ -12,6 +12,7 @@
 #import <SliceImporter.h>
 #import <sqlite3.h>
 #import "ZstdFileUtil.h"
+#import "BackgroundSyncBridge.h"
 #include "SyncApplyEngine.h"
 
 #include <exception>
@@ -317,8 +318,9 @@ void JSISwiftWrapperModule::setAuthToken(jsi::Runtime &rt, jsi::String token) {
         const std::lock_guard<std::mutex> lock(state->mutex);
         state->runtime = &rt;
     }
+    std::string tokenUtf8 = token.utf8(rt);
     if (syncEngine_) {
-        syncEngine_->setAuthToken(token.utf8(rt));
+        syncEngine_->setAuthToken(tokenUtf8);
     }
 }
 
@@ -384,6 +386,54 @@ void JSISwiftWrapperModule::syncSocketDisconnect(jsi::Runtime &rt) {
         state->runtime = &rt;
     }
     [SyncSocketClient.shared disconnect];
+}
+
+void JSISwiftWrapperModule::cancelSync(jsi::Runtime &rt) {
+    if (syncEngine_) {
+        syncEngine_->cancelSync();
+    }
+}
+
+void JSISwiftWrapperModule::configureBackgroundSync(jsi::Runtime &rt, jsi::String configJson) {
+    @autoreleasepool {
+        std::string config = configJson.utf8(rt);
+        NSData *data = [NSData dataWithBytes:config.data() length:config.size()];
+        if (!data) {
+            return;
+        }
+        NSError *err = nil;
+        id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&err];
+        if (err || ![json isKindOfClass:[NSDictionary class]]) {
+            return;
+        }
+        NSDictionary *dict = (NSDictionary *)json;
+        NSString *taskId = dict[@"taskId"];
+        NSNumber *intervalMinutes = dict[@"intervalMinutes"];
+        NSNumber *requiresNetwork = dict[@"requiresNetwork"];
+        if (!taskId || ![taskId isKindOfClass:[NSString class]]) {
+            return;
+        }
+        NSString *mutationQueueTable = dict[@"mutationQueueTable"];
+
+        [WatermelonDBBackgroundSync configureWithIntervalMinutes:[intervalMinutes integerValue]
+                                                requiresNetwork:[requiresNetwork boolValue]];
+
+        if ([mutationQueueTable isKindOfClass:[NSString class]] && mutationQueueTable.length > 0) {
+            [WatermelonDBBackgroundSync setMutationQueueTable:mutationQueueTable];
+        }
+
+        if (syncEngine_) {
+            [BackgroundSyncBridge configureSyncEnginePtr:&syncEngine_];
+        }
+    }
+}
+
+void JSISwiftWrapperModule::enableBackgroundSync(jsi::Runtime &rt) {
+    [WatermelonDBBackgroundSync schedulePeriodicSync];
+}
+
+void JSISwiftWrapperModule::disableBackgroundSync(jsi::Runtime &rt) {
+    [WatermelonDBBackgroundSync cancelAllScheduledTasks];
 }
 
 jsi::Value JSISwiftWrapperModule::decompressZstd(jsi::Runtime &rt, jsi::String src, jsi::String dest) {
@@ -463,8 +513,9 @@ void JSISwiftWrapperModule::requestAuthTokenFromJs() {
         }
 
         if (result.isString()) {
+            std::string tokenStr = result.asString(rt).utf8(rt);
             if (auto engine = engineWeak.lock()) {
-                engine->setAuthToken(result.asString(rt).utf8(rt));
+                engine->setAuthToken(tokenStr);
             }
             return;
         }
@@ -499,8 +550,9 @@ void JSISwiftWrapperModule::requestAuthTokenFromJs() {
             1,
             [engineWeak](jsi::Runtime& rt2, const jsi::Value&, const jsi::Value* argv, size_t argc) -> jsi::Value {
                 if (argc >= 1 && argv[0].isString()) {
+                    std::string tokenStr = argv[0].asString(rt2).utf8(rt2);
                     if (auto engine = engineWeak.lock()) {
-                        engine->setAuthToken(argv[0].asString(rt2).utf8(rt2));
+                        engine->setAuthToken(tokenStr);
                     }
                 } else if (auto engine = engineWeak.lock()) {
                     engine->clearAuthToken();

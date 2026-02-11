@@ -271,6 +271,11 @@ void SyncEngine::setPushChangesCallback(PushChangesCallback callback) {
     pushChangesCallback_ = std::move(callback);
 }
 
+SyncEngine::PushChangesCallback SyncEngine::getPushChangesCallback() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pushChangesCallback_;
+}
+
 void SyncEngine::configure(const std::string& configJson) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (shutdown_) {
@@ -403,6 +408,46 @@ void SyncEngine::startWithCompletion(const std::string& reason, CompletionCallba
 std::string SyncEngine::stateJson() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return stateJson_;
+}
+
+void SyncEngine::cancelSync() {
+    CompletionCallback completion;
+    CompletionCallback pendingCompletion;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (shutdown_) {
+            return;
+        }
+        // Also cancel if completionCallback_ is set (e.g. auth_required state where
+        // syncInFlight_ is false but a background sync completion handler is pending).
+        // Without this, the completion handler is lost when foreground overwrites it,
+        // causing the push callback to stay permanently as no-op.
+        if (!syncInFlight_ && pendingReason_.empty() && !completionCallback_) {
+            return;
+        }
+        syncId_++;
+        syncInFlight_ = false;
+        retryScheduled_ = false;
+        retryCount_ = 0;
+        authRequestInFlight_ = false;
+        authRetryCount_ = 0;
+        currentRequestId_.clear();
+        currentPullUrl_.clear();
+        pendingReason_.clear();
+        currentReason_.clear();
+        completion = std::move(completionCallback_);
+        completionCallback_ = nullptr;
+        pendingCompletion = std::move(pendingCompletionCallback_);
+        pendingCompletionCallback_ = nullptr;
+        stateJson_ = "{\"state\":\"idle\"}";
+        emitLocked("{\"type\":\"sync_cancelled\"}");
+    }
+    if (completion) {
+        completion(false, "cancelled_for_foreground");
+    }
+    if (pendingCompletion) {
+        pendingCompletion(false, "cancelled_for_foreground");
+    }
 }
 
 void SyncEngine::shutdown() {

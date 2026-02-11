@@ -38,6 +38,10 @@ public:
     void initSyncSocket(jsi::Runtime &rt, jsi::String socketUrl);
     void syncSocketAuthenticate(jsi::Runtime &rt, jsi::String token);
     void syncSocketDisconnect(jsi::Runtime &rt);
+    void cancelSync(jsi::Runtime &rt);
+    void configureBackgroundSync(jsi::Runtime &rt, jsi::String configJson);
+    void enableBackgroundSync(jsi::Runtime &rt);
+    void disableBackgroundSync(jsi::Runtime &rt);
     jsi::Value decompressZstd(jsi::Runtime &rt, jsi::String src, jsi::String dest);
 
 private:

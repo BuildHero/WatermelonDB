@@ -112,6 +112,10 @@ final public class DatabaseBridge: RCTEventEmitter {
     private var batchTimer: Timer?
     private let batchInterval: TimeInterval = 0.1 // 100 milliseconds
     private let cdcLock = NSLock() // Synchronization for CDC state
+
+    // For mutation-driven background sync
+    static var mutationQueueTable: String?
+    static var backgroundSyncEnabled = false
 }
 
 // MARK: - Native CDC helpers
@@ -164,8 +168,20 @@ extension DatabaseBridge {
     // This function handles SQLite update events
     private func sqliteUpdateCallback(userData: UnsafeMutableRawPointer?, opcode: Int32, dbName: UnsafePointer<Int8>?, tableName: UnsafePointer<Int8>?, rowId: Int64) {
         guard let tableName = tableName else { return }
-        self.bufferTableName(String(cString: tableName))
+        let tableNameStr = String(cString: tableName)
+        self.bufferTableName(tableNameStr)
         self.resetBatchTimer()
+
+        // Schedule background sync when mutation queue table is modified while app is backgrounded
+        if DatabaseBridge.backgroundSyncEnabled,
+           let mutationTable = DatabaseBridge.mutationQueueTable,
+           tableNameStr == mutationTable {
+            DispatchQueue.main.async {
+                if UIApplication.shared.applicationState != .active {
+                    WatermelonDBBackgroundSync.scheduleImmediateSync()
+                }
+            }
+        }
     }
 
     @objc
