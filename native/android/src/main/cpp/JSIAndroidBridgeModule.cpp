@@ -119,7 +119,11 @@ Java_com_nozbe_watermelondb_sync_BackgroundSyncBridge_nativePerformBackgroundSyn
         return;
     }
 
-    // Save existing push callback, set no-op for pull-only background sync
+    // Save existing push callback, set no-op for pull-only background sync.
+    // Safety: The foreground observer (ProcessLifecycleOwner ON_START in BackgroundSyncBridge.kt)
+    // calls cancelSync() which fires this completion synchronously, restoring the push
+    // callback before any foreground sync can start. SyncEngine queuing also prevents
+    // concurrent runs.
     auto savedPushCallback = engine->getPushChangesCallback();
     engine->setPushChangesCallback([](std::function<void(bool, const std::string&)> pushCompletion) {
         if (pushCompletion) {
@@ -812,6 +816,22 @@ void JSIAndroidBridgeModule::enableBackgroundSync(jsi::Runtime &rt) {
 
 void JSIAndroidBridgeModule::disableBackgroundSync(jsi::Runtime &rt) {
     JNIEnv* env = getEnv();
+
+    // Reset DatabaseBridge's _backgroundSyncEnabled flag so the SQLite update hook
+    // stops scheduling mutation-driven one-shot work after WorkManager tasks are cancelled.
+    jobject bridge = getDatabaseBridge();
+    if (bridge) {
+        jclass bridgeCls = env->GetObjectClass(bridge);
+        jmethodID configMethod = env->GetMethodID(bridgeCls, "configureBackgroundSync", "(Ljava/lang/String;)V");
+        if (configMethod) {
+            env->CallVoidMethod(bridge, configMethod, nullptr);
+        } else {
+            env->ExceptionClear();
+        }
+        env->DeleteLocalRef(bridgeCls);
+    }
+
+    // Cancel all scheduled WorkManager tasks
     jclass cls = env->FindClass("com/nozbe/watermelondb/sync/BackgroundSyncScheduler");
     if (!cls) {
         env->ExceptionClear();

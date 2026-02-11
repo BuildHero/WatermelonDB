@@ -33,11 +33,18 @@ object BackgroundSyncScheduler {
      * Configure background sync from JSON config string.
      * Called from JNI (JSIAndroidBridgeModule::configureBackgroundSync).
      */
+    // WorkManager minimum periodic interval is 15 minutes
+    private const val MIN_INTERVAL_MINUTES = 15L
+
     @JvmStatic
     fun configure(configJson: String) {
         try {
             val json = JSONObject(configJson)
-            intervalMinutes = json.optLong("intervalMinutes", 15)
+            val requested = json.optLong("intervalMinutes", 15)
+            intervalMinutes = maxOf(requested, MIN_INTERVAL_MINUTES)
+            if (requested < MIN_INTERVAL_MINUTES) {
+                Log.w(TAG, "BackgroundSync: requested interval ${requested}min clamped to minimum ${MIN_INTERVAL_MINUTES}min")
+            }
             requiresNetwork = json.optBoolean("requiresNetwork", true)
             mutationQueueTable = json.optString("mutationQueueTable", null)
             Log.i(TAG, "BackgroundSync configured: interval=${intervalMinutes}min, network=$requiresNetwork, mutationTable=$mutationQueueTable")

@@ -63,7 +63,11 @@ static std::shared_ptr<watermelondb::SyncEngine> sSyncEngine;
         return;
     }
 
-    // Save the existing push callback and set no-op for pull-only background sync
+    // Save the existing push callback and set no-op for pull-only background sync.
+    // Safety: The foreground observer (UIApplicationWillEnterForegroundNotification above)
+    // calls cancelSync() which fires this completion synchronously, restoring the push
+    // callback before any foreground sync can start. SyncEngine queuing also prevents
+    // concurrent runs.
     auto savedPushCallback = engine->getPushChangesCallback();
     engine->setPushChangesCallback([](std::function<void(bool, const std::string&)> pushCompletion) {
         // No-op: skip push in background, just signal success
