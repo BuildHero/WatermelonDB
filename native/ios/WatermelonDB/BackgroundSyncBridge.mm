@@ -4,6 +4,8 @@
 #include <mutex>
 #include <string>
 
+#import <UIKit/UIKit.h>
+
 // Static state
 static std::mutex sBridgeMutex;
 static std::shared_ptr<watermelondb::SyncEngine> sSyncEngine;
@@ -11,16 +13,39 @@ static std::shared_ptr<watermelondb::SyncEngine> sSyncEngine;
 @implementation BackgroundSyncBridge
 
 + (void)configureSyncEnginePtr:(void *)enginePtr {
-    std::lock_guard<std::mutex> lock(sBridgeMutex);
-    // The enginePtr is a raw pointer to a shared_ptr<SyncEngine> stored by JSISwiftWrapperModule.
-    // We reconstruct the shared_ptr from the raw pointer.
-    // NOTE: The caller must ensure the shared_ptr outlives this reference.
-    if (enginePtr) {
-        auto *sharedPtr = static_cast<std::shared_ptr<watermelondb::SyncEngine> *>(enginePtr);
-        sSyncEngine = *sharedPtr;
-    } else {
-        sSyncEngine = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(sBridgeMutex);
+        // The enginePtr is a raw pointer to a shared_ptr<SyncEngine> stored by JSISwiftWrapperModule.
+        // We reconstruct the shared_ptr from the raw pointer.
+        // NOTE: The caller must ensure the shared_ptr outlives this reference.
+        if (enginePtr) {
+            auto *sharedPtr = static_cast<std::shared_ptr<watermelondb::SyncEngine> *>(enginePtr);
+            sSyncEngine = *sharedPtr;
+        } else {
+            sSyncEngine = nullptr;
+        }
     }
+
+    // Register a foreground observer (once) to cancel any in-flight background sync
+    // the moment the app returns to foreground — before the JS runtime processes events.
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        [[NSNotificationCenter defaultCenter]
+            addObserverForName:UIApplicationWillEnterForegroundNotification
+                        object:nil
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification * _Nonnull note) {
+            std::shared_ptr<watermelondb::SyncEngine> engine;
+            {
+                std::lock_guard<std::mutex> lock(sBridgeMutex);
+                engine = sSyncEngine;
+            }
+            if (engine) {
+                NSLog(@"[WatermelonDB][BackgroundSync] App entering foreground — cancelling background sync");
+                engine->cancelSync();
+            }
+        }];
+    });
 }
 
 + (void)performSync:(void (^)(BOOL success, NSString * _Nullable errorMessage))completion {

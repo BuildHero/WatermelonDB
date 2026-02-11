@@ -79,8 +79,10 @@ import BackgroundTasks
         }
 
         if #available(iOS 13.0, *) {
-            let request = BGAppRefreshTaskRequest(identifier: taskId)
-            request.earliestBeginDate = nil // as soon as possible
+            let request = BGProcessingTaskRequest(identifier: taskId)
+            request.earliestBeginDate = Date(timeIntervalSinceNow: 1) // ASAP
+            request.requiresNetworkConnectivity = _requiresNetwork
+            request.requiresExternalPower = false
 
             do {
                 try BGTaskScheduler.shared.submit(request)

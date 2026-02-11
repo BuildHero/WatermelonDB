@@ -7,6 +7,7 @@
 #include <iostream>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace watermelondb::platform {
@@ -473,13 +474,13 @@ void test_cancel_sync_when_idle() {
 }
 
 void test_cancel_sync_in_flight() {
+    std::function<void(bool, const std::string&)> pushCompletion;
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
     engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
 
     // Hold sync in push phase so we can cancel it
-    std::function<void(bool, const std::string&)> pushCompletion;
     engine->setPushChangesCallback([&](std::function<void(bool, const std::string&)> cb) {
         pushCompletion = std::move(cb);
         // Don't call cb — sync stays in push phase
@@ -522,6 +523,9 @@ void test_cancel_sync_in_flight() {
     expectTrue(recorder.waitForContains("sync_cancelled"), "expected sync_cancelled event");
     expectTrue(engine->stateJson().find("\"state\":\"idle\"") != std::string::npos,
                "state should be idle after cancel");
+
+    // Clean up: null out callbacks that capture stack locals before engine is destroyed
+    engine->setPushChangesCallback(nullptr);
 }
 
 void test_cancel_sync_during_auth_required() {
@@ -586,13 +590,14 @@ void test_cancel_sync_during_auth_required() {
 }
 
 void test_cancel_sync_fires_pending_completion() {
+    // Declare pushCompletion before engine so it outlives the engine's callback reference
+    std::function<void(bool, const std::string&)> pushCompletion;
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
     engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
 
     // Hold sync in push phase
-    std::function<void(bool, const std::string&)> pushCompletion;
     engine->setPushChangesCallback([&](std::function<void(bool, const std::string&)> cb) {
         pushCompletion = std::move(cb);
     });
@@ -659,12 +664,13 @@ void test_get_push_changes_callback() {
 
 void test_cancel_restores_push_callback_via_completion() {
     // Simulates the BackgroundSyncBridge pattern: save push, set no-op, start, cancel
+    // Declare realPushCalled before engine so it outlives the engine's callback reference
+    bool realPushCalled = false;
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
     engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
 
-    bool realPushCalled = false;
     engine->setPushChangesCallback([&](std::function<void(bool, const std::string&)> completion) {
         realPushCalled = true;
         completion(true, "");
@@ -711,6 +717,242 @@ void test_cancel_restores_push_callback_via_completion() {
 
     currentPush([](bool, const std::string&) {});
     expectTrue(realPushCalled, "restored callback should be the original push callback");
+
+    // Clean up: null out callbacks and global handler to avoid dangling references
+    engine->setPushChangesCallback(nullptr);
+    watermelondb::platform::setHttpHandler(nullptr);
+}
+
+void test_foreground_overrides_background_sync() {
+    // End-to-end: background sync (pull-only) starts → foreground cancels → foreground sync runs
+    // This mimics the native lifecycle observer calling cancelSync() on foreground entry.
+    // Declare realPushCalled before engine so it outlives the engine's callback reference
+    bool realPushCalled = false;
+    EventRecorder recorder;
+    auto engine = std::make_shared<watermelondb::SyncEngine>();
+    engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
+    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+
+    auto realPush = [&](std::function<void(bool, const std::string&)> cb) {
+        realPushCalled = true;
+        cb(true, "");
+    };
+    engine->setPushChangesCallback(realPush);
+
+    // Hold HTTP so background sync stays in-flight
+    std::function<void(const watermelondb::platform::HttpResponse&)> pendingHttpDone;
+    watermelondb::platform::setHttpHandler([&](const watermelondb::platform::HttpRequest&,
+                                               std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        pendingHttpDone = std::move(done);
+    });
+
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
+    engine->setAuthToken("token");
+
+    // --- Background sync: save push, set no-op, start ---
+    auto savedPush = engine->getPushChangesCallback();
+    engine->setPushChangesCallback([](std::function<void(bool, const std::string&)> cb) {
+        if (cb) cb(true, ""); // no-op push
+    });
+
+    std::mutex bgMutex;
+    std::condition_variable bgCv;
+    bool bgCompleted = false;
+    std::string bgError;
+
+    engine->startWithCompletion("background_task",
+        [engine, savedPush, &bgMutex, &bgCv, &bgCompleted, &bgError](bool, const std::string& error) {
+            // Restore real push callback (BackgroundSyncBridge pattern)
+            if (savedPush) {
+                engine->setPushChangesCallback(savedPush);
+            }
+            {
+                std::lock_guard<std::mutex> lock(bgMutex);
+                bgCompleted = true;
+                bgError = error;
+            }
+            bgCv.notify_all();
+        });
+
+    expectTrue(recorder.waitForContains("\"reason\":\"background_task\""), "expected background sync start");
+
+    // --- Foreground entry: cancel background sync ---
+    engine->cancelSync();
+
+    {
+        std::unique_lock<std::mutex> lock(bgMutex);
+        bgCv.wait_for(lock, std::chrono::milliseconds(500), [&] { return bgCompleted; });
+    }
+    expectTrue(bgCompleted, "background completion should fire on cancel");
+    expectTrue(bgError == "cancelled_for_foreground", "background should report cancelled_for_foreground");
+
+    // The old HTTP done callback is now stale — respond to verify it's ignored
+    if (pendingHttpDone) {
+        watermelondb::platform::HttpResponse staleResponse;
+        staleResponse.statusCode = 200;
+        staleResponse.body = "{}";
+        pendingHttpDone(staleResponse);
+    }
+
+    // --- Foreground sync: should work with restored real push callback ---
+    watermelondb::platform::setHttpHandler([](const watermelondb::platform::HttpRequest&,
+                                              std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        watermelondb::platform::HttpResponse response;
+        response.statusCode = 200;
+        response.body = "{}";
+        done(response);
+    });
+
+    std::mutex fgMutex;
+    std::condition_variable fgCv;
+    bool fgCompleted = false;
+    bool fgSuccess = false;
+
+    engine->startWithCompletion("foreground",
+        [&](bool success, const std::string&) {
+            {
+                std::lock_guard<std::mutex> lock(fgMutex);
+                fgCompleted = true;
+                fgSuccess = success;
+            }
+            fgCv.notify_all();
+        });
+
+    {
+        std::unique_lock<std::mutex> lock(fgMutex);
+        fgCv.wait_for(lock, std::chrono::milliseconds(500), [&] { return fgCompleted; });
+    }
+    expectTrue(fgCompleted, "foreground sync should complete");
+    expectTrue(fgSuccess, "foreground sync should succeed");
+    expectTrue(realPushCalled, "foreground sync should use restored real push callback");
+}
+
+void test_cancel_during_http_allows_new_sync() {
+    // Cancel while HTTP is pending, verify new sync starts clean with no stale state
+    EventRecorder recorder;
+    auto engine = std::make_shared<watermelondb::SyncEngine>();
+    engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
+    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setPushChangesCallback([](std::function<void(bool, const std::string&)> cb) { cb(true, ""); });
+
+    std::function<void(const watermelondb::platform::HttpResponse&)> firstHttpDone;
+    int httpCallCount = 0;
+    watermelondb::platform::setHttpHandler([&](const watermelondb::platform::HttpRequest&,
+                                               std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        httpCallCount++;
+        if (httpCallCount == 1) {
+            firstHttpDone = std::move(done);
+            // Hold — don't respond
+        } else {
+            watermelondb::platform::HttpResponse response;
+            response.statusCode = 200;
+            response.body = "{}";
+            done(response);
+        }
+    });
+
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
+    engine->setAuthToken("token");
+    engine->start("first_sync");
+
+    // Wait for HTTP to be in-flight
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    expectTrue(httpCallCount == 1, "first HTTP request should be in-flight");
+
+    engine->cancelSync();
+
+    // Respond to stale HTTP — should be ignored due to syncId mismatch
+    if (firstHttpDone) {
+        watermelondb::platform::HttpResponse staleResponse;
+        staleResponse.statusCode = 200;
+        staleResponse.body = "{}";
+        firstHttpDone(staleResponse);
+    }
+
+    // Start new sync — should work cleanly
+    engine->start("second_sync");
+    expectTrue(recorder.waitForContains("\"reason\":\"second_sync\""), "second sync should start");
+    expectTrue(recorder.waitForContains("\"state\":\"done\""), "second sync should complete");
+    expectTrue(httpCallCount == 2, "second sync should make its own HTTP request");
+
+    // Clean up global handler to avoid dangling references to stack locals
+    watermelondb::platform::setHttpHandler(nullptr);
+}
+
+void test_rapid_cancel_and_restart() {
+    // Rapid cancel+restart cycle (simulates rapid foreground/background toggling)
+    EventRecorder recorder;
+    auto engine = std::make_shared<watermelondb::SyncEngine>();
+    engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
+    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setPushChangesCallback([](std::function<void(bool, const std::string&)> cb) { cb(true, ""); });
+
+    // Hold HTTP responses so sync is genuinely in-flight when cancelSync() runs.
+    // Each call stores the response callback; we drain them at the end.
+    std::mutex httpMutex;
+    std::vector<std::function<void(const watermelondb::platform::HttpResponse&)>> pendingResponses;
+    watermelondb::platform::setHttpHandler([&](const watermelondb::platform::HttpRequest&,
+                                               std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        std::lock_guard<std::mutex> lock(httpMutex);
+        pendingResponses.push_back(std::move(done));
+    });
+
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
+    engine->setAuthToken("token");
+
+    // Rapid start+cancel cycles — sync is genuinely in-flight (HTTP held) when cancelled
+    for (int i = 0; i < 5; i++) {
+        engine->start("cycle_" + std::to_string(i));
+        // HTTP handler captured the request — sync is in HTTP phase
+        engine->cancelSync();
+    }
+
+    // Drain all stale HTTP responses — they should all be no-ops (syncId mismatch)
+    {
+        std::lock_guard<std::mutex> lock(httpMutex);
+        for (auto& done : pendingResponses) {
+            watermelondb::platform::HttpResponse staleResponse;
+            staleResponse.statusCode = 200;
+            staleResponse.body = "{}";
+            done(staleResponse);
+        }
+        pendingResponses.clear();
+    }
+
+    // Switch to immediate HTTP responses for the final sync
+    watermelondb::platform::setHttpHandler([](const watermelondb::platform::HttpRequest&,
+                                              std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        watermelondb::platform::HttpResponse response;
+        response.statusCode = 200;
+        response.body = "{}";
+        done(response);
+    });
+
+    // Final sync should complete successfully
+    std::mutex m;
+    std::condition_variable cv;
+    bool completed = false;
+    bool success = false;
+
+    engine->startWithCompletion("final",
+        [&](bool s, const std::string&) {
+            {
+                std::lock_guard<std::mutex> lock(m);
+                completed = true;
+                success = s;
+            }
+            cv.notify_all();
+        });
+
+    {
+        std::unique_lock<std::mutex> lock(m);
+        cv.wait_for(lock, std::chrono::milliseconds(1000), [&] { return completed; });
+    }
+    expectTrue(completed, "final sync should complete after rapid cycles");
+    expectTrue(success, "final sync should succeed after rapid cycles");
+
+    // Clean up global handler
+    watermelondb::platform::setHttpHandler(nullptr);
 }
 
 } // namespace
@@ -735,6 +977,9 @@ int main() {
     test_cancel_sync_fires_pending_completion();
     test_get_push_changes_callback();
     test_cancel_restores_push_callback_via_completion();
+    test_foreground_overrides_background_sync();
+    test_cancel_during_http_allows_new_sync();
+    test_rapid_cancel_and_restart();
 
     if (gFailures > 0) {
         std::cerr << gFailures << " test(s) failed\n";

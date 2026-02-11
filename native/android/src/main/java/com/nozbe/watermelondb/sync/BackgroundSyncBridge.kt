@@ -1,7 +1,10 @@
 package com.nozbe.watermelondb.sync
 
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ProcessLifecycleOwner
 
 /**
@@ -16,6 +19,9 @@ object BackgroundSyncBridge {
     @Volatile
     private var syncEnginePtr: Long = 0
 
+    @Volatile
+    private var foregroundObserverRegistered = false
+
     /**
      * Configure the bridge with the native SyncEngine pointer.
      * Called from JNI after SyncEngine is created.
@@ -24,6 +30,35 @@ object BackgroundSyncBridge {
     fun configure(enginePtr: Long) {
         this.syncEnginePtr = enginePtr
         Log.i(TAG, "BackgroundSyncBridge configured: enginePtr=$enginePtr")
+        registerForegroundObserver()
+    }
+
+    /**
+     * Register a lifecycle observer that cancels any in-flight background sync
+     * the moment the app returns to foreground — before the JS runtime processes events.
+     */
+    private fun registerForegroundObserver() {
+        if (foregroundObserverRegistered) return
+        foregroundObserverRegistered = true
+        Handler(Looper.getMainLooper()).post {
+            try {
+                ProcessLifecycleOwner.get().lifecycle.addObserver(
+                    LifecycleEventObserver { _, event ->
+                        if (event == Lifecycle.Event.ON_START && syncEnginePtr != 0L) {
+                            Log.i(TAG, "App entering foreground — cancelling background sync")
+                            try {
+                                nativeCancelBackgroundSync(syncEnginePtr)
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Failed to cancel background sync on foreground", e)
+                            }
+                        }
+                    }
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to register foreground observer", e)
+                foregroundObserverRegistered = false
+            }
+        }
     }
 
     /**

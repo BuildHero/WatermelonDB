@@ -167,6 +167,22 @@ Java_com_nozbe_watermelondb_sync_BackgroundSyncBridge_nativePerformBackgroundSyn
     );
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_nozbe_watermelondb_sync_BackgroundSyncBridge_nativeCancelBackgroundSync(
+    JNIEnv*,
+    jclass,
+    jlong enginePtr
+) {
+    std::shared_ptr<watermelondb::SyncEngine> engine;
+    {
+        std::lock_guard<std::mutex> lock(gBackgroundSyncMutex);
+        engine = gBackgroundSyncEngine;
+    }
+    if (engine) {
+        engine->cancelSync();
+    }
+}
+
 static sqlite3* acquireSqlite(jobject bridge, jint tag, std::string& errorMessage) {
     JNIEnv* env = facebook::jni::Environment::current();
     if (!env || !bridge) {
