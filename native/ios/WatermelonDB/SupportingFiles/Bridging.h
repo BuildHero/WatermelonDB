@@ -13,3 +13,9 @@
 #else
 #import "../DatabaseDeleteHelper.h"
 #endif
+
+#if __has_include("BackgroundSyncBridge.h")
+#import "BackgroundSyncBridge.h"
+#else
+#import "../BackgroundSyncBridge.h"
+#endif

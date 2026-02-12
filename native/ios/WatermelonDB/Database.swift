@@ -134,7 +134,7 @@ public class Database {
 
     func disableUpdateHook() {
         // Guard against invalid database state
-        guard writer.open else {
+        guard writer.open() else {
             consoleLog("Warning: Cannot disable update hook - database is not open")
             self.updateHookCallback = nil
             return

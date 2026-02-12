@@ -99,7 +99,7 @@ import BackgroundTasks
         DatabaseBridge.backgroundSyncEnabled = false
 
         if #available(iOS 13.0, *) {
-            BGTaskScheduler.shared.cancel(taskIdentifierMatching: taskId)
+            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: taskId)
             NSLog("[WatermelonDB][BackgroundSync] Cancelled all scheduled tasks")
         }
     }
