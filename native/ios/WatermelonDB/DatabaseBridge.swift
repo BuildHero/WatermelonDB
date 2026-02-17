@@ -30,6 +30,14 @@ final public class DatabaseBridge: RCTEventEmitter {
     deinit {
         // Clean up resources when bridge is destroyed
         cleanupCDC()
+
+        // Close all database connections to prevent SQLite resource leaks
+        for (_, connection) in connections {
+            if case .connected(let driver, _) = connection {
+                driver.database.close()
+            }
+        }
+        connections.removeAll()
     }
 
     private var _cdcCleanedUp = false
@@ -741,9 +749,16 @@ extension DatabaseBridge {
     
     private func disconnectDriver(_ connectionTag: ConnectionTag) {
         let tagID = connectionTag.intValue
-        let queue = connections[tagID]?.queue ?? []
+        let connection = connections[tagID]
+        let queue = connection?.queue ?? []
+
+        // Close the database connection to prevent resource leaks
+        if case .connected(let driver, _) = connection {
+            driver.database.close()
+        }
+
         connections[tagID] = nil
-        
+
         for operation in queue {
             operation()
         }

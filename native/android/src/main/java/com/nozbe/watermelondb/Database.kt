@@ -249,12 +249,25 @@ class Database(private val name: String, private val context: Context) {
         if ((transactionDepth.get() ?: 0) > 0) {
             return writerDb
         }
-        return if (isReadOnlyQuery(query)) readerDb else writerDb
+        if (!isReadOnlyQuery(query)) {
+            return writerDb
+        }
+        // Temp tables are per-connection and only exist on the writer.
+        // Route queries referencing temp tables to the writer connection.
+        if (referencesTemporaryTable(query)) {
+            return writerDb
+        }
+        return readerDb
     }
 
     private fun isReadOnlyQuery(query: SQL): Boolean {
         val trimmed = query.trimStart().lowercase()
         return trimmed.startsWith("select") || trimmed.startsWith("with") || trimmed.startsWith("explain")
+    }
+
+    private fun referencesTemporaryTable(query: SQL): Boolean {
+        val lower = query.lowercase()
+        return lower.contains("temp.") || lower.contains("sqlite_temp_master")
     }
 
     private fun incrementTransactionDepth() {
@@ -277,6 +290,10 @@ class Database(private val name: String, private val context: Context) {
 
     internal fun _test_isReadOnlyQuery(query: SQL): Boolean {
         return isReadOnlyQuery(query)
+    }
+
+    internal fun _test_referencesTemporaryTable(query: SQL): Boolean {
+        return referencesTemporaryTable(query)
     }
 
     internal fun _test_readDatabaseIdentity(query: SQL): String {

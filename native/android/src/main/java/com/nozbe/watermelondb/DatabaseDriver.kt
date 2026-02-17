@@ -179,42 +179,48 @@ class DatabaseDriver(context: Context, dbName: String) {
         // Attach the source database
         database.execute("ATTACH DATABASE '${srcDB}' as 'other'")
 
-        // We need to make sure we do not copy the __watermelon_last_pulled_schema_version entry
-        // from local_storage table to avoid migration issues
-        database.execute("DELETE FROM local_storage WHERE key = '__watermelon_last_pulled_schema_version'")
-    
-        database.transaction {
-            for (i in 0 until tables.size()) {
-                tables.getString(i)?.let { table ->
-                    // Get the list of columns in the destination database
-                    val destColumns = getColumnNames(table, database)
-                    
-                    // Get the list of columns in the source database
-                    val srcColumns = getColumnNames(table, database, "other")
-                    
-                    // Find the intersection of the column names
-                    val commonColumns = destColumns.intersect(srcColumns)
-                    
-                    if (commonColumns.isNotEmpty()) {
-                        // Escape the common column names for use in SQL query
-                        val escapedColumns = commonColumns.joinToString(", ") { columnName ->
-                            "\"$columnName\""
+        try {
+            // We need to make sure we do not copy the __watermelon_last_pulled_schema_version entry
+            // from local_storage table to avoid migration issues
+            database.execute("DELETE FROM local_storage WHERE key = '__watermelon_last_pulled_schema_version'")
+
+            database.transaction {
+                for (i in 0 until tables.size()) {
+                    tables.getString(i)?.let { table ->
+                        // Get the list of columns in the destination database
+                        val destColumns = getColumnNames(table, database)
+
+                        // Get the list of columns in the source database
+                        val srcColumns = getColumnNames(table, database, "other")
+
+                        // Find the intersection of the column names
+                        val commonColumns = destColumns.intersect(srcColumns)
+
+                        if (commonColumns.isNotEmpty()) {
+                            // Escape the common column names for use in SQL query
+                            val escapedColumns = commonColumns.joinToString(", ") { columnName ->
+                                "\"$columnName\""
+                            }
+
+                            // Perform the data import using the escaped common columns
+                            database.execute(
+                                """
+                            INSERT OR IGNORE INTO $table ($escapedColumns)
+                            SELECT $escapedColumns FROM other.$table
+                            """.trimIndent()
+                            )
                         }
-                        
-                        // Perform the data import using the escaped common columns
-                        database.execute(
-                            """
-                        INSERT OR IGNORE INTO $table ($escapedColumns)
-                        SELECT $escapedColumns FROM other.$table
-                        """.trimIndent()
-                        )
                     }
                 }
             }
+        } finally {
+            // Ensure DETACH always runs, even if the transaction throws
+            try {
+                database.execute("DETACH DATABASE 'other'")
+            } catch (e: Exception) {
+                android.util.Log.w("WatermelonDB", "Failed to detach source database: ${e.message}")
+            }
         }
-    
-        // Detach the source database
-        database.execute("DETACH DATABASE 'other'")
     }
     
     fun batch(operations: ReadableArray) {

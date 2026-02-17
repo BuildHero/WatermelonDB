@@ -118,23 +118,32 @@ class DatabaseDriver {
         // Attach the source database
         try database.execute("ATTACH DATABASE '\(srcDB)' as 'other'")
 
+        // Ensure DETACH always runs, even if the transaction or DELETE throws
+        defer {
+            do {
+                try database.execute("DETACH DATABASE 'other'")
+            } catch {
+                consoleLog("Warning: Failed to detach source database: \(error)")
+            }
+        }
+
         // We need to make sure we do not copy the __watermelon_last_pulled_schema_version entry
         // from local_storage table to avoid migration issues
         try database.execute("DELETE FROM local_storage WHERE key = '__watermelon_last_pulled_schema_version'")
-                     
+
          try database.inTransaction {
              for table in tables {
                 // Get the list of columns in the destination database
                 let destColumns = try getColumnNames(for: table, in: database, schema: "main")
-                
+
                 // Get the list of columns in the source database
                 let srcColumns = try getColumnNames(for: table, in: database, schema: "other")
-                
+
                 // Find the intersection of the column names
                 let commonColumns = destColumns.intersection(srcColumns)
-                 
+
                 let escapedColumns = commonColumns.map { "\"\($0)\"" }
-                 
+
                 // Convert the set of common columns into a comma-separated string
                 let columnsString = escapedColumns.joined(separator: ", ")
 
@@ -149,9 +158,6 @@ class DatabaseDriver {
                 }
             }
          }
-                
-        // Detach the source database
-        try database.execute("DETACH DATABASE 'other'")
     }
 
     func batch(_ operations: [Operation]) throws {

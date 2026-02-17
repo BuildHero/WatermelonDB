@@ -83,11 +83,9 @@ dependencies {
     }
     implementation "androidx.work:work-runtime-ktx:2.9.0"
     implementation "androidx.lifecycle:lifecycle-process:2.7.0"
-    compileOnly files('libs/zstd-jni.aar')
+    implementation files('libs/zstd-jni.aar')
     debugImplementation files('libs/sqlite-android.aar')
-    debugImplementation files('libs/zstd-jni.aar')
     androidTestImplementation files('libs/sqlite-android.aar')
-    androidTestImplementation files('libs/zstd-jni.aar')
     androidTestImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test:core:1.5.0'
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'

@@ -102,6 +102,19 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
         super.invalidate()
         // Clean up resources when module is destroyed
         cleanupCDC()
+
+        // Close all database connections to prevent SQLite resource leaks
+        connections.forEach { (tag, connection) ->
+            if (connection is Connection.Connected) {
+                try {
+                    connection.driver.close()
+                } catch (e: Exception) {
+                    android.util.Log.w("WatermelonDB", "Error closing driver for tag $tag during invalidate: ${e.message}")
+                }
+            }
+        }
+        connections.clear()
+        connectionMetadata.clear()
     }
 
     private fun cleanupCDC() {
@@ -528,7 +541,18 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
     }
 
     private fun disconnectDriver(connectionTag: ConnectionTag) {
-        val queue = connections[connectionTag]?.queue ?: arrayListOf()
+        val connection = connections[connectionTag]
+        val queue = connection?.queue ?: arrayListOf()
+
+        // Close the database connection to prevent resource leaks
+        if (connection is Connection.Connected) {
+            try {
+                connection.driver.close()
+            } catch (e: Exception) {
+                android.util.Log.w("WatermelonDB", "Error closing driver for tag $connectionTag: ${e.message}")
+            }
+        }
+
         connections.remove(connectionTag)
         connectionMetadata.remove(connectionTag)
 

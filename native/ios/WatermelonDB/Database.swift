@@ -42,6 +42,14 @@ public class Database {
         // If we don't do this, the hook callback can fire on a dangling pointer causing crashes
         disableUpdateHook()
     }
+
+    func close() {
+        disableUpdateHook()
+        writer.close()
+        if reader !== writer {
+            reader.close()
+        }
+    }
     
     private func open() {
         guard writer.open() else {
@@ -133,9 +141,11 @@ public class Database {
     }
 
     func disableUpdateHook() {
-        // Guard against invalid database state
-        guard writer.open() else {
-            consoleLog("Warning: Cannot disable update hook - database is not open")
+        // Guard against invalid database state.
+        // IMPORTANT: Do NOT call writer.open() here — FMDatabase.open() actually
+        // opens the database if closed, causing a resource leak during deinit.
+        // Instead, check the raw handle which is nil when the connection is closed.
+        guard writer.sqliteHandle != nil else {
             self.updateHookCallback = nil
             return
         }
@@ -251,12 +261,25 @@ public class Database {
         if transactionDepth > 0 {
             return writer
         }
-        return isReadOnlyQuery(query) ? reader : writer
+        if !isReadOnlyQuery(query) {
+            return writer
+        }
+        // Temp tables are per-connection and only exist on the writer.
+        // Route queries referencing temp tables to the writer connection.
+        if referencesTemporaryTable(query) {
+            return writer
+        }
+        return reader
     }
 
     private func isReadOnlyQuery(_ query: SQL) -> Bool {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return trimmed.hasPrefix("select") || trimmed.hasPrefix("with") || trimmed.hasPrefix("explain")
+    }
+
+    private func referencesTemporaryTable(_ query: SQL) -> Bool {
+        let lower = query.lowercased()
+        return lower.contains("temp.") || lower.contains("sqlite_temp_master")
     }
     
     private func setWalMode(on db: FMDatabase) throws {
@@ -292,6 +315,10 @@ public class Database {
 
     func _test_isReadOnlyQuery(_ query: SQL) -> Bool {
         return isReadOnlyQuery(query)
+    }
+
+    func _test_referencesTemporaryTable(_ query: SQL) -> Bool {
+        return referencesTemporaryTable(query)
     }
 
     func _test_readerQueryOnlyValue() -> Int {
