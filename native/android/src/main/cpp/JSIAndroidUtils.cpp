@@ -2,6 +2,7 @@
 #include "../../../../shared/DatabaseUtils.h"
 #include <string>
 #include <cctype>
+#include <algorithm>
 #include <fbjni/fbjni.h>
 #include <sqlite3.h>
 #include "SQLiteConnection.h"
@@ -29,7 +30,21 @@ private:
 
 namespace watermelondb {
 
+    // Temp tables are per-connection and only exist on the writer.
+    // Route queries referencing temp tables to the writer connection.
+    static bool referencesTemporaryTable(const std::string &query) {
+        std::string lower = query;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+
+        return lower.find("temp.") != std::string::npos ||
+               lower.find("sqlite_temp_master") != std::string::npos;
+    }
+
     static bool isReadOnlyQuery(const std::string &query) {
+        if (referencesTemporaryTable(query)) {
+            return false;
+        }
         size_t i = 0;
         while (i < query.size() && std::isspace(static_cast<unsigned char>(query[i]))) {
             i++;
