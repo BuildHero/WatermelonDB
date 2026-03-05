@@ -25,7 +25,11 @@ public class Database {
     }
     
     private var updateHookCallback: ((UnsafeMutableRawPointer?, Int32, UnsafePointer<Int8>?, UnsafePointer<Int8>?, Int64) -> Void)?
-    
+
+    /// Semaphore that serializes all write transactions across JS batch, SyncApply,
+    /// and SliceImport. Acquired before BEGIN, released after COMMIT/ROLLBACK.
+    public let writerTransactionSemaphore = DispatchSemaphore(value: 1)
+
     init(path: String) {
         self.path = path
         writer = FMDatabase(path: path)
@@ -76,20 +80,23 @@ public class Database {
     }
     
     func inTransaction(_ executeBlock: () throws -> Void) throws {
+        writerTransactionSemaphore.wait()
+        defer { writerTransactionSemaphore.signal() }
+
         guard writer.beginTransaction() else { throw writer.lastError() }
-        
+
         // Atomically increment transaction depth
         transactionLock.lock()
         _transactionDepth += 1
         transactionLock.unlock()
-        
+
         defer {
             // Atomically decrement transaction depth
             transactionLock.lock()
             _transactionDepth -= 1
             transactionLock.unlock()
         }
-        
+
         do {
             try executeBlock()
             guard writer.commit() else { throw writer.lastError() }
@@ -97,11 +104,11 @@ public class Database {
             guard (error as NSError).code != SQLITE_FULL else {
                 throw error
             }
-            
+
             guard writer.rollback() else {
                 throw writer.lastError()
             }
-            
+
             throw error
         }
     }

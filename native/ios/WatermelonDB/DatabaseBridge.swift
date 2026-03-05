@@ -85,6 +85,15 @@ final public class DatabaseBridge: RCTEventEmitter {
     }
     
     @objc
+    public func getWriterTransactionSemaphore(connectionTag: ConnectionTag) -> DispatchSemaphore? {
+        guard let connection = connections[connectionTag.intValue],
+              case let .connected(driver, synchronous: true) = connection else {
+            return nil
+        }
+        return driver.database.writerTransactionSemaphore
+    }
+
+    @objc
     public func isCached(connectionTag: ConnectionTag, table: String, id: String) -> Bool {
         guard let connection = connections[connectionTag.intValue], case let .connected(driver, synchronous: true) = connection else {
             return false
