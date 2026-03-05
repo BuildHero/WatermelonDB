@@ -8,6 +8,7 @@ public class Database {
     
     private let writer: FMDatabase
     private let reader: FMDatabase
+    private let syncWriter: FMDatabase
     private let path: String
     private let transactionLock = NSLock()
     private var _transactionDepth = 0
@@ -31,8 +32,10 @@ public class Database {
         writer = FMDatabase(path: path)
         if Database.isInMemory(path: path) {
             reader = writer
+            syncWriter = writer
         } else {
             reader = FMDatabase(path: path)
+            syncWriter = FMDatabase(path: path)
         }
         open()
     }
@@ -49,29 +52,48 @@ public class Database {
         if reader !== writer {
             reader.close()
         }
+        if syncWriter !== writer {
+            syncWriter.close()
+        }
     }
     
     private func open() {
         guard writer.open() else {
             fatalError("Failed to open the database. \(writer.lastErrorMessage())")
         }
-        
+
         if reader !== writer {
             guard reader.open() else {
                 fatalError("Failed to open the database. \(reader.lastErrorMessage())")
             }
         }
-        
+
+        if syncWriter !== writer {
+            guard syncWriter.open() else {
+                fatalError("Failed to open the sync writer database. \(syncWriter.lastErrorMessage())")
+            }
+        }
+
         do {
             try setWalMode(on: writer)
             if reader !== writer {
                 try setWalMode(on: reader)
                 try setQueryOnly(on: reader)
             }
+            if syncWriter !== writer {
+                try setWalMode(on: syncWriter)
+            }
         } catch {
             fatalError("Failed to configure database connections \(error)")
         }
-        
+
+        // Set busy timeout on writer and syncWriter so concurrent writers
+        // wait (via sqlite3_busy_timeout) instead of failing with SQLITE_BUSY
+        sqlite3_busy_timeout(writer.sqliteHandle, 30000)
+        if syncWriter !== writer {
+            sqlite3_busy_timeout(syncWriter.sqliteHandle, 30000)
+        }
+
         consoleLog("Opened database at: \(path)")
     }
     
@@ -123,6 +145,10 @@ public class Database {
     
     func getRawReadPointer() -> OpaquePointer {
         return OpaquePointer(reader.sqliteHandle)
+    }
+
+    func getRawSyncPointer() -> OpaquePointer {
+        return OpaquePointer(syncWriter.sqliteHandle)
     }
     
     func setUpdateHook(withCallback callback: @escaping (UnsafeMutableRawPointer?, Int32, UnsafePointer<Int8>?, UnsafePointer<Int8>?, Int64) -> Void) {
@@ -233,13 +259,19 @@ public class Database {
             guard writer.close() else {
                 throw "Could not close database".asError()
             }
-            
+
             if reader !== writer {
                 guard reader.close() else {
                     throw "Could not close database".asError()
                 }
             }
-            
+
+            if syncWriter !== writer {
+                guard syncWriter.close() else {
+                    throw "Could not close sync writer database".asError()
+                }
+            }
+
             let manager = FileManager.default
             
             try manager.removeItem(atPath: path)

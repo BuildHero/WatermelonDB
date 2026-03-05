@@ -164,7 +164,7 @@ private:
         __block bool ok = false;
         __block std::string error;
         void (^block)(void) = ^{
-            sqlite3 *db = (sqlite3 *)[db_ getRawConnectionWithConnectionTag:connectionTag_];
+            sqlite3 *db = (sqlite3 *)[db_ getRawSyncConnectionWithConnectionTag:connectionTag_];
             if (!db) {
                 error = "Lost database connection";
                 ok = false;
@@ -188,7 +188,7 @@ private:
             return;
         }
         void (^block)(void) = ^{
-            sqlite3 *db = (sqlite3 *)[db_ getRawConnectionWithConnectionTag:connectionTag_];
+            sqlite3 *db = (sqlite3 *)[db_ getRawSyncConnectionWithConnectionTag:connectionTag_];
             if (db) {
                 finalizeStatementsOnDB(db);
             }

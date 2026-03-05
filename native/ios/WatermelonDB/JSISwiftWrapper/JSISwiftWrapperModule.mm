@@ -61,7 +61,7 @@ JSISwiftWrapperModule::JSISwiftWrapperModule(std::shared_ptr<CallInvoker> jsInvo
                 return false;
             }
             NSNumber *tagNumber = @(syncConnectionTag_);
-            sqlite3 *sqlite = (sqlite3 *)[db getRawConnectionWithConnectionTag:tagNumber];
+            sqlite3 *sqlite = (sqlite3 *)[db getRawSyncConnectionWithConnectionTag:tagNumber];
             if (!sqlite) {
                 errorMessage = "Failed to get SQLite connection";
                 return false;
