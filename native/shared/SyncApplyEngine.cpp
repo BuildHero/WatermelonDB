@@ -326,8 +326,9 @@ static bool loadTableColumns(sqlite3* db, const std::string& table,
     sqlite3_finalize(stmt);
     
     if (columns.empty()) {
-        errorMessage = "Failed to load table schema for " + table;
-        return false;
+        // Table does not exist in local SQLite — caller should skip gracefully
+        outColumns = nullptr;
+        return true;
     }
     
     {
@@ -349,7 +350,11 @@ static bool applyRowObject(sqlite3* db, const std::string& table, const JsonValu
     if (!loadTableColumns(db, table, allowedColumns, errorMessage)) {
         return false;
     }
-    
+    if (!allowedColumns) {
+        // Table does not exist in local schema — skip gracefully
+        return true;
+    }
+
     auto buildKeys = [&rowValue, &allowedColumns](int& missingCount) {
         std::vector<std::string> keys;
         keys.reserve(rowValue.objectValue.size());
@@ -565,8 +570,23 @@ static bool setLocalStorage(sqlite3* db, const std::string& key, const std::stri
     return true;
 }
 
+static bool tableExistsInDb(sqlite3* db, const std::string& table) {
+    std::string pragma = "PRAGMA table_info(" + quoteIdentifier(table) + ")";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, pragma.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        return false;
+    }
+    bool exists = (sqlite3_step(stmt) == SQLITE_ROW);
+    sqlite3_finalize(stmt);
+    return exists;
+}
+
 static bool applyDeletes(sqlite3* db, const std::string& table, const JsonValue& rows, std::string& errorMessage) {
     if (rows.type != JsonValue::Type::Array || rows.arrayValue.empty()) {
+        return true;
+    }
+    // Skip deletes for tables that don't exist in local schema
+    if (!tableExistsInDb(db, table)) {
         return true;
     }
     const int chunkSize = 900;
@@ -652,9 +672,11 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
     std::unordered_map<std::string, JsonValue> deletesByTable;
     std::unordered_map<std::string, size_t> upsertsByTable;
     std::unordered_map<std::string, size_t> deletesCountByTable;
+    std::unordered_set<std::string> skippedTables;
     size_t totalItems = 0;
     size_t totalUpserts = 0;
     size_t totalDeletes = 0;
+    size_t totalSkipped = 0;
     std::string maxSequenceId;
     for (const auto& entry : items->arrayValue) {
         if (entry.type != JsonValue::Type::Object) {
@@ -689,6 +711,19 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
             rowPtr = &rowPayload;
         }
         
+        // Skip tables that don't exist in the local SQLite schema.
+        // This handles schema version mismatches where the API returns
+        // data for tables the app hasn't created yet.
+        if (skippedTables.count(table)) {
+            totalSkipped++;
+            continue;
+        }
+        if (!tableExistsInDb(db, table)) {
+            skippedTables.insert(table);
+            totalSkipped++;
+            continue;
+        }
+
         if (isDeleted) {
             JsonValue deleteId;
             if (!extractDeleteId(entry, rowPtr, deleteId)) {
@@ -743,6 +778,17 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
     std::string message = "SyncApplyEngine batch applied: items=" + std::to_string(totalItems) +
                           ", upserts=" + std::to_string(totalUpserts) +
                           ", deletes=" + std::to_string(totalDeletes);
+    if (totalSkipped > 0) {
+        message += ", skipped=" + std::to_string(totalSkipped);
+        message += ", skippedTables=[";
+        bool first = true;
+        for (const auto& t : skippedTables) {
+            if (!first) message += ", ";
+            message += t;
+            first = false;
+        }
+        message += "]";
+    }
     if (!upsertsSummary.empty()) {
         message += ", upsertsByTable=[" + upsertsSummary + "]";
     }
