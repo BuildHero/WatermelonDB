@@ -89,9 +89,9 @@ public class Database {
 
         // Set busy timeout on writer and syncWriter so concurrent writers
         // wait (via sqlite3_busy_timeout) instead of failing with SQLITE_BUSY
-        sqlite3_busy_timeout(writer.sqliteHandle, 30000)
+        sqlite3_busy_timeout(OpaquePointer(writer.sqliteHandle), 30000)
         if syncWriter !== writer {
-            sqlite3_busy_timeout(syncWriter.sqliteHandle, 30000)
+            sqlite3_busy_timeout(OpaquePointer(syncWriter.sqliteHandle), 30000)
         }
 
         consoleLog("Opened database at: \(path)")
