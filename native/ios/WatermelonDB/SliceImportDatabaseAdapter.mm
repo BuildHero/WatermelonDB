@@ -43,12 +43,14 @@ public:
         : db_(db)
         , connectionTag_(connectionTag)
         , methodQueue_(db ? db.methodQueue : nullptr)
-        , transactionStarted_(false) {
+        , transactionStarted_(false)
+        , writerSemaphore_(nil)
+        , cachedDB_(nullptr) {
         if (methodQueue_) {
             dispatch_queue_set_specific(methodQueue_, kDBQueueKey, kDBQueueKey, nullptr);
         }
     }
-    
+
     ~IOSDatabaseInterface() override {
         if (transactionStarted_) {
             std::string error;
@@ -57,136 +59,157 @@ public:
             finalizeStatements();
         }
     }
-    
+
     bool beginTransaction(std::string &errorMessage) override {
-        return runOnDBQueue([this](sqlite3 *db, std::string &error) {
-            if (transactionStarted_) {
-                error = "Transaction already started";
-                return false;
-            }
-            std::string ignored;
-            execSQL(db, "PRAGMA journal_mode=WAL;", ignored);
-            execSQL(db, "PRAGMA synchronous=NORMAL;", ignored);
-            execSQL(db, "PRAGMA temp_store=MEMORY;", ignored);
-            execSQL(db, "PRAGMA cache_size=-20000;", ignored);
-            execSQL(db, "PRAGMA wal_autocheckpoint=10000;", ignored);
-            if (!execSQL(db, "BEGIN IMMEDIATE;", error)) {
-                return false;
-            }
-            transactionStarted_ = true;
-            return true;
-        }, errorMessage);
-    }
-    
-    bool commitTransaction(std::string &errorMessage) override {
-        return runOnDBQueue([this](sqlite3 *db, std::string &error) {
-            if (!transactionStarted_) {
-                error = "No transaction to commit";
-                return false;
-            }
-            if (!execSQL(db, "COMMIT;", error)) {
-                rollbackTransactionOnDB(db);
-                return false;
-            }
-            transactionStarted_ = false;
-            
-            // WAL checkpoint for predictable completion
-            int logFrames = 0;
-            int ckptFrames = 0;
-            sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_TRUNCATE, &logFrames, &ckptFrames);
-            
-            finalizeStatementsOnDB(db);
-            
-            std::string ignored;
-            execSQL(db, "PRAGMA synchronous=NORMAL;", ignored);
-            execSQL(db, "PRAGMA wal_autocheckpoint=1000;", ignored);
-            
-            return true;
-        }, errorMessage);
-    }
-    
-    void rollbackTransaction() override {
+        if (!db_) {
+            errorMessage = "DatabaseBridge deallocated";
+            return false;
+        }
+        if (transactionStarted_) {
+            errorMessage = "Transaction already started";
+            return false;
+        }
+
+        // Acquire the writer transaction semaphore — blocks until JS writes finish
+        dispatch_semaphore_t sem = [db_ getWriterTransactionSemaphoreWithConnectionTag:connectionTag_];
+        if (!sem) {
+            errorMessage = "Could not get writer transaction semaphore";
+            return false;
+        }
+        dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+        writerSemaphore_ = sem;
+
+        // Get raw sqlite3* directly (bypasses methodQueue — semaphore provides serialization)
+        sqlite3 *db = (sqlite3 *)[db_ getRawConnectionWithConnectionTag:connectionTag_];
+        if (!db) {
+            dispatch_semaphore_signal(writerSemaphore_);
+            writerSemaphore_ = nil;
+            errorMessage = "Lost database connection";
+            return false;
+        }
+        cachedDB_ = db;
+
         std::string ignored;
-        runOnDBQueue([this](sqlite3 *db, std::string &error) {
-            rollbackTransactionOnDB(db);
-            return true;
-        }, ignored);
+        execSQL(db, "PRAGMA journal_mode=WAL;", ignored);
+        execSQL(db, "PRAGMA synchronous=NORMAL;", ignored);
+        execSQL(db, "PRAGMA temp_store=MEMORY;", ignored);
+        execSQL(db, "PRAGMA cache_size=-20000;", ignored);
+        execSQL(db, "PRAGMA wal_autocheckpoint=10000;", ignored);
+        if (!execSQL(db, "BEGIN IMMEDIATE;", errorMessage)) {
+            dispatch_semaphore_signal(writerSemaphore_);
+            writerSemaphore_ = nil;
+            cachedDB_ = nullptr;
+            return false;
+        }
+        transactionStarted_ = true;
+        return true;
     }
-    
+
+    bool commitTransaction(std::string &errorMessage) override {
+        if (!transactionStarted_) {
+            errorMessage = "No transaction to commit";
+            return false;
+        }
+        sqlite3 *db = cachedDB_;
+        if (!db) {
+            errorMessage = "Lost cached database connection";
+            return false;
+        }
+        if (!execSQL(db, "COMMIT;", errorMessage)) {
+            rollbackTransactionOnDB(db);
+            return false;
+        }
+        transactionStarted_ = false;
+
+        // WAL checkpoint for predictable completion
+        int logFrames = 0;
+        int ckptFrames = 0;
+        sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_TRUNCATE, &logFrames, &ckptFrames);
+
+        finalizeStatementsOnDB(db);
+
+        std::string ignored;
+        execSQL(db, "PRAGMA synchronous=NORMAL;", ignored);
+        execSQL(db, "PRAGMA wal_autocheckpoint=1000;", ignored);
+
+        cachedDB_ = nullptr;
+        if (writerSemaphore_) {
+            dispatch_semaphore_signal(writerSemaphore_);
+            writerSemaphore_ = nil;
+        }
+
+        return true;
+    }
+
+    void rollbackTransaction() override {
+        sqlite3 *db = cachedDB_;
+        if (db) {
+            rollbackTransactionOnDB(db);
+        }
+        cachedDB_ = nullptr;
+        if (writerSemaphore_) {
+            dispatch_semaphore_signal(writerSemaphore_);
+            writerSemaphore_ = nil;
+        }
+    }
+
     bool insertRows(const std::string &tableName,
                     const std::vector<std::string> &columns,
                     const std::vector<std::vector<FieldValue>> &rows,
                     std::string &errorMessage) override {
-        if (rows.empty()) {
-            return true;
+        if (rows.empty()) return true;
+        sqlite3 *db = cachedDB_;
+        if (!db) {
+            errorMessage = "No cached database connection";
+            return false;
         }
-        return runOnDBQueue([this, &tableName, &columns, &rows](sqlite3 *db, std::string &error) {
-            return insertHelper_.insertRowsMulti(db, tableName, columns, rows, error);
-        }, errorMessage);
+        return insertHelper_.insertRowsMulti(db, tableName, columns, rows, errorMessage);
     }
-    
+
     bool insertBatch(const watermelondb::BatchData &batch,
                      std::string &errorMessage) override {
-        if (batch.totalRows == 0) {
-            return true;
+        if (batch.totalRows == 0) return true;
+        sqlite3 *db = cachedDB_;
+        if (!db) {
+            errorMessage = "No cached database connection";
+            return false;
         }
-        
-        return runOnDBQueue([this, &batch](sqlite3 *db, std::string &error) {
-            return insertHelper_.insertBatch(db, batch, error);
-        }, errorMessage);
+        return insertHelper_.insertBatch(db, batch, errorMessage);
     }
-    
+
     bool createSavepoint(std::string &errorMessage) override {
-        return runOnDBQueue([](sqlite3 *db, std::string &error) {
-            return execSQL(db, "SAVEPOINT sp;", error);
-        }, errorMessage);
+        sqlite3 *db = cachedDB_;
+        if (!db) {
+            errorMessage = "No cached database connection";
+            return false;
+        }
+        return execSQL(db, "SAVEPOINT sp;", errorMessage);
     }
-    
+
     bool releaseSavepoint(std::string &errorMessage) override {
-        return runOnDBQueue([](sqlite3 *db, std::string &error) {
-            return execSQL(db, "RELEASE SAVEPOINT sp;", error);
-        }, errorMessage);
+        sqlite3 *db = cachedDB_;
+        if (!db) {
+            errorMessage = "No cached database connection";
+            return false;
+        }
+        return execSQL(db, "RELEASE SAVEPOINT sp;", errorMessage);
     }
-    
+
 private:
     __weak DatabaseBridge *db_;
     NSNumber *connectionTag_;
     dispatch_queue_t methodQueue_;
     watermelondb::SqliteInsertHelper insertHelper_;
     bool transactionStarted_;
-    
-    bool runOnDBQueue(const std::function<bool(sqlite3 *, std::string &)> &work,
-                      std::string &errorMessage) {
-        if (!db_ || !methodQueue_) {
-            errorMessage = "DatabaseBridge deallocated";
-            return false;
-        }
-        __block bool ok = false;
-        __block std::string error;
-        void (^block)(void) = ^{
-            sqlite3 *db = (sqlite3 *)[db_ getRawConnectionWithConnectionTag:connectionTag_];
-            if (!db) {
-                error = "Lost database connection";
-                ok = false;
-                return;
-            }
-            ok = work(db, error);
-        };
-        if (dispatch_get_specific(kDBQueueKey)) {
-            block();
-        } else {
-            dispatch_sync(methodQueue_, block);
-        }
-        if (!error.empty()) {
-            errorMessage = error;
-        }
-        return ok;
-    }
-    
+    dispatch_semaphore_t writerSemaphore_;
+    sqlite3 *cachedDB_;
+
     void finalizeStatements() {
-        if (!methodQueue_) {
+        if (cachedDB_) {
+            finalizeStatementsOnDB(cachedDB_);
             return;
         }
+        if (!methodQueue_) return;
         void (^block)(void) = ^{
             sqlite3 *db = (sqlite3 *)[db_ getRawConnectionWithConnectionTag:connectionTag_];
             if (db) {
@@ -199,26 +222,24 @@ private:
             dispatch_sync(methodQueue_, block);
         }
     }
-    
+
     void finalizeStatementsOnDB(sqlite3 *db) {
         (void)db;
         insertHelper_.finalizeStatements();
     }
-    
+
     void rollbackTransactionOnDB(sqlite3 *db) {
         std::string ignored;
         execSQL(db, "ROLLBACK TO SAVEPOINT sp;", ignored);
         execSQL(db, "RELEASE SAVEPOINT sp;", ignored);
         execSQL(db, "ROLLBACK;", ignored);
-        
+
         finalizeStatementsOnDB(db);
         transactionStarted_ = false;
-        
+
         execSQL(db, "PRAGMA synchronous=NORMAL;", ignored);
         execSQL(db, "PRAGMA wal_autocheckpoint=1000;", ignored);
     }
-    
-    
 };
 
 std::shared_ptr<DatabaseInterface> createIOSDatabaseInterface(DatabaseBridge *db, NSNumber *connectionTag) {

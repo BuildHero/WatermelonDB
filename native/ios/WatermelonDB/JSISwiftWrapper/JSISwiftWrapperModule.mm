@@ -61,12 +61,25 @@ JSISwiftWrapperModule::JSISwiftWrapperModule(std::shared_ptr<CallInvoker> jsInvo
                 return false;
             }
             NSNumber *tagNumber = @(syncConnectionTag_);
+
+            // Acquire the writer transaction semaphore to serialize with JS writes
+            dispatch_semaphore_t sem = [db getWriterTransactionSemaphoreWithConnectionTag:tagNumber];
+            if (!sem) {
+                errorMessage = "Could not get writer transaction semaphore";
+                return false;
+            }
+            dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+
             sqlite3 *sqlite = (sqlite3 *)[db getRawConnectionWithConnectionTag:tagNumber];
             if (!sqlite) {
+                dispatch_semaphore_signal(sem);
                 errorMessage = "Failed to get SQLite connection";
                 return false;
             }
-            return watermelondb::applySyncPayload(sqlite, payload, errorMessage);
+            bool result = watermelondb::applySyncPayload(sqlite, payload, errorMessage);
+
+            dispatch_semaphore_signal(sem);
+            return result;
         }
     });
     syncEngine_->setAuthTokenRequestCallback([this]() {
