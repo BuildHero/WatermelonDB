@@ -353,7 +353,7 @@ extension DatabaseBridge {
                       params: [Any] = [],
                       resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
         withDriver(tag, resolve, reject) {
-            try $0.execSqlQuery(query)
+            try $0.execSqlQuery(query, params: params)
         }
     }
 

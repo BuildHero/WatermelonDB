@@ -194,24 +194,31 @@ namespace watermelondb {
 
         sqlite3* db = connection->db;
 
-        auto stmt = getStmt(rt, reinterpret_cast<sqlite3*>(db), sql.utf8(rt), arguments);
+        jsi::Value result;
+        try {
+            auto stmt = getStmt(rt, reinterpret_cast<sqlite3*>(db), sql.utf8(rt), arguments);
 
-        std::vector<jsi::Value> records = {};
+            std::vector<jsi::Value> records = {};
 
-        while (true) {
-            if (getNextRowOrTrue(rt, stmt)) {
-                break;
+            while (true) {
+                if (getNextRowOrTrue(rt, stmt)) {
+                    break;
+                }
+
+                jsi::Object record = resultDictionary(rt, stmt);
+
+                records.push_back(std::move(record));
             }
 
-            jsi::Object record = resultDictionary(rt, stmt);
-
-            records.push_back(std::move(record));
+            finalizeStmt(stmt);
+            result = arrayFromStd(rt, records);
+        } catch (...) {
+            env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
+            throw;
         }
-
-        finalizeStmt(stmt);
         env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
 
-        return arrayFromStd(rt, records);
+        return result;
     }
 
     jsi::Value execSqlQueryOnWriter(jobject bridge, jsi::Runtime &rt, const jsi::Value &tag, const jsi::String &sql, const jsi::Array &arguments) {
@@ -268,24 +275,31 @@ namespace watermelondb {
 
         sqlite3* db = connection->db;
 
-        auto stmt = getStmt(rt, reinterpret_cast<sqlite3*>(db), sql.utf8(rt), arguments);
+        jsi::Value result;
+        try {
+            auto stmt = getStmt(rt, reinterpret_cast<sqlite3*>(db), sql.utf8(rt), arguments);
 
-        std::vector<jsi::Value> records = {};
+            std::vector<jsi::Value> records = {};
 
-        while (true) {
-            if (getNextRowOrTrue(rt, stmt)) {
-                break;
+            while (true) {
+                if (getNextRowOrTrue(rt, stmt)) {
+                    break;
+                }
+
+                jsi::Object record = resultDictionary(rt, stmt);
+
+                records.push_back(std::move(record));
             }
 
-            jsi::Object record = resultDictionary(rt, stmt);
-
-            records.push_back(std::move(record));
+            finalizeStmt(stmt);
+            result = arrayFromStd(rt, records);
+        } catch (...) {
+            env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
+            throw;
         }
-
-        finalizeStmt(stmt);
         env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
 
-        return arrayFromStd(rt, records);
+        return result;
     }
 
     jsi::Value query(jobject bridge, jsi::Runtime &rt, const jsi::Value &tag, const jsi::String &table, const jsi::String &query) {
