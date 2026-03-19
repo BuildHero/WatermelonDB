@@ -356,6 +356,16 @@ extension DatabaseBridge {
             try $0.execSqlQuery(query)
         }
     }
+
+    @objc(execSqlQueryOnWriter:query:params:resolve:reject:)
+    func execSqlQueryOnWriter(tag: ConnectionTag,
+                              query: Database.SQL,
+                              params: [Any] = [],
+                              resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
+        withDriver(tag, resolve, reject) {
+            try $0.execSqlQueryOnWriter(query, params: params)
+        }
+    }
     
     @objc(count:query:resolve:reject:)
     func count(tag: ConnectionTag,
@@ -514,6 +524,13 @@ extension DatabaseBridge {
     public func execSqlQuerySynchronous(tag: ConnectionTag, query: Database.SQL, params: [Any]) -> NSDictionary {
         return withDriverSynchronous(tag) {
             try $0.execSqlQuery(query, params: params)
+        }
+    }
+
+    @objc(execSqlQueryOnWriterSynchronous:query:params:)
+    public func execSqlQueryOnWriterSynchronous(tag: ConnectionTag, query: Database.SQL, params: [Any]) -> NSDictionary {
+        return withDriverSynchronous(tag) {
+            try $0.execSqlQueryOnWriter(query, params: params)
         }
     }
     

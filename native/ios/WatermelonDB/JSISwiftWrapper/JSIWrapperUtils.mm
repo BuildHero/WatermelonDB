@@ -62,6 +62,32 @@ jsi::Value execSqlQuery(DatabaseBridge *databaseBridge, jsi::Runtime &rt, const 
     return arrayFromStd(rt, records);
 }
 
+jsi::Value execSqlQueryOnWriter(DatabaseBridge *databaseBridge, jsi::Runtime &rt, const jsi::Value &tag, const jsi::String &sql, const jsi::Array &args) {
+    auto tagNumber = [[NSNumber alloc] initWithDouble:tag.asNumber()];
+
+    const auto query = sql.utf8(rt);
+    // Always use the writer connection
+    auto db = [databaseBridge getRawConnectionWithConnectionTag:tagNumber];
+
+    auto stmt = getStmt(rt, static_cast<sqlite3*>(db), query, args);
+
+    std::vector<jsi::Value> records = {};
+
+    while (true) {
+        if (getNextRowOrTrue(rt, stmt)) {
+            break;
+        }
+
+        jsi::Object record = resultDictionary(rt, stmt);
+
+        records.push_back(std::move(record));
+    }
+
+    finalizeStmt(stmt);
+
+    return arrayFromStd(rt, records);
+}
+
 jsi::Value query(DatabaseBridge *databaseBridge, jsi::Runtime &rt, const jsi::Value &tag, const jsi::String &table, const jsi::String &query) {
     auto tagNumber = [[NSNumber alloc] initWithDouble:tag.asNumber()];
     auto tableStr = [NSString stringWithUTF8String:table.utf8(rt).c_str()];

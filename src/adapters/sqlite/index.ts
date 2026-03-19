@@ -266,6 +266,15 @@ export default class SQLiteAdapter implements DatabaseAdapter, SQLDatabaseAdapte
     )
   }
 
+  // @ts-ignore
+  execSqlQueryOnWriter(sql: string, params: any[], callback: ResultCallback<CachedQueryResult>): void {
+    this._dispatcher.execSqlQueryOnWriter(
+      sql,
+      params?.map((param: any) => `${param}`),
+      (result) => callback(result),
+    )
+  }
+
   unsafeSqlQuery(
     table: TableName<any>,
     sql: string,

@@ -214,6 +214,80 @@ namespace watermelondb {
         return arrayFromStd(rt, records);
     }
 
+    jsi::Value execSqlQueryOnWriter(jobject bridge, jsi::Runtime &rt, const jsi::Value &tag, const jsi::String &sql, const jsi::Array &arguments) {
+        JNIEnv *env = getEnv();
+        if (!env) {
+            throw jsi::JSError(rt, "JNI env not available");
+        }
+        jint jTag = static_cast<jint>(tag.asNumber());
+
+        LocalRef<jclass> myNativeModuleClass(env, env->GetObjectClass(bridge));
+
+        // Always use the writer connection
+        jmethodID getConnectionMethod = env->GetMethodID(
+                myNativeModuleClass.get(),
+                "getSQLiteConnection",
+                "(I)J"
+        );
+
+        jmethodID releaseConnectionMethod = env->GetMethodID(
+                myNativeModuleClass.get(),
+                "releaseSQLiteConnection",
+                "(I)V"
+        );
+
+        SQLiteConnection* connection = reinterpret_cast<SQLiteConnection*>(env->CallLongMethod(bridge, getConnectionMethod, jTag));
+
+        // Check if a Java exception occurred
+        if (env->ExceptionCheck()) {
+            LocalRef<jthrowable> exception(env, env->ExceptionOccurred());
+            env->ExceptionClear();
+
+            LocalRef<jclass> exceptionClass(env, env->GetObjectClass(exception.get()));
+            jmethodID getMessageMethod = env->GetMethodID(exceptionClass.get(), "getMessage", "()Ljava/lang/String;");
+            LocalRef<jstring> messageObj(env, (jstring)env->CallObjectMethod(exception.get(), getMessageMethod));
+
+            std::string message = "Database connection error for tag " + std::to_string(jTag);
+            if (messageObj.get()) {
+                const char* messageChars = env->GetStringUTFChars(messageObj.get(), nullptr);
+                message = std::string(messageChars);
+                env->ReleaseStringUTFChars(messageObj.get(), messageChars);
+            }
+
+            throw jsi::JSError(rt, message);
+        }
+
+        if (!connection) {
+            throw jsi::JSError(rt, "Failed to get SQLite connection - connection is null");
+        }
+
+        if (!connection->db) {
+            env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
+            throw jsi::JSError(rt, "Failed to get SQLite connection - database handle is null");
+        }
+
+        sqlite3* db = connection->db;
+
+        auto stmt = getStmt(rt, reinterpret_cast<sqlite3*>(db), sql.utf8(rt), arguments);
+
+        std::vector<jsi::Value> records = {};
+
+        while (true) {
+            if (getNextRowOrTrue(rt, stmt)) {
+                break;
+            }
+
+            jsi::Object record = resultDictionary(rt, stmt);
+
+            records.push_back(std::move(record));
+        }
+
+        finalizeStmt(stmt);
+        env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
+
+        return arrayFromStd(rt, records);
+    }
+
     jsi::Value query(jobject bridge, jsi::Runtime &rt, const jsi::Value &tag, const jsi::String &table, const jsi::String &query) {
         JNIEnv *env = getEnv();
         if (!env) {
