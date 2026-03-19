@@ -82,6 +82,7 @@ export type NativeDispatcher = {
   removeLocal: (arg1: string, arg2: ResultCallback<undefined>) => void
   copyTables: (tables: any, srcDB: any, callback: ResultCallback<undefined>) => void
   execSqlQuery: (arg1: SQL, arg2: SQLiteArg[], arg3: ResultCallback<DirtyQueryResult>) => void
+  execSqlQueryOnWriter: (arg1: SQL, arg2: SQLiteArg[], arg3: ResultCallback<DirtyQueryResult>) => void
   enableNativeCDC: (arg1: ResultCallback<undefined>) => void
   disableNativeCDC: (arg1: ResultCallback<undefined>) => void
   setCDCEnabled?: (enabled: boolean, callback: ResultCallback<undefined>) => void
@@ -122,6 +123,7 @@ export type NativeBridgeType = {
   enableNativeCDC: (arg1: ConnectionTag) => Promise<void>
   disableNativeCDC: (arg1: ConnectionTag) => Promise<void>
   execSqlQuery: (arg1: ConnectionTag, arg2: SQL, arg3: SQLiteArg[]) => Promise<DirtyQueryResult>
+  execSqlQueryOnWriter: (arg1: ConnectionTag, arg2: SQL, arg3: SQLiteArg[]) => Promise<DirtyQueryResult>
   // Synchronous methods
   initializeSynchronous?: (
     arg1: ConnectionTag,
@@ -171,6 +173,7 @@ export type NativeBridgeType = {
   getLocalSynchronous?: (arg1: ConnectionTag, arg2: string) => SyncReturn<string | null | undefined>
   setLocalSynchronous?: (arg1: ConnectionTag, arg2: string, arg3: string) => SyncReturn<void>
   removeLocalSynchronous?: (arg1: ConnectionTag, arg2: string) => SyncReturn<void>
+  execSqlQueryOnWriterSynchronous?: (arg1: ConnectionTag, arg2: SQL, arg3: SQLiteArg[]) => SyncReturn<DirtyQueryResult>
   // Special methods
   copyTables?: (arg1: TableName<any>[], arg2?: any) => Promise<void>
 }

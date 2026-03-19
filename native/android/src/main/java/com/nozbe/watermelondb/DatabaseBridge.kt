@@ -311,6 +311,14 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
+    fun execSqlQueryOnWriter(tag: ConnectionTag, query: SQL, params: ReadableArray = WritableNativeArray(), promise: Promise) =
+        withDriver(tag, promise) { it.execSqlQueryOnWriter(query, params) }
+
+    fun execSqlQueryOnWriterSynchronous(tag: ConnectionTag, query: SQL, params: ReadableArray = WritableNativeArray()): WritableArray {
+        return withDriverSynchronous(tag) { it.execSqlQueryOnWriter(query, params) } as WritableArray
+    }
+
+    @ReactMethod
     fun count(tag: ConnectionTag, query: SQL, promise: Promise) =
         withDriver(tag, promise) { it.count(query) }
 

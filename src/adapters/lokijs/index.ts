@@ -209,6 +209,18 @@ export default class LokiJSAdapter implements DatabaseAdapter {
     throw new Error('execSqlQuery not implemented in LOKIJS')
   }
 
+  execSqlQueryOnWriter(
+    _sql: string,
+    _params: any[],
+    _callback: ResultCallback<
+      {
+        [key: string]: any
+      }[]
+    >,
+  ): void {
+    throw new Error('execSqlQueryOnWriter not implemented in LOKIJS')
+  }
+
   obliterateDatabase(_callback: ResultCallback<undefined>): void {
     throw new Error('obliterateDatabase not implemented in LOKIJS')
   }

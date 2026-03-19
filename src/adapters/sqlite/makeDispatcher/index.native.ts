@@ -22,6 +22,7 @@ import { syncReturnToResult } from '../common'
 type NativeWatermelonDBModuleSpec = {
   query(tag: number, table: string, query: string): Record<string, any>[]
   execSqlQuery(tag: number, sql: string, args: Record<string, any>[]): Record<string, any>[]
+  execSqlQueryOnWriter(tag: number, sql: string, args: Record<string, any>[]): Record<string, any>[]
   configureSync(configJson: string): void
   startSync(reason: string): void
   getSyncStateJson(): string
@@ -78,13 +79,14 @@ const dispatcherMethods = [
   'setLocal',
   'removeLocal',
   'execSqlQuery',
+  'execSqlQueryOnWriter',
   'enableNativeCDC',
   'disableNativeCDC',
   'setCDCEnabled',
 ]
 
-const supportedHybridJSIMethods = new Set(['query', 'execSqlQuery'])
-const supportedTurboModuleMethods = new Set(['query', 'execSqlQuery'])
+const supportedHybridJSIMethods = new Set(['query', 'execSqlQuery', 'execSqlQueryOnWriter'])
+const supportedTurboModuleMethods = new Set(['query', 'execSqlQuery', 'execSqlQueryOnWriter'])
 
 export const makeDispatcher = (
   type: DispatcherType,
@@ -119,6 +121,10 @@ export const makeDispatcher = (
               // For execSqlQuery method: execSqlQuery(tag, sql, args)
               const [sql, args] = otherArgs
               returnValue = NativeWatermelonDBModule.execSqlQuery(tag, sql, args)
+            } else if (methodName === 'execSqlQueryOnWriter') {
+              // For execSqlQueryOnWriter method: always uses writer connection
+              const [sql, args] = otherArgs
+              returnValue = NativeWatermelonDBModule.execSqlQueryOnWriter(tag, sql, args)
             }
             callback({
               value: returnValue,

@@ -347,6 +347,14 @@ class DatabaseDriver {
     }
   }
 
+  execSqlQueryOnWriter = (query: string, params: any[]) => {
+    try {
+      return this.database.queryRaw(query, params)
+    } catch (_) {
+      return this.database.execute(query, params)
+    }
+  }
+
   setUpdateHook = (updateHook: any) => {
     this.database.setUpdateHook(updateHook)
   }

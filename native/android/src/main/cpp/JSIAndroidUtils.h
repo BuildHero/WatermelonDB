@@ -19,6 +19,7 @@ using namespace facebook;
 
 namespace watermelondb {
     jsi::Value execSqlQuery(jobject bridge, jsi::Runtime &rt, const jsi::Value &tag, const jsi::String &sql, const jsi::Array &arguments);
+    jsi::Value execSqlQueryOnWriter(jobject bridge, jsi::Runtime &rt, const jsi::Value &tag, const jsi::String &sql, const jsi::Array &arguments);
     jsi::Value query(jobject bridge, jsi::Runtime &rt, const jsi::Value &tag, const jsi::String &table, const jsi::String &query);
     
     JNIEnv* getEnv();

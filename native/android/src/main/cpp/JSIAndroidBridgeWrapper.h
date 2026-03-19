@@ -23,6 +23,7 @@ namespace watermelondb {
 
         jsi::Value query(const jsi::Value &tag, const jsi::String &table, const jsi::String &query);
         jsi::Value execSqlQuery(const jsi::Value &tag, const jsi::String &sql, const jsi::Array &arguments);
+        jsi::Value execSqlQueryOnWriter(const jsi::Value &tag, const jsi::String &sql, const jsi::Array &arguments);
 
     private:
         std::mutex mutex_;

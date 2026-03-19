@@ -404,18 +404,35 @@ jsi::Array JSIAndroidBridgeModule::query(jsi::Runtime &rt, double tag, jsi::Stri
 
 jsi::Array JSIAndroidBridgeModule::execSqlQuery(jsi::Runtime &rt, double tag, jsi::String sql, jsi::Array args) {
     const std::lock_guard<std::mutex> lock(mutex_);
-    
+
     jobject databaseBridge = getDatabaseBridge();
-    
+
     if (databaseBridge == nullptr) {
         throw jsi::JSError(rt, "DatabaseBridge instance not available. Make sure the DatabaseBridge native module is initialized.");
     }
-    
+
     // Convert double tag to jsi::Value
     jsi::Value tagValue = jsi::Value(tag);
-    
+
     jsi::Value result = watermelondb::execSqlQuery(databaseBridge, rt, tagValue, sql, args);
-    
+
+    return result.asObject(rt).asArray(rt);
+}
+
+jsi::Array JSIAndroidBridgeModule::execSqlQueryOnWriter(jsi::Runtime &rt, double tag, jsi::String sql, jsi::Array args) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+
+    jobject databaseBridge = getDatabaseBridge();
+
+    if (databaseBridge == nullptr) {
+        throw jsi::JSError(rt, "DatabaseBridge instance not available. Make sure the DatabaseBridge native module is initialized.");
+    }
+
+    // Convert double tag to jsi::Value
+    jsi::Value tagValue = jsi::Value(tag);
+
+    jsi::Value result = watermelondb::execSqlQueryOnWriter(databaseBridge, rt, tagValue, sql, args);
+
     return result.asObject(rt).asArray(rt);
 }
 
