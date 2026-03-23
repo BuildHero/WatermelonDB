@@ -30,6 +30,12 @@ const dispatcherMethods = [
   'getLocal',
   'setLocal',
   'removeLocal',
+  'execSqlQuery',
+  'execSqlQueryOnWriter',
+  'enableNativeCDC',
+  'disableNativeCDC',
+  'setCDCEnabled',
+  'obliterateDatabase',
 ]
 
 export const makeDispatcher = (type: DispatcherType, tag: ConnectionTag, _dbName: string): NativeDispatcher => {

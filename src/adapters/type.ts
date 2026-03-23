@@ -55,6 +55,13 @@ export interface DatabaseAdapter {
       [key: string]: any;
     }[]>,
   ): void;
+  execSqlQueryOnWriter(
+    sql: string,
+    params: any[],
+    callback: ResultCallback<{
+      [key: string]: any;
+    }[]>,
+  ): void;
   obliterateDatabase(callback: ResultCallback<undefined>): void;
   enableNativeCDC(callback: ResultCallback<undefined>): void;
   disableNativeCDC(callback: ResultCallback<undefined>): void;

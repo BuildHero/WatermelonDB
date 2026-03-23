@@ -111,6 +111,25 @@ class DatabaseDriver(context: Context, dbName: String) {
         return resultArray
     }
 
+    fun execSqlQueryOnWriter(query: SQL, params: ReadableArray = WritableNativeArray()): WritableArray {
+        val resultArray = Arguments.createArray()
+        val sqlParams = mutableListOf<String?>()
+
+        for (i in 0 until params.size()) {
+            sqlParams.add(params.getString(i))
+        }
+
+        database.rawQueryOnWriter(query, sqlParams.toTypedArray()).use {
+            if (it.count > 0) {
+                while (it.moveToNext()) {
+                    resultArray.pushMapFromCursor(it)
+                }
+            }
+        }
+
+        return resultArray
+    }
+
     private fun WritableArray.pushMapFromCursor(cursor: Cursor) {
         val cursorMap = Arguments.createMap()
         cursorMap.mapCursor(cursor)

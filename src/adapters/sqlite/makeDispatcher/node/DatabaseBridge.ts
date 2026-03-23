@@ -356,6 +356,17 @@ class DatabaseBridge {
       driver.execSqlQuery(query, params),
     )
 
+  execSqlQueryOnWriter = (
+    tag: number,
+    query: string,
+    params: any[],
+    resolve: (arg1?: any) => void,
+    reject: (arg1: string) => void,
+  ) =>
+    this.withDriver(tag, resolve, reject, 'execSqlQueryOnWriter', (driver) =>
+      driver.execSqlQueryOnWriter(query, params),
+    )
+
   enableNativeCDC = (tag: number, resolve: (arg1?: any) => void, reject: (arg1: string) => void) =>
     this.withDriver(tag, resolve, reject, 'enableNativeCDC', (driver) =>
       driver.setUpdateHook(this.sqliteUpdateHook.bind(this)),
@@ -367,6 +378,11 @@ class DatabaseBridge {
   execSqlQuerySynchronous = (tag: number, query: string, params: any[]): any =>
     this.withDriverSynchronous(tag, 'execSqlQuerySynchronous', (driver) =>
       driver.execSqlQuery(query, params),
+    )
+
+  execSqlQueryOnWriterSynchronous = (tag: number, query: string, params: any[]): any =>
+    this.withDriverSynchronous(tag, 'execSqlQueryOnWriterSynchronous', (driver) =>
+      driver.execSqlQueryOnWriter(query, params),
     )
 
   findSynchronous = (tag: number, table: string, id: string): any =>

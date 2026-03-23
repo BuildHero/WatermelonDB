@@ -47,6 +47,11 @@ WMELON_BRIDGE_METHOD(execSqlQuery,
   params:(NSArray *) params
 )
 
+WMELON_BRIDGE_METHOD(execSqlQueryOnWriter,
+  query:(nonnull NSString *)query
+  params:(NSArray *) params
+)
+
 WMELON_BRIDGE_METHOD(count,
  query:(nonnull NSString *)query
 )

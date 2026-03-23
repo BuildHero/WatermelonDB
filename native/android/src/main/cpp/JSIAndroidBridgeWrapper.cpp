@@ -24,6 +24,11 @@ namespace watermelondb {
         return watermelondb::execSqlQuery(bridge_, *runtime_, tag, sql, arguments);
     }
 
+    jsi::Value JSIAndroidBridge::execSqlQueryOnWriter(const jsi::Value &tag, const jsi::String &sql, const jsi::Array &arguments) {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        return watermelondb::execSqlQueryOnWriter(bridge_, *runtime_, tag, sql, arguments);
+    }
+
     jsi::Value JSIAndroidBridge::query(const jsi::Value &tag, const jsi::String &table, const jsi::String &query) {
         const std::lock_guard<std::mutex> lock(mutex_);
         return watermelondb::query(bridge_, *runtime_, tag, table, query);
@@ -66,6 +71,23 @@ namespace watermelondb {
         runtime->global()
                 .getPropertyAsObject(*runtime, "WatermelonDB")
                 .setProperty(*runtime, "execSqlQuery", std::move(execQuery));
+
+        auto execQueryOnWriter = jsi::Function::createFromHostFunction(
+                *runtime,
+                jsi::PropNameID::forAscii(*runtime, "execSqlQueryOnWriter"),
+                3,  // Number of arguments
+                [androidBridge](jsi::Runtime &rt, const jsi::Value &thisValue, const jsi::Value *args, size_t count) -> jsi::Value {
+                    if (count != 3) {
+                        throw jsi::JSError(rt, "execSqlQueryOnWriter requires 3 arguments (tag, sql, args)");
+                    }
+
+                    return androidBridge->execSqlQueryOnWriter(args[0], args[1].asString(rt), args[2].asObject(rt).asArray(rt));
+                }
+        );
+
+        runtime->global()
+                .getPropertyAsObject(*runtime, "WatermelonDB")
+                .setProperty(*runtime, "execSqlQueryOnWriter", std::move(execQueryOnWriter));
 
         runtime->global()
                 .getPropertyAsObject(*runtime, "WatermelonDB")
