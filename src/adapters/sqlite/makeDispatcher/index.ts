@@ -32,6 +32,7 @@ const dispatcherMethods = [
   'removeLocal',
   'obliterateDatabase',
   'execSqlQuery',
+  'execSqlQueryOnWriter',
   'enableNativeCDC',
   'disableNativeCDC',
   'setCDCEnabled',
