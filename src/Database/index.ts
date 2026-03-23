@@ -213,10 +213,13 @@ export default class Database {
       batchOperations.length = 0
     }
 
-    // Skip notify if native CDC is enabled - the sqlite update hook will handle it
-    if (!this._nativeCDCEnabled) {
-      this.notify(changeNotifications)
-    }
+    // Always notify after batch writes — even when native CDC is enabled.
+    // CDC only receives table names (not record details), so it can't set _isCommitted
+    // on created records or call _notifyChanged() on updated records. Without this,
+    // Model.observe() breaks for JS-level writes when CDC is enabled.
+    // The CDC hook will also fire asynchronously and call _notifyExternalChange(),
+    // causing at most one extra query re-execution per JS write — negligible overhead.
+    this.notify(changeNotifications)
     return undefined // shuts up flow
   }
 

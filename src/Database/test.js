@@ -258,6 +258,39 @@ describe('Database', () => {
       expect(adapterBatchSpy).toHaveBeenCalledTimes(1)
       expect(adapterBatchSpy).toHaveBeenCalledWith([['create', 'mock_tasks', model._raw]])
     })
+    it('notifies observers and commits records when native CDC is enabled', async () => {
+      const { database, tasks: tasksCollection } = mockDatabase({ actionsEnabled: true })
+
+      // Simulate native CDC being enabled (as initializeNitroSync does)
+      database._nativeCDCEnabled = true
+
+      const model = tasksCollection.prepareCreate(task => {
+        task.name = 'cdc-test'
+      })
+      expect(model._isCommitted).toBe(false)
+
+      const recordObserver = jest.fn()
+
+      await database.action(() => database.batch(model))
+
+      // _isCommitted must be true even with CDC enabled
+      expect(model._isCommitted).toBe(true)
+      expect(model.collection._cache.get(model.id)).toBe(model)
+
+      // Model.observe() should work on the committed record
+      model.observe().subscribe(recordObserver)
+      expect(recordObserver).toHaveBeenCalledTimes(1) // initial emission
+
+      // Update should trigger the observer
+      await database.action(() =>
+        model.update(task => {
+          task.name = 'cdc-updated'
+        }),
+      )
+      expect(recordObserver).toHaveBeenCalledTimes(2)
+
+      database._nativeCDCEnabled = false
+    })
     it('throws error if batch is called outside of an action', async () => {
       const { database, tasks } = mockDatabase({ actionsEnabled: true })
 

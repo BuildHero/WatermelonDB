@@ -160,7 +160,7 @@ describe('database.enableNativeCDC()', () => {
     expect(subscriber).not.toHaveBeenCalled()
   })
 
-  it('batch() skips notify when native CDC is enabled', async () => {
+  it('batch() always calls notify even when native CDC is enabled', async () => {
     const { database, tasks } = mockDatabase({ actionsEnabled: true })
 
     database.adapter.underlyingAdapter.enableNativeCDC = jest.fn((callback) => {
@@ -172,18 +172,19 @@ describe('database.enableNativeCDC()', () => {
     const subscriber = jest.fn()
     database.experimentalSubscribe(['mock_tasks'], subscriber)
 
-    // batch() should NOT call notify directly when CDC is enabled
+    // batch() should ALWAYS call notify — even with CDC enabled.
+    // CDC only receives table names (not record details), so it can't
+    // set _isCommitted or call _notifyChanged(). Without batch notify,
+    // Model.observe() breaks for JS-level writes.
     await database.action(async () => {
       await tasks.create()
     })
 
-    // Subscriber should NOT have been called by batch()
-    // (in real scenario, the SQLITE_UPDATE_HOOK would trigger it)
-    expect(subscriber).not.toHaveBeenCalled()
-
-    // But if we simulate the hook, it should work
-    mockEventEmitter.emit('SQLITE_UPDATE_HOOK', ['mock_tasks'])
     expect(subscriber).toHaveBeenCalledTimes(1)
+
+    // Simulating the CDC hook also works (causes a second, harmless notification)
+    mockEventEmitter.emit('SQLITE_UPDATE_HOOK', ['mock_tasks'])
+    expect(subscriber).toHaveBeenCalledTimes(2)
   })
 
   it('batch() calls notify when native CDC is disabled', async () => {
@@ -201,7 +202,7 @@ describe('database.enableNativeCDC()', () => {
     expect(subscriber).toHaveBeenCalled()
   })
 
-  it('batch() resumes calling notify after disableNativeCDC', async () => {
+  it('batch() calls notify both with and without CDC enabled', async () => {
     const { database, tasks } = mockDatabase({ actionsEnabled: true })
 
     database.adapter.underlyingAdapter.enableNativeCDC = jest.fn((callback) => {
@@ -216,20 +217,20 @@ describe('database.enableNativeCDC()', () => {
     const subscriber = jest.fn()
     database.experimentalSubscribe(['mock_tasks'], subscriber)
 
-    // batch() should NOT call notify when CDC is enabled
+    // batch() calls notify even with CDC enabled
     await database.action(async () => {
       await tasks.create()
     })
-    expect(subscriber).not.toHaveBeenCalled()
+    expect(subscriber).toHaveBeenCalledTimes(1)
 
     // Disable CDC
     await database.disableNativeCDC()
 
-    // Now batch() should call notify again
+    // batch() still calls notify after CDC disabled
     await database.action(async () => {
       await tasks.create()
     })
-    expect(subscriber).toHaveBeenCalled()
+    expect(subscriber).toHaveBeenCalledTimes(2)
   })
 })
 
