@@ -623,6 +623,149 @@ static bool applyDeletes(sqlite3* db, const std::string& table, const JsonValue&
     return true;
 }
 
+// --- Conflict resolution: preserve locally-dirty records during sync pull ---
+// Matches the JS resolveConflict logic from src/sync/impl/helpers.ts
+
+struct DirtyRecordInfo {
+    std::string status;   // "created", "updated", "deleted"
+    std::string changed;  // comma-separated column names that were locally modified
+};
+
+using DirtyRecordCache = std::unordered_map<std::string, DirtyRecordInfo>;
+
+static std::unordered_set<std::string> parseChangedColumns(const std::string& changed) {
+    std::unordered_set<std::string> result;
+    if (changed.empty()) {
+        return result;
+    }
+    std::istringstream stream(changed);
+    std::string column;
+    while (std::getline(stream, column, ',')) {
+        size_t start = column.find_first_not_of(" \t");
+        size_t end = column.find_last_not_of(" \t");
+        if (start != std::string::npos) {
+            result.insert(column.substr(start, end - start + 1));
+        }
+    }
+    return result;
+}
+
+static bool loadDirtyRecordsForTable(sqlite3* db, const std::string& table,
+                                     DirtyRecordCache& out, std::string& errorMessage) {
+    std::string sql = "SELECT \"id\", \"_status\", \"_changed\" FROM " + quoteIdentifier(table) +
+                      " WHERE \"_status\" IS NOT NULL AND \"_status\" != ''";
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        // Table may not have _status/_changed columns (non-synced tables) — no dirty records
+        return true;
+    }
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const unsigned char* id = sqlite3_column_text(stmt, 0);
+        const unsigned char* status = sqlite3_column_text(stmt, 1);
+        const unsigned char* changed = sqlite3_column_text(stmt, 2);
+        if (id && status) {
+            DirtyRecordInfo info;
+            info.status = reinterpret_cast<const char*>(status);
+            info.changed = changed ? reinterpret_cast<const char*>(changed) : "";
+            out[reinterpret_cast<const char*>(id)] = std::move(info);
+        }
+    }
+    sqlite3_finalize(stmt);
+    return true;
+}
+
+static bool applyPartialUpdate(sqlite3* db, const std::string& table, const JsonValue& rowValue,
+                               const std::string& recordId, const std::string& changedStr,
+                               std::string& errorMessage) {
+    std::unordered_set<std::string>* allowedColumns = nullptr;
+    if (!loadTableColumns(db, table, allowedColumns, errorMessage)) {
+        return false;
+    }
+    if (!allowedColumns) {
+        return true;
+    }
+
+    auto changedColumns = parseChangedColumns(changedStr);
+
+    // Build SET clause: columns that exist in schema, are in server payload,
+    // are NOT locally changed, and are not internal metadata
+    auto buildSetColumns = [&](std::vector<std::pair<std::string, const JsonValue*>>& setCols, int& missing) {
+        setCols.clear();
+        missing = 0;
+        for (const auto& kv : rowValue.objectValue) {
+            const std::string& key = kv.first;
+            if (key == "id" || key == "_status" || key == "_changed") {
+                continue;
+            }
+            if (changedColumns.count(key)) {
+                continue;
+            }
+            if (allowedColumns->find(key) != allowedColumns->end()) {
+                setCols.emplace_back(key, &kv.second);
+            } else {
+                missing++;
+            }
+        }
+    };
+
+    std::vector<std::pair<std::string, const JsonValue*>> setColumns;
+    int missingCount = 0;
+    buildSetColumns(setColumns, missingCount);
+
+    if (missingCount > 0) {
+        if (!loadTableColumns(db, table, allowedColumns, errorMessage, true)) {
+            return false;
+        }
+        buildSetColumns(setColumns, missingCount);
+    }
+
+    if (setColumns.empty()) {
+        return true;
+    }
+
+    std::sort(setColumns.begin(), setColumns.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    std::string sql = "UPDATE " + quoteIdentifier(table) + " SET ";
+    for (size_t i = 0; i < setColumns.size(); i++) {
+        if (i) {
+            sql += ", ";
+        }
+        sql += quoteIdentifier(setColumns[i].first) + " = ?";
+    }
+    sql += " WHERE \"id\" = ?";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        errorMessage = "Failed to prepare partial UPDATE for " + table;
+        return false;
+    }
+
+    for (size_t i = 0; i < setColumns.size(); i++) {
+        if (!bindValue(stmt, static_cast<int>(i + 1), *setColumns[i].second)) {
+            sqlite3_finalize(stmt);
+            errorMessage = "Failed to bind partial UPDATE value";
+            return false;
+        }
+    }
+
+    if (sqlite3_bind_text(stmt, static_cast<int>(setColumns.size() + 1),
+                          recordId.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        errorMessage = "Failed to bind record id for partial UPDATE";
+        return false;
+    }
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        errorMessage = "Failed to execute partial UPDATE for " + table;
+        return false;
+    }
+    sqlite3_finalize(stmt);
+    return true;
+}
+
 static std::string formatTableCounts(const std::unordered_map<std::string, size_t>& counts) {
     if (counts.empty()) {
         return "";
@@ -678,6 +821,15 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
     size_t totalDeletes = 0;
     size_t totalSkipped = 0;
     std::string maxSequenceId;
+
+    // Conflict resolution: cache of locally-dirty records per table (lazy-loaded)
+    std::unordered_map<std::string, DirtyRecordCache> dirtyRecordCache;
+    std::unordered_set<std::string> loadedDirtyTables;
+    size_t totalSkippedDirty = 0;
+    size_t totalMerged = 0;
+    std::unordered_map<std::string, size_t> skippedDirtyByTable;
+    std::unordered_map<std::string, size_t> mergedByTable;
+
     for (const auto& entry : items->arrayValue) {
         if (entry.type != JsonValue::Type::Object) {
             continue;
@@ -745,12 +897,53 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
                 execSql(db, "ROLLBACK", errorMessage);
                 return false;
             }
-            if (!applyRowObject(db, table, *rowPtr, errorMessage)) {
-                execSql(db, "ROLLBACK", errorMessage);
-                return false;
+
+            // Extract record ID for dirty status check
+            std::string recordId;
+            readStringField(*rowPtr, "id", recordId);
+
+            // Lazy-load dirty records for this table on first encounter
+            if (!recordId.empty() && loadedDirtyTables.find(table) == loadedDirtyTables.end()) {
+                if (!loadDirtyRecordsForTable(db, table, dirtyRecordCache[table], errorMessage)) {
+                    execSql(db, "ROLLBACK", errorMessage);
+                    return false;
+                }
+                loadedDirtyTables.insert(table);
             }
-            totalUpserts++;
-            upsertsByTable[table]++;
+
+            // Look up whether this record has local uncommitted changes
+            const DirtyRecordInfo* dirtyInfo = nullptr;
+            if (!recordId.empty()) {
+                auto tableIt = dirtyRecordCache.find(table);
+                if (tableIt != dirtyRecordCache.end()) {
+                    auto recordIt = tableIt->second.find(recordId);
+                    if (recordIt != tableIt->second.end()) {
+                        dirtyInfo = &recordIt->second;
+                    }
+                }
+            }
+
+            if (dirtyInfo && (dirtyInfo->status == "created" || dirtyInfo->status == "deleted")) {
+                // Record has unpushed local changes — skip to preserve local state
+                totalSkippedDirty++;
+                skippedDirtyByTable[table]++;
+            } else if (dirtyInfo && dirtyInfo->status == "updated") {
+                // Record has locally-modified columns — partial update, preserving _changed columns
+                if (!applyPartialUpdate(db, table, *rowPtr, recordId, dirtyInfo->changed, errorMessage)) {
+                    execSql(db, "ROLLBACK", errorMessage);
+                    return false;
+                }
+                totalMerged++;
+                mergedByTable[table]++;
+            } else {
+                // Record is synced or new — full overwrite
+                if (!applyRowObject(db, table, *rowPtr, errorMessage)) {
+                    execSql(db, "ROLLBACK", errorMessage);
+                    return false;
+                }
+                totalUpserts++;
+                upsertsByTable[table]++;
+            }
         }
     }
     
@@ -777,7 +970,9 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
     const std::string deletesSummary = formatTableCounts(deletesCountByTable);
     std::string message = "SyncApplyEngine batch applied: items=" + std::to_string(totalItems) +
                           ", upserts=" + std::to_string(totalUpserts) +
-                          ", deletes=" + std::to_string(totalDeletes);
+                          ", deletes=" + std::to_string(totalDeletes) +
+                          ", preservedDirty=" + std::to_string(totalSkippedDirty) +
+                          ", merged=" + std::to_string(totalMerged);
     if (totalSkipped > 0) {
         message += ", skipped=" + std::to_string(totalSkipped);
         message += ", skippedTables=[";
@@ -794,6 +989,18 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
     }
     if (!deletesSummary.empty()) {
         message += ", deletesByTable=[" + deletesSummary + "]";
+    }
+    if (totalSkippedDirty > 0) {
+        const std::string skippedDirtySummary = formatTableCounts(skippedDirtyByTable);
+        if (!skippedDirtySummary.empty()) {
+            message += ", preservedDirtyByTable=[" + skippedDirtySummary + "]";
+        }
+    }
+    if (totalMerged > 0) {
+        const std::string mergedSummary = formatTableCounts(mergedByTable);
+        if (!mergedSummary.empty()) {
+            message += ", mergedByTable=[" + mergedSummary + "]";
+        }
     }
     debugLog(message);
     
