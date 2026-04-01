@@ -653,7 +653,7 @@ static std::unordered_set<std::string> parseChangedColumns(const std::string& ch
 static bool loadDirtyRecordsForTable(sqlite3* db, const std::string& table,
                                      DirtyRecordCache& out, std::string& errorMessage) {
     std::string sql = "SELECT \"id\", \"_status\", \"_changed\" FROM " + quoteIdentifier(table) +
-                      " WHERE \"_status\" IS NOT NULL AND \"_status\" != ''";
+                      " WHERE \"_status\" IN ('created', 'updated', 'deleted')";
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
@@ -924,7 +924,10 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
             }
 
             if (dirtyInfo && (dirtyInfo->status == "created" || dirtyInfo->status == "deleted")) {
-                // Record has unpushed local changes — skip to preserve local state
+                // Record has unpushed local changes — skip to preserve local state.
+                // NOTE: For 'created', this intentionally differs from the JS resolveConflict
+                // which merges remote fields and resets _status to 'synced'. We skip entirely
+                // because locally-created records should not be server-mutated before push.
                 totalSkippedDirty++;
                 skippedDirtyByTable[table]++;
             } else if (dirtyInfo && dirtyInfo->status == "updated") {
