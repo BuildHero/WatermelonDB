@@ -162,9 +162,10 @@ class DatabaseTest {
      * main app thread and a HeadlessJS background sync thread on Android).
      * One holds a long write transaction while the other tries to write.
      *
-     * Without PRAGMA busy_timeout, the second connection throws immediately
-     * (or after requery's short internal default). With busy_timeout=3000,
-     * SQLite retries internally and succeeds once the first transaction commits.
+     * Without openWithRetry, the second connection throws immediately when
+     * sqlite3_prepare_v2() hits SQLITE_BUSY during PRAGMA compilation (the
+     * busy handler is NOT invoked at the prepare level). openWithRetry retries
+     * the entire open+PRAGMA block at the application level for up to 5s.
      *
      * The hold time must exceed requery's built-in default (~2.5s) to reproduce
      * the production scenario where large sync transactions hold locks longer.
@@ -211,8 +212,8 @@ class DatabaseTest {
                 writerStarted.await(10, TimeUnit.SECONDS)
                 Thread.sleep(50)
 
-                // Without busy_timeout this throws SQLiteDatabaseLockedException
-                // once the built-in requery timeout (~2.5s) is exhausted.
+                // Without openWithRetry this throws SQLiteDatabaseLockedException
+                // once requery's built-in timeout (~2.5s) is exhausted.
                 db2.transaction {
                     db2.execute(
                         "INSERT OR REPLACE INTO test_contention (id, value) VALUES (?, ?)",
@@ -232,9 +233,9 @@ class DatabaseTest {
         assertTrue("Writer thread timed out", writerDone.await(20, TimeUnit.SECONDS))
         assertTrue("Reader thread timed out", db2Done.await(20, TimeUnit.SECONDS))
 
-        // With busy_timeout=3000, db2 should have waited for db1 to commit — no error
+        // openWithRetry retries until db1 commits — no error
         assertNull(
-            "Expected no error with busy_timeout but got: ${db2Error.get()?.message}",
+            "Expected no error with openWithRetry but got: ${db2Error.get()?.message}",
             db2Error.get()
         )
 
