@@ -98,6 +98,7 @@ public:
                 return;
             }
             std::string ignored;
+            execSQL(db_, "PRAGMA busy_timeout=5000;", ignored);
             execSQL(db_, "PRAGMA journal_mode=WAL;", ignored);
             execSQL(db_, "PRAGMA synchronous=NORMAL;", ignored);
             execSQL(db_, "PRAGMA temp_store=MEMORY;", ignored);

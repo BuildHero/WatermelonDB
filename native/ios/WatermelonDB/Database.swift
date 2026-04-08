@@ -290,6 +290,10 @@ public class Database {
     }
     
     private func setWalMode(on db: FMDatabase) throws {
+        // Must be first — if another connection holds a lock, all subsequent
+        // PRAGMAs (including journal_mode) would throw immediately.
+        try db.executeQuery("pragma busy_timeout=5000", values: []).close()
+
         let result = try db.executeQuery("pragma journal_mode=wal", values: [])
         result.close()
 

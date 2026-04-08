@@ -20,12 +20,13 @@ class Database(private val name: String, private val context: Context) {
     private val transactionDepth = ThreadLocal<Int>()
 
     private val writerDb: SQLiteDatabase by lazy {
-        SQLiteDatabase.openOrCreateDatabase(databasePath, null).also {
-            runPragma(it, "PRAGMA journal_mode=WAL")
-            // Critical performance settings for WAL mode
-            runPragma(it, "PRAGMA synchronous=NORMAL")  // FULL is too slow, NORMAL is safe with WAL
-            runPragma(it, "PRAGMA temp_store=MEMORY")   // Faster temp operations
-            runPragma(it, "PRAGMA mmap_size=268435456") // 256MB memory-mapped I/O
+        openWithRetry {
+            SQLiteDatabase.openOrCreateDatabase(databasePath, null).also {
+                runPragma(it, "PRAGMA journal_mode=WAL")
+                runPragma(it, "PRAGMA synchronous=NORMAL")  // FULL is too slow, NORMAL is safe with WAL
+                runPragma(it, "PRAGMA temp_store=MEMORY")   // Faster temp operations
+                runPragma(it, "PRAGMA mmap_size=268435456") // 256MB memory-mapped I/O
+            }
         }
     }
 
@@ -35,11 +36,13 @@ class Database(private val name: String, private val context: Context) {
         if (isInMemoryPath(databasePath)) {
             writerDb
         } else {
-            SQLiteDatabase.openDatabase(databasePath, null, SQLiteDatabase.OPEN_READONLY).also {
-                try {
-                    runPragma(it, "PRAGMA query_only=1")
-                } catch (_: Exception) {
-                    // Best effort; some builds may not allow setting pragmas on read-only connections.
+            openWithRetry {
+                SQLiteDatabase.openDatabase(databasePath, null, SQLiteDatabase.OPEN_READONLY).also {
+                    try {
+                        runPragma(it, "PRAGMA query_only=1")
+                    } catch (_: Exception) {
+                        // Best effort; some builds may not allow setting pragmas on read-only connections.
+                    }
                 }
             }
         }
@@ -47,6 +50,41 @@ class Database(private val name: String, private val context: Context) {
 
     private fun runPragma(db: SQLiteDatabase, sql: String) {
         db.rawQuery(sql, null).use { /* pragma executed */ }
+    }
+
+    /**
+     * Retry a database open + PRAGMA block on SQLiteDatabaseLockedException.
+     *
+     * sqlite3_prepare_v2() (used by rawQuery to compile PRAGMAs) does NOT
+     * invoke the sqlite3 busy handler — it returns SQLITE_BUSY immediately.
+     * Additionally, the requery connection pool may run internal PRAGMAs
+     * during openOrCreateDatabase() that also fail under lock contention.
+     * We must retry the entire open+configure block at the application level.
+     *
+     * Retries up to 5s with 200ms backoff to match the production scenario
+     * where HeadlessJS background sync transactions hold locks for seconds.
+     */
+    private fun <T> openWithRetry(
+        maxWaitMs: Long = 5000,
+        intervalMs: Long = 200,
+        block: () -> T
+    ): T {
+        val deadline = System.currentTimeMillis() + maxWaitMs
+        var lastException: Exception? = null
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                return block()
+            } catch (e: Exception) {
+                if (e.message?.contains("database is locked") == true ||
+                    e.javaClass.simpleName == "SQLiteDatabaseLockedException") {
+                    lastException = e
+                    Thread.sleep(intervalMs)
+                } else {
+                    throw e
+                }
+            }
+        }
+        throw lastException ?: IllegalStateException("Database open retry exhausted")
     }
 
     var userVersion: Int
