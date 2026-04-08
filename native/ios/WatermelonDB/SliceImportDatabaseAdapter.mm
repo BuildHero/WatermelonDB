@@ -90,6 +90,7 @@ public:
         cachedDB_ = db;
 
         std::string ignored;
+        execSQL(db, "PRAGMA busy_timeout=5000;", ignored);
         execSQL(db, "PRAGMA journal_mode=WAL;", ignored);
         execSQL(db, "PRAGMA synchronous=NORMAL;", ignored);
         execSQL(db, "PRAGMA temp_store=MEMORY;", ignored);
