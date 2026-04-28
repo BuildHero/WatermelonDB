@@ -21,7 +21,22 @@ std::mutex gHttpMutex;
 std::unordered_map<int64_t, std::shared_ptr<HttpCallbackState>> gHttpCallbacks;
 std::atomic<int64_t> gNextHttpHandle{1};
 
+// Cached global ref to com.nozbe.watermelondb.sync.SyncHttpManager.
+//
+// FindClass for app classes only works from threads that descend from a Java
+// caller (so the thread's class loader stack reaches the app loader). Native
+// threads attached via AttachCurrentThread (e.g. retry threads spawned by
+// SyncEngine::scheduleRetryLocked) get the system class loader, which can't
+// see app classes — FindClass returns null and the sync surfaces as
+// "Failed to start HTTP request". We resolve the class once from a Java-side
+// thread and reuse the global ref forever.
+std::atomic<jclass> gSyncHttpManagerClass{nullptr};
+
 jclass getSyncHttpManagerClass(JNIEnv* env) {
+    jclass cached = gSyncHttpManagerClass.load(std::memory_order_acquire);
+    if (cached) {
+        return cached;
+    }
     jclass local = env->FindClass(kSyncHttpManagerClass);
     if (!local) {
         env->ExceptionClear();
@@ -29,6 +44,16 @@ jclass getSyncHttpManagerClass(JNIEnv* env) {
     }
     jclass global = (jclass)env->NewGlobalRef(local);
     env->DeleteLocalRef(local);
+    if (!global) {
+        return nullptr;
+    }
+    jclass expected = nullptr;
+    if (!gSyncHttpManagerClass.compare_exchange_strong(
+            expected, global, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        // Lost the race — another thread cached first; drop our duplicate ref.
+        env->DeleteGlobalRef(global);
+        return expected;
+    }
     return global;
 }
 
@@ -54,7 +79,6 @@ bool callStartRequest(JNIEnv* env,
     }
     jmethodID methodId = getStaticMethod(env, cls, "startRequest", kStartRequestSig);
     if (!methodId) {
-        env->DeleteGlobalRef(cls);
         return false;
     }
 
@@ -84,7 +108,6 @@ bool callStartRequest(JNIEnv* env,
     if (jBody) {
         env->DeleteLocalRef(jBody);
     }
-    env->DeleteGlobalRef(cls);
 
     if (env->ExceptionCheck()) {
         env->ExceptionClear();
