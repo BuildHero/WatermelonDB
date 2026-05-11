@@ -68,16 +68,34 @@ JSISwiftWrapperModule::JSISwiftWrapperModule(std::shared_ptr<CallInvoker> jsInvo
                 errorMessage = "Could not get writer transaction semaphore";
                 return false;
             }
+            NSString *prevHolder = [db currentWriterHolderWithConnectionTag:tagNumber];
+            NSTimeInterval waitStart = [NSDate timeIntervalSinceReferenceDate];
             dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+            double waitMs = ([NSDate timeIntervalSinceReferenceDate] - waitStart) * 1000.0;
+            if (waitMs > 50.0) {
+                NSLog(@"[wmdb-lock] native-sync:apply waited %.0fms for sem (prev holder: %@)",
+                      waitMs, prevHolder);
+            }
+            [db setWriterHolderWithConnectionTag:tagNumber name:@"native-sync:apply"];
 
             sqlite3 *sqlite = (sqlite3 *)[db getRawConnectionWithConnectionTag:tagNumber];
             if (!sqlite) {
+                [db clearWriterHolderWithConnectionTag:tagNumber];
                 dispatch_semaphore_signal(sem);
                 errorMessage = "Failed to get SQLite connection";
                 return false;
             }
+            NSTimeInterval applyStart = [NSDate timeIntervalSinceReferenceDate];
             bool result = watermelondb::applySyncPayload(sqlite, payload, errorMessage);
+            double applyMs = ([NSDate timeIntervalSinceReferenceDate] - applyStart) * 1000.0;
+            if (!result) {
+                NSLog(@"[wmdb-lock] native-sync:apply FAILED after %.0fms: %s",
+                      applyMs, errorMessage.c_str());
+            } else if (applyMs > 250.0) {
+                NSLog(@"[wmdb-lock] native-sync:apply ok (took %.0fms)", applyMs);
+            }
 
+            [db clearWriterHolderWithConnectionTag:tagNumber];
             dispatch_semaphore_signal(sem);
             return result;
         }

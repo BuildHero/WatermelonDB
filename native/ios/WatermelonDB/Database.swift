@@ -30,6 +30,49 @@ public class Database {
     /// and SliceImport. Acquired before BEGIN, released after COMMIT/ROLLBACK.
     public let writerTransactionSemaphore = DispatchSemaphore(value: 1)
 
+    // MARK: - Writer-lock holder tracking (diagnostics)
+    // Tracks who currently holds the writer (or has it BEGIN IMMEDIATE'd) so
+    // that BUSY errors on the non-transactional writer path can attribute the
+    // collision. Acquirers (Database.inTransaction, slice import, sync apply)
+    // set this on acquire and clear on release.
+    private let holderLock = NSLock()
+    private var _currentHolder: String = "(none)"
+    private var _holderAcquiredAt: Date?
+
+    public func setWriterHolder(_ name: String) {
+        holderLock.lock()
+        let prev = _currentHolder
+        _currentHolder = name
+        _holderAcquiredAt = Date()
+        holderLock.unlock()
+        consoleLog("[wmdb-lock] holder=\(name) acquired (prev=\(prev))")
+    }
+
+    public func clearWriterHolder() {
+        holderLock.lock()
+        let name = _currentHolder
+        let durationMs = _holderAcquiredAt.map { Date().timeIntervalSince($0) * 1000 } ?? 0
+        _currentHolder = "(none)"
+        _holderAcquiredAt = nil
+        holderLock.unlock()
+        consoleLog(String(format: "[wmdb-lock] holder=%@ released (held %.0fms)", name, durationMs))
+    }
+
+    public func currentHolderInfo() -> String {
+        holderLock.lock()
+        defer { holderLock.unlock() }
+        if let acquiredAt = _holderAcquiredAt {
+            let elapsed = Date().timeIntervalSince(acquiredAt) * 1000
+            return String(format: "%@ (held %.0fms)", _currentHolder, elapsed)
+        }
+        return _currentHolder
+    }
+
+    private func isBusyError(_ message: String) -> Bool {
+        let lower = message.lowercased()
+        return lower.contains("locked") || lower.contains("busy")
+    }
+
     init(path: String) {
         self.path = path
         writer = FMDatabase(path: path)
@@ -80,10 +123,26 @@ public class Database {
     }
     
     func inTransaction(_ executeBlock: () throws -> Void) throws {
+        let holderBeforeWait = currentHolderInfo()
+        let waitStart = Date()
         writerTransactionSemaphore.wait()
-        defer { writerTransactionSemaphore.signal() }
+        let waitMs = Date().timeIntervalSince(waitStart) * 1000
+        if waitMs > 50 {
+            consoleLog(String(format: "[wmdb-lock] js-action waited %.0fms for sem (prev holder: %@)", waitMs, holderBeforeWait))
+        }
+        setWriterHolder("js-action")
+        defer {
+            clearWriterHolder()
+            writerTransactionSemaphore.signal()
+        }
 
-        guard writer.beginTransaction() else { throw writer.lastError() }
+        guard writer.beginTransaction() else {
+            let err = writer.lastError()
+            if isBusyError(err.localizedDescription) {
+                consoleLog("[wmdb-lock] js-action BEGIN BUSY error=\(err.localizedDescription) holder=\(currentHolderInfo())")
+            }
+            throw err
+        }
 
         // Atomically increment transaction depth
         transactionLock.lock()
@@ -112,15 +171,29 @@ public class Database {
             throw error
         }
     }
-    
+
     func execute(_ query: SQL, _ args: QueryArgs = []) throws {
-        try writer.executeUpdate(query, values: args)
+        do {
+            try writer.executeUpdate(query, values: args)
+        } catch {
+            let nsErr = error as NSError
+            if isBusyError(nsErr.localizedDescription) {
+                let truncatedQuery = query.count > 80 ? String(query.prefix(80)) + "…" : query
+                consoleLog("[wmdb-lock] execute BUSY error=\(nsErr.localizedDescription) query=\"\(truncatedQuery)\" holder=\(currentHolderInfo())")
+            }
+            throw error
+        }
     }
-    
+
     /// Executes multiple queries separated by `;`
     func executeStatements(_ queries: SQL) throws {
         guard writer.executeStatements(queries) else {
-            throw writer.lastError()
+            let err = writer.lastError()
+            if isBusyError(err.localizedDescription) {
+                let truncated = queries.count > 80 ? String(queries.prefix(80)) + "…" : queries
+                consoleLog("[wmdb-lock] executeStatements BUSY error=\(err.localizedDescription) queries=\"\(truncated)\" holder=\(currentHolderInfo())")
+            }
+            throw err
         }
     }
     
