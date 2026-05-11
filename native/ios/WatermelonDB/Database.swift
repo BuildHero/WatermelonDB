@@ -1,6 +1,34 @@
 import Foundation
 import SQLite3
 
+/// Runtime gate for writer-lock diagnostic logging. Default `true` in DEBUG,
+/// `false` in release. Toggleable from native code via `WMDBLockLog.isEnabled`
+/// (Obj-C: `WMDBLockLog.isEnabled = YES`). When disabled, all `[wmdb-lock]`
+/// log sites short-circuit at the call site before any string formatting.
+@objc(WMDBLockLog)
+public final class WMDBLockLog: NSObject {
+    private static var _enabled: Bool = {
+        #if DEBUG
+        return true
+        #else
+        return false
+        #endif
+    }()
+
+    @objc
+    public class var isEnabled: Bool {
+        get { return _enabled }
+        set { _enabled = newValue }
+    }
+}
+
+@inline(__always)
+internal func wmdbLockLog(_ message: @autoclosure () -> String) {
+    if WMDBLockLog.isEnabled {
+        consoleLog(message())
+    }
+}
+
 public class Database {
     public typealias SQL = String
     public typealias TableName = String
@@ -45,7 +73,7 @@ public class Database {
         _currentHolder = name
         _holderAcquiredAt = Date()
         holderLock.unlock()
-        consoleLog("[wmdb-lock] holder=\(name) acquired (prev=\(prev))")
+        wmdbLockLog("[wmdb-lock] holder=\(name) acquired (prev=\(prev))")
     }
 
     public func clearWriterHolder() {
@@ -55,7 +83,7 @@ public class Database {
         _currentHolder = "(none)"
         _holderAcquiredAt = nil
         holderLock.unlock()
-        consoleLog(String(format: "[wmdb-lock] holder=%@ released (held %.0fms)", name, durationMs))
+        wmdbLockLog(String(format: "[wmdb-lock] holder=%@ released (held %.0fms)", name, durationMs))
     }
 
     public func currentHolderInfo() -> String {
@@ -123,12 +151,16 @@ public class Database {
     }
     
     func inTransaction(_ executeBlock: () throws -> Void) throws {
-        let holderBeforeWait = currentHolderInfo()
-        let waitStart = Date()
+        // Skip wait-time accounting entirely when diagnostics are off.
+        let diagnosticsOn = WMDBLockLog.isEnabled
+        let holderBeforeWait = diagnosticsOn ? currentHolderInfo() : ""
+        let waitStart = diagnosticsOn ? Date() : nil
         writerTransactionSemaphore.wait()
-        let waitMs = Date().timeIntervalSince(waitStart) * 1000
-        if waitMs > 50 {
-            consoleLog(String(format: "[wmdb-lock] js-action waited %.0fms for sem (prev holder: %@)", waitMs, holderBeforeWait))
+        if let waitStart = waitStart {
+            let waitMs = Date().timeIntervalSince(waitStart) * 1000
+            if waitMs > 50 {
+                wmdbLockLog(String(format: "[wmdb-lock] js-action waited %.0fms for sem (prev holder: %@)", waitMs, holderBeforeWait))
+            }
         }
         setWriterHolder("js-action")
         defer {
@@ -139,7 +171,7 @@ public class Database {
         guard writer.beginTransaction() else {
             let err = writer.lastError()
             if isBusyError(err.localizedDescription) {
-                consoleLog("[wmdb-lock] js-action BEGIN BUSY error=\(err.localizedDescription) holder=\(currentHolderInfo())")
+                wmdbLockLog("[wmdb-lock] js-action BEGIN BUSY error=\(err.localizedDescription) holder=\(currentHolderInfo())")
             }
             throw err
         }
@@ -177,9 +209,9 @@ public class Database {
             try writer.executeUpdate(query, values: args)
         } catch {
             let nsErr = error as NSError
-            if isBusyError(nsErr.localizedDescription) {
+            if WMDBLockLog.isEnabled && isBusyError(nsErr.localizedDescription) {
                 let truncatedQuery = query.count > 80 ? String(query.prefix(80)) + "…" : query
-                consoleLog("[wmdb-lock] execute BUSY error=\(nsErr.localizedDescription) query=\"\(truncatedQuery)\" holder=\(currentHolderInfo())")
+                wmdbLockLog("[wmdb-lock] execute BUSY error=\(nsErr.localizedDescription) query=\"\(truncatedQuery)\" holder=\(currentHolderInfo())")
             }
             throw error
         }
@@ -189,9 +221,9 @@ public class Database {
     func executeStatements(_ queries: SQL) throws {
         guard writer.executeStatements(queries) else {
             let err = writer.lastError()
-            if isBusyError(err.localizedDescription) {
+            if WMDBLockLog.isEnabled && isBusyError(err.localizedDescription) {
                 let truncated = queries.count > 80 ? String(queries.prefix(80)) + "…" : queries
-                consoleLog("[wmdb-lock] executeStatements BUSY error=\(err.localizedDescription) queries=\"\(truncated)\" holder=\(currentHolderInfo())")
+                wmdbLockLog("[wmdb-lock] executeStatements BUSY error=\(err.localizedDescription) queries=\"\(truncated)\" holder=\(currentHolderInfo())")
             }
             throw err
         }

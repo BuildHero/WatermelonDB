@@ -19,6 +19,15 @@
 using watermelondb::DatabaseInterface;
 using watermelondb::FieldValue;
 
+// Gated lock-diagnostic logging — controlled at runtime by `WMDBLockLog.isEnabled`
+// (defaults: ON in DEBUG, OFF in release). When disabled, the macro evaluates
+// to a single static getter call and skips argument formatting entirely.
+#define WMDB_LOCK_LOG(fmt, ...) do { \
+    if (WMDBLockLog.isEnabled) { \
+        NSLog(fmt, ##__VA_ARGS__); \
+    } \
+} while (0)
+
 namespace {
 static void *kDBQueueKey = &kDBQueueKey;
 static std::atomic<uint64_t> sliceImportSeq{0};
@@ -87,13 +96,16 @@ public:
             errorMessage = "Could not get writer transaction semaphore";
             return false;
         }
-        NSString *prevHolder = [db_ currentWriterHolderWithConnectionTag:connectionTag_];
-        NSTimeInterval waitStart = [NSDate timeIntervalSinceReferenceDate];
+        BOOL diagOn = WMDBLockLog.isEnabled;
+        NSString *prevHolder = diagOn ? [db_ currentWriterHolderWithConnectionTag:connectionTag_] : nil;
+        NSTimeInterval waitStart = diagOn ? [NSDate timeIntervalSinceReferenceDate] : 0;
         dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
-        double waitMs = ([NSDate timeIntervalSinceReferenceDate] - waitStart) * 1000.0;
-        if (waitMs > 50.0) {
-            NSLog(@"[wmdb-lock] %s waited %.0fms for sem (prev holder: %@)",
-                  holderName_.c_str(), waitMs, prevHolder);
+        if (diagOn) {
+            double waitMs = ([NSDate timeIntervalSinceReferenceDate] - waitStart) * 1000.0;
+            if (waitMs > 50.0) {
+                WMDB_LOCK_LOG(@"[wmdb-lock] %s waited %.0fms for sem (prev holder: %@)",
+                              holderName_.c_str(), waitMs, prevHolder);
+            }
         }
         writerSemaphore_ = sem;
         [db_ setWriterHolderWithConnectionTag:connectionTag_
@@ -117,11 +129,11 @@ public:
         execSQL(db, "PRAGMA temp_store=MEMORY;", ignored);
         execSQL(db, "PRAGMA cache_size=-20000;", ignored);
         execSQL(db, "PRAGMA wal_autocheckpoint=10000;", ignored);
-        txnStartAbsTime_ = [NSDate timeIntervalSinceReferenceDate];
+        txnStartAbsTime_ = WMDBLockLog.isEnabled ? [NSDate timeIntervalSinceReferenceDate] : 0.0;
         if (!execSQL(db, "BEGIN IMMEDIATE;", errorMessage)) {
-            NSLog(@"[wmdb-lock] %s BEGIN IMMEDIATE failed: %s (holder reported: %@)",
-                  holderName_.c_str(), errorMessage.c_str(),
-                  [db_ currentWriterHolderWithConnectionTag:connectionTag_]);
+            WMDB_LOCK_LOG(@"[wmdb-lock] %s BEGIN IMMEDIATE failed: %s (holder reported: %@)",
+                          holderName_.c_str(), errorMessage.c_str(),
+                          [db_ currentWriterHolderWithConnectionTag:connectionTag_]);
             [db_ clearWriterHolderWithConnectionTag:connectionTag_];
             dispatch_semaphore_signal(writerSemaphore_);
             writerSemaphore_ = nil;
@@ -143,13 +155,15 @@ public:
             return false;
         }
         if (!execSQL(db, "COMMIT;", errorMessage)) {
-            NSLog(@"[wmdb-lock] %s COMMIT failed: %s", holderName_.c_str(), errorMessage.c_str());
+            WMDB_LOCK_LOG(@"[wmdb-lock] %s COMMIT failed: %s", holderName_.c_str(), errorMessage.c_str());
             rollbackTransactionOnDB(db);
             return false;
         }
         transactionStarted_ = false;
-        double heldMs = ([NSDate timeIntervalSinceReferenceDate] - txnStartAbsTime_) * 1000.0;
-        NSLog(@"[wmdb-lock] %s COMMIT ok (txn held %.0fms)", holderName_.c_str(), heldMs);
+        if (WMDBLockLog.isEnabled) {
+            double heldMs = ([NSDate timeIntervalSinceReferenceDate] - txnStartAbsTime_) * 1000.0;
+            WMDB_LOCK_LOG(@"[wmdb-lock] %s COMMIT ok (txn held %.0fms)", holderName_.c_str(), heldMs);
+        }
 
         // WAL checkpoint for predictable completion
         int logFrames = 0;
@@ -175,8 +189,10 @@ public:
     void rollbackTransaction() override {
         sqlite3 *db = cachedDB_;
         if (db) {
-            double heldMs = ([NSDate timeIntervalSinceReferenceDate] - txnStartAbsTime_) * 1000.0;
-            NSLog(@"[wmdb-lock] %s ROLLBACK (txn held %.0fms)", holderName_.c_str(), heldMs);
+            if (WMDBLockLog.isEnabled) {
+                double heldMs = ([NSDate timeIntervalSinceReferenceDate] - txnStartAbsTime_) * 1000.0;
+                WMDB_LOCK_LOG(@"[wmdb-lock] %s ROLLBACK (txn held %.0fms)", holderName_.c_str(), heldMs);
+            }
             rollbackTransactionOnDB(db);
         }
         cachedDB_ = nullptr;

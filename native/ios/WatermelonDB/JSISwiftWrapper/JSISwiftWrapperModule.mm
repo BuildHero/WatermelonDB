@@ -17,6 +17,14 @@
 
 #include <exception>
 
+// Gated lock-diagnostic logging — controlled at runtime by `WMDBLockLog.isEnabled`
+// (defaults: ON in DEBUG, OFF in release).
+#define WMDB_LOCK_LOG(fmt, ...) do { \
+    if (WMDBLockLog.isEnabled) { \
+        NSLog(fmt, ##__VA_ARGS__); \
+    } \
+} while (0)
+
 namespace facebook::react {
 
 static NSMutableSet<SliceImporter *> *activeSliceImporters() {
@@ -68,13 +76,16 @@ JSISwiftWrapperModule::JSISwiftWrapperModule(std::shared_ptr<CallInvoker> jsInvo
                 errorMessage = "Could not get writer transaction semaphore";
                 return false;
             }
-            NSString *prevHolder = [db currentWriterHolderWithConnectionTag:tagNumber];
-            NSTimeInterval waitStart = [NSDate timeIntervalSinceReferenceDate];
+            BOOL diagOn = WMDBLockLog.isEnabled;
+            NSString *prevHolder = diagOn ? [db currentWriterHolderWithConnectionTag:tagNumber] : nil;
+            NSTimeInterval waitStart = diagOn ? [NSDate timeIntervalSinceReferenceDate] : 0;
             dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
-            double waitMs = ([NSDate timeIntervalSinceReferenceDate] - waitStart) * 1000.0;
-            if (waitMs > 50.0) {
-                NSLog(@"[wmdb-lock] native-sync:apply waited %.0fms for sem (prev holder: %@)",
-                      waitMs, prevHolder);
+            if (diagOn) {
+                double waitMs = ([NSDate timeIntervalSinceReferenceDate] - waitStart) * 1000.0;
+                if (waitMs > 50.0) {
+                    WMDB_LOCK_LOG(@"[wmdb-lock] native-sync:apply waited %.0fms for sem (prev holder: %@)",
+                                  waitMs, prevHolder);
+                }
             }
             [db setWriterHolderWithConnectionTag:tagNumber name:@"native-sync:apply"];
 
@@ -85,14 +96,16 @@ JSISwiftWrapperModule::JSISwiftWrapperModule(std::shared_ptr<CallInvoker> jsInvo
                 errorMessage = "Failed to get SQLite connection";
                 return false;
             }
-            NSTimeInterval applyStart = [NSDate timeIntervalSinceReferenceDate];
+            NSTimeInterval applyStart = diagOn ? [NSDate timeIntervalSinceReferenceDate] : 0;
             bool result = watermelondb::applySyncPayload(sqlite, payload, errorMessage);
-            double applyMs = ([NSDate timeIntervalSinceReferenceDate] - applyStart) * 1000.0;
-            if (!result) {
-                NSLog(@"[wmdb-lock] native-sync:apply FAILED after %.0fms: %s",
-                      applyMs, errorMessage.c_str());
-            } else if (applyMs > 250.0) {
-                NSLog(@"[wmdb-lock] native-sync:apply ok (took %.0fms)", applyMs);
+            if (diagOn) {
+                double applyMs = ([NSDate timeIntervalSinceReferenceDate] - applyStart) * 1000.0;
+                if (!result) {
+                    WMDB_LOCK_LOG(@"[wmdb-lock] native-sync:apply FAILED after %.0fms: %s",
+                                  applyMs, errorMessage.c_str());
+                } else if (applyMs > 250.0) {
+                    WMDB_LOCK_LOG(@"[wmdb-lock] native-sync:apply ok (took %.0fms)", applyMs);
+                }
             }
 
             [db clearWriterHolderWithConnectionTag:tagNumber];
