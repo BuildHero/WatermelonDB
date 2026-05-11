@@ -93,6 +93,38 @@ final public class DatabaseBridge: RCTEventEmitter {
         return driver.database.writerTransactionSemaphore
     }
 
+    // MARK: - Writer-lock holder accessors (diagnostics)
+    // Used by SliceImportDatabaseAdapter and JSISwiftWrapperModule to attribute
+    // who holds the writer at any given moment, so BUSY errors on the
+    // non-transactional writer path can name the colliding party.
+
+    @objc
+    public func setWriterHolder(connectionTag: ConnectionTag, name: String) {
+        guard let connection = connections[connectionTag.intValue],
+              case let .connected(driver, synchronous: true) = connection else {
+            return
+        }
+        driver.database.setWriterHolder(name)
+    }
+
+    @objc
+    public func clearWriterHolder(connectionTag: ConnectionTag) {
+        guard let connection = connections[connectionTag.intValue],
+              case let .connected(driver, synchronous: true) = connection else {
+            return
+        }
+        driver.database.clearWriterHolder()
+    }
+
+    @objc
+    public func currentWriterHolder(connectionTag: ConnectionTag) -> String {
+        guard let connection = connections[connectionTag.intValue],
+              case let .connected(driver, synchronous: true) = connection else {
+            return "(no-connection)"
+        }
+        return driver.database.currentHolderInfo()
+    }
+
     @objc
     public func isCached(connectionTag: ConnectionTag, table: String, id: String) -> Bool {
         guard let connection = connections[connectionTag.intValue], case let .connected(driver, synchronous: true) = connection else {

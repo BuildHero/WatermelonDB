@@ -14,12 +14,23 @@
 #endif
 
 #include <string>
+#include <atomic>
 
 using watermelondb::DatabaseInterface;
 using watermelondb::FieldValue;
 
+// Gated lock-diagnostic logging — controlled at runtime by `WMDBLockLog.isEnabled`
+// (defaults: ON in DEBUG, OFF in release). When disabled, the macro evaluates
+// to a single static getter call and skips argument formatting entirely.
+#define WMDB_LOCK_LOG(fmt, ...) do { \
+    if (WMDBLockLog.isEnabled) { \
+        NSLog(fmt, ##__VA_ARGS__); \
+    } \
+} while (0)
+
 namespace {
 static void *kDBQueueKey = &kDBQueueKey;
+static std::atomic<uint64_t> sliceImportSeq{0};
 
 static bool execSQL(sqlite3 *db, const char *sql, std::string &errorMessage) {
     char *errMsg = nullptr;
@@ -45,7 +56,9 @@ public:
         , methodQueue_(db ? db.methodQueue : nullptr)
         , transactionStarted_(false)
         , writerSemaphore_(nil)
-        , cachedDB_(nullptr) {
+        , cachedDB_(nullptr)
+        , holderName_("")
+        , txnStartAbsTime_(0.0) {
         if (methodQueue_) {
             dispatch_queue_set_specific(methodQueue_, kDBQueueKey, kDBQueueKey, nullptr);
         }
@@ -70,18 +83,38 @@ public:
             return false;
         }
 
+        // Build a unique holder tag so we can attribute BUSY collisions.
+        uint64_t seq = ++sliceImportSeq;
+        char holderBuf[64];
+        snprintf(holderBuf, sizeof(holderBuf), "slice-import:%lld:#%llu",
+                 (long long)[connectionTag_ longLongValue], (unsigned long long)seq);
+        holderName_ = holderBuf;
+
         // Acquire the writer transaction semaphore — blocks until JS writes finish
         dispatch_semaphore_t sem = [db_ getWriterTransactionSemaphoreWithConnectionTag:connectionTag_];
         if (!sem) {
             errorMessage = "Could not get writer transaction semaphore";
             return false;
         }
+        BOOL diagOn = WMDBLockLog.isEnabled;
+        NSString *prevHolder = diagOn ? [db_ currentWriterHolderWithConnectionTag:connectionTag_] : nil;
+        NSTimeInterval waitStart = diagOn ? [NSDate timeIntervalSinceReferenceDate] : 0;
         dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+        if (diagOn) {
+            double waitMs = ([NSDate timeIntervalSinceReferenceDate] - waitStart) * 1000.0;
+            if (waitMs > 50.0) {
+                WMDB_LOCK_LOG(@"[wmdb-lock] %s waited %.0fms for sem (prev holder: %@)",
+                              holderName_.c_str(), waitMs, prevHolder);
+            }
+        }
         writerSemaphore_ = sem;
+        [db_ setWriterHolderWithConnectionTag:connectionTag_
+                                         name:[NSString stringWithUTF8String:holderName_.c_str()]];
 
         // Get raw sqlite3* directly (bypasses methodQueue — semaphore provides serialization)
         sqlite3 *db = (sqlite3 *)[db_ getRawConnectionWithConnectionTag:connectionTag_];
         if (!db) {
+            [db_ clearWriterHolderWithConnectionTag:connectionTag_];
             dispatch_semaphore_signal(writerSemaphore_);
             writerSemaphore_ = nil;
             errorMessage = "Lost database connection";
@@ -96,7 +129,12 @@ public:
         execSQL(db, "PRAGMA temp_store=MEMORY;", ignored);
         execSQL(db, "PRAGMA cache_size=-20000;", ignored);
         execSQL(db, "PRAGMA wal_autocheckpoint=10000;", ignored);
+        txnStartAbsTime_ = WMDBLockLog.isEnabled ? [NSDate timeIntervalSinceReferenceDate] : 0.0;
         if (!execSQL(db, "BEGIN IMMEDIATE;", errorMessage)) {
+            WMDB_LOCK_LOG(@"[wmdb-lock] %s BEGIN IMMEDIATE failed: %s (holder reported: %@)",
+                          holderName_.c_str(), errorMessage.c_str(),
+                          [db_ currentWriterHolderWithConnectionTag:connectionTag_]);
+            [db_ clearWriterHolderWithConnectionTag:connectionTag_];
             dispatch_semaphore_signal(writerSemaphore_);
             writerSemaphore_ = nil;
             cachedDB_ = nullptr;
@@ -117,10 +155,15 @@ public:
             return false;
         }
         if (!execSQL(db, "COMMIT;", errorMessage)) {
+            WMDB_LOCK_LOG(@"[wmdb-lock] %s COMMIT failed: %s", holderName_.c_str(), errorMessage.c_str());
             rollbackTransactionOnDB(db);
             return false;
         }
         transactionStarted_ = false;
+        if (WMDBLockLog.isEnabled) {
+            double heldMs = ([NSDate timeIntervalSinceReferenceDate] - txnStartAbsTime_) * 1000.0;
+            WMDB_LOCK_LOG(@"[wmdb-lock] %s COMMIT ok (txn held %.0fms)", holderName_.c_str(), heldMs);
+        }
 
         // WAL checkpoint for predictable completion
         int logFrames = 0;
@@ -134,6 +177,7 @@ public:
         execSQL(db, "PRAGMA wal_autocheckpoint=1000;", ignored);
 
         cachedDB_ = nullptr;
+        [db_ clearWriterHolderWithConnectionTag:connectionTag_];
         if (writerSemaphore_) {
             dispatch_semaphore_signal(writerSemaphore_);
             writerSemaphore_ = nil;
@@ -145,9 +189,14 @@ public:
     void rollbackTransaction() override {
         sqlite3 *db = cachedDB_;
         if (db) {
+            if (WMDBLockLog.isEnabled) {
+                double heldMs = ([NSDate timeIntervalSinceReferenceDate] - txnStartAbsTime_) * 1000.0;
+                WMDB_LOCK_LOG(@"[wmdb-lock] %s ROLLBACK (txn held %.0fms)", holderName_.c_str(), heldMs);
+            }
             rollbackTransactionOnDB(db);
         }
         cachedDB_ = nullptr;
+        [db_ clearWriterHolderWithConnectionTag:connectionTag_];
         if (writerSemaphore_) {
             dispatch_semaphore_signal(writerSemaphore_);
             writerSemaphore_ = nil;
@@ -204,6 +253,8 @@ private:
     bool transactionStarted_;
     dispatch_semaphore_t writerSemaphore_;
     sqlite3 *cachedDB_;
+    std::string holderName_;
+    NSTimeInterval txnStartAbsTime_;
 
     void finalizeStatements() {
         if (cachedDB_) {
