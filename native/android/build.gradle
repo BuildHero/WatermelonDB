@@ -8,6 +8,11 @@ def DEFAULT_TARGET_SDK_VERSION = 33
 
 def newArchEnabled = project.hasProperty("newArchEnabled") && project.newArchEnabled == "true"
 
+def reactNativeArchitectures() {
+    def value = project.getProperties().get("reactNativeArchitectures")
+    return value ? value.split(",") : ["armeabi-v7a", "arm64-v8a", "x86", "x86_64"]
+}
+
 android {
     namespace "com.nozbe.watermelondb"
 
@@ -22,6 +27,7 @@ android {
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         externalNativeBuild {
             cmake {
+                abiFilters (*reactNativeArchitectures())
                 arguments "-DANDROID_STL=c++_shared", "-DREACT_NATIVE_NEW_ARCH_ENABLED=${newArchEnabled ? 1 : 0}"
                 cppFlags '-std=c++17 -O2'
             }
