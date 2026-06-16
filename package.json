@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test": "jest --config=./jest.config.js --forceExit --detectOpenHandles --no-cache",
     "test:cpp": "native/shared/tests/run_cpp_tests.sh",
+    "test:ios:writer-serialization": "bash native/ios/WatermelonDBTests/run-tests.sh",
     "test:watch": "jest --config=./jest.config.js --watch",
     "test:coverage": "jest --config=./jest.config.js --coverage",
     "ci:check": "concurrently 'npm run test' 'npm run eslint' 'npm run typecheck' --kill-others-on-fail",

@@ -120,12 +120,12 @@ class DatabaseDriver {
     
     func copyTables(_ tables: [String], srcDB: String) throws {
         // Attach the source database
-        try database.execute("ATTACH DATABASE '\(srcDB)' as 'other'")
+        try database.executeStandalone("ATTACH DATABASE '\(srcDB)' as 'other'")
 
         // Ensure DETACH always runs, even if the transaction or DELETE throws
         defer {
             do {
-                try database.execute("DETACH DATABASE 'other'")
+                try database.executeStandalone("DETACH DATABASE 'other'")
             } catch {
                 consoleLog("Warning: Failed to detach source database: \(error)")
             }
@@ -133,7 +133,7 @@ class DatabaseDriver {
 
         // We need to make sure we do not copy the __watermelon_last_pulled_schema_version entry
         // from local_storage table to avoid migration issues
-        try database.execute("DELETE FROM local_storage WHERE key = '__watermelon_last_pulled_schema_version'")
+        try database.executeStandalone("DELETE FROM local_storage WHERE key = '__watermelon_last_pulled_schema_version'")
 
          try database.inTransaction {
              for table in tables {
@@ -212,7 +212,7 @@ class DatabaseDriver {
     func destroyDeletedRecords(table: Database.TableName, records: [RecordId]) throws {
         // TODO: What's the behavior if record doesn't exist or isn't actually deleted?
         let recordPlaceholders = records.map { _ in "?" }.joined(separator: ",")
-        try database.execute("delete from `\(table)` where id in (\(recordPlaceholders))", records)
+        try database.executeStandalone("delete from `\(table)` where id in (\(recordPlaceholders))", records)
     }
     
     // MARK: - LocalStorage
@@ -228,11 +228,11 @@ class DatabaseDriver {
     }
     
     func setLocal(key: String, value: String) throws {
-        return try database.execute("insert or replace into `local_storage` (key, value) values (?, ?)", [key, value])
+        return try database.executeStandalone("insert or replace into `local_storage` (key, value) values (?, ?)", [key, value])
     }
     
     func removeLocal(key: String) throws {
-        return try database.execute("delete from `local_storage` where `key` == ?", [key])
+        return try database.executeStandalone("delete from `local_storage` where `key` == ?", [key])
     }
     
     // MARK: - Record caching
