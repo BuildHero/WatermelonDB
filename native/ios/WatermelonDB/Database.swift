@@ -228,7 +228,36 @@ public class Database {
             throw err
         }
     }
-    
+
+    /// Serialized single-statement writer entry point. Acquires
+    /// `writerTransactionSemaphore` WITHOUT opening a transaction, so callers
+    /// that cannot run inside a txn (ATTACH/DETACH/VACUUM) are still serialized
+    /// against in-flight `inTransaction` / slice-import writes on the shared
+    /// writer connection (MOBILE-5606). MUST NOT be called from inside
+    /// `inTransaction` — `writerTransactionSemaphore` is non-reentrant.
+    func executeStandalone(_ query: SQL, _ args: QueryArgs = []) throws {
+        writerTransactionSemaphore.wait()
+        setWriterHolder("standalone")
+        defer {
+            clearWriterHolder()
+            writerTransactionSemaphore.signal()
+        }
+        try execute(query, args)
+    }
+
+    /// Serialized multi-statement variant of `executeStandalone`. Same
+    /// preconditions: acquires the semaphore, opens no transaction, and MUST
+    /// NOT be called while the semaphore is already held.
+    func executeStatementsStandalone(_ queries: SQL) throws {
+        writerTransactionSemaphore.wait()
+        setWriterHolder("standalone")
+        defer {
+            clearWriterHolder()
+            writerTransactionSemaphore.signal()
+        }
+        try executeStatements(queries)
+    }
+
     func getRawPointer() -> OpaquePointer {
         return OpaquePointer(writer.sqliteHandle)
     }
@@ -319,12 +348,30 @@ public class Database {
             return result.long(forColumnIndex: 0)
         }
         set {
+            // PRECONDITION: caller must hold `writerTransactionSemaphore` (i.e.
+            // run inside `inTransaction`). Uses bare `execute`; do NOT make it
+            // self-acquire — setUpSchema/migrate set this from inside
+            // `inTransaction`, so acquiring here would deadlock (MOBILE-5606).
             // swiftlint:disable:next force_try
             try! execute("pragma user_version = \(newValue)")
         }
     }
     
     func unsafeDestroyEverything() throws {
+        // MOBILE-5606: hold the writer semaphore across the entire teardown so a
+        // reset/logout (unsafeResetDatabase) cannot vacuum, close the connection,
+        // or delete DB files while an `inTransaction` / slice-import write is in
+        // flight on the shared writer connection. wait() blocks until any
+        // in-flight transaction releases. Inner writes stay BARE
+        // (execute/executeStatements) — we already hold the semaphore; the
+        // *Standalone variants would deadlock here.
+        writerTransactionSemaphore.wait()
+        setWriterHolder("reset")
+        defer {
+            clearWriterHolder()
+            writerTransactionSemaphore.signal()
+        }
+
         // NOTE: Deleting files by default because it seems simpler, more reliable
         // But sadly this won't work for in-memory (shared) databases
         if isInMemoryDatabase {
@@ -351,21 +398,27 @@ public class Database {
                     throw "Could not close database".asError()
                 }
             }
-            
+
+            // MOBILE-5606: reopen on EVERY exit, including a thrown removeItem,
+            // so we never return — and never release writerTransactionSemaphore
+            // (held by the caller) — with the FMDB handles closed. Otherwise the
+            // next waiter could resume on a closed connection. open() recreates
+            // an empty DB if the files are gone, and reopens whatever remains if
+            // a removal failed mid-reset.
+            defer { open() }
+
             let manager = FileManager.default
-            
+
             try manager.removeItem(atPath: path)
-            
+
             func removeIfExists(_ path: String) throws {
                 if manager.fileExists(atPath: path) {
                     try manager.removeItem(atPath: path)
                 }
             }
-            
+
             try removeIfExists("\(path)-wal")
             try removeIfExists("\(path)-shm")
-            
-            open()
         }
     }
     
