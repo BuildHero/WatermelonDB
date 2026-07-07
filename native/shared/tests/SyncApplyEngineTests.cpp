@@ -296,6 +296,32 @@ void test_updates_last_sequence_id_ulid() {
     sqlite3_close(db);
 }
 
+void test_empty_items_preserves_last_sequence_id() {
+    // SyncEngine synthesizes an empty envelope ({"items":[]}) for HTTP 304 Not Modified
+    // pulls. Applying it must succeed and leave the stored cursor untouched — a 304 means
+    // "nothing new, keep the current cursor".
+    sqlite3* db = nullptr;
+    sqlite3_open(":memory:", &db);
+    std::string error;
+    execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT)", error);
+    execSql(db, "CREATE TABLE local_storage (key TEXT PRIMARY KEY, value TEXT)", error);
+    execSql(db,
+            "INSERT INTO local_storage (key, value) "
+            "VALUES ('__watermelon_last_sequence_id', '01ARZ3NDEKTSV4RRFFQ69G5FAW')",
+            error);
+
+    bool ok = watermelondb::applySyncPayload(db, "{\"items\":[]}", error);
+    expectTrue(ok, "applySyncPayload should succeed for an empty items envelope");
+
+    std::string sequenceId;
+    expectTrue(querySingleText(db, "SELECT value FROM local_storage WHERE key='__watermelon_last_sequence_id'", sequenceId),
+               "last_sequence_id row should still exist after empty apply");
+    expectTrue(sequenceId == "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+               "empty-items apply must preserve the existing cursor (304 keeps current cursor)");
+
+    sqlite3_close(db);
+}
+
 // --- Conflict resolution tests: _status preservation during sync pull ---
 
 void test_created_record_not_overwritten() {
@@ -617,6 +643,7 @@ int main() {
     test_payload_requires_envelope_object();
     test_envelope_payload_upserts_and_deletes();
     test_updates_last_sequence_id_ulid();
+    test_empty_items_preserves_last_sequence_id();
 
     // Conflict resolution tests
     test_created_record_not_overwritten();

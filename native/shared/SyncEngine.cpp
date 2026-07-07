@@ -734,10 +734,20 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
         pushChangesCb = pushChangesCallback_;
     }
 
+    // HTTP 304 Not Modified: the native pull stack (okhttp/CFNetwork) honors
+    // ETag/If-None-Match, so an empty pull comes back as 304 with an empty body.
+    // Treat it as a successful no-change pull by applying a synthesized empty
+    // envelope — this routes through the exact same downstream path as an empty 200
+    // ({"items":[]}), so the stored cursor/sequence is preserved and no pagination
+    // is triggered. Passing the empty 304 body straight to the apply callback would
+    // instead throw ("Invalid JSON payload: missing 'items' array") and fail the sync.
+    const std::string pullBody =
+        response.statusCode == 304 ? std::string("{\"items\":[]}") : response.body;
+
     std::string applyError;
 
     if (applyCb) {
-        if (!applyCb(response.body, applyError)) {
+        if (!applyCb(pullBody, applyError)) {
             CompletionCallback completionToCall;
             CompletionCallback pendingToCall;
             {
@@ -767,7 +777,7 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
     }
 
     CursorValue nextCursor;
-    if (extractNextCursor(response.body, nextCursor)) {
+    if (extractNextCursor(pullBody, nextCursor)) {
         std::string nextUrl;
         {
             std::lock_guard<std::mutex> lock(mutex_);

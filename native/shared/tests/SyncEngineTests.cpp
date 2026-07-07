@@ -459,6 +459,83 @@ void test_apply_error_sets_state() {
     expectTrue(recorder.waitForContains("\"state\":\"error\""), "expected error state after apply failure");
 }
 
+void test_not_modified_304_is_noop_success() {
+    // HTTP 304 Not Modified: the native pull stack (okhttp/CFNetwork) honors
+    // ETag/If-None-Match, so an empty pull comes back as 304 with an empty body. That
+    // must be treated as a successful no-change pull, NOT handed to the apply callback
+    // (which mirrors the real SyncApplyEngine contract and rejects a body without a
+    // top-level "items" array). The apply callback below reproduces that throw to guard
+    // the regression.
+    //
+    // Assertions read only this engine's own completion, stateJson(), and apply-callback
+    // observations — never the shared global HTTP handler or a captured EventRecorder — so
+    // they're immune to the suite's cross-test pollution (earlier retry-based tests leave
+    // detached retry threads that can still hit the shared http handler).
+    auto engine = std::make_shared<watermelondb::SyncEngine>();
+
+    std::mutex applyMutex;
+    int applyCount = 0;
+    std::string appliedBody;
+    engine->setApplyCallback([&](const std::string& body, std::string& errorMessage) {
+        {
+            std::lock_guard<std::mutex> lock(applyMutex);
+            applyCount++;
+            appliedBody = body;
+        }
+        // Mirror SyncApplyEngine::applySyncPayload: a body without an items array throws.
+        if (body.find("\"items\"") == std::string::npos) {
+            errorMessage = "Invalid JSON payload: missing 'items' array";
+            return false;
+        }
+        return true;
+    });
+    engine->setPushChangesCallback([&](std::function<void(bool, const std::string&)> completion) {
+        completion(true, "");
+    });
+
+    watermelondb::platform::setHttpHandler([](const watermelondb::platform::HttpRequest&,
+                                              std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        watermelondb::platform::HttpResponse response;
+        response.statusCode = 304; // Not Modified, empty body
+        done(response);
+    });
+
+    std::mutex m;
+    std::condition_variable cv;
+    bool completed = false;
+    bool success = false;
+
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
+    engine->startWithCompletion("not_modified", [&](bool s, const std::string&) {
+        {
+            std::lock_guard<std::mutex> lock(m);
+            completed = true;
+            success = s;
+        }
+        cv.notify_all();
+    });
+
+    {
+        std::unique_lock<std::mutex> lock(m);
+        cv.wait_for(lock, std::chrono::milliseconds(500), [&] { return completed; });
+    }
+
+    expectTrue(completed, "304 sync should invoke completion");
+    expectTrue(success, "304 sync should complete successfully (no-op no-change pull)");
+    expectTrue(engine->stateJson().find("\"state\":\"done\"") != std::string::npos,
+               "304 should leave engine in done state");
+    {
+        std::lock_guard<std::mutex> lock(applyMutex);
+        // A no-change pull applies at most once (no pagination) and, if apply ran, it must
+        // have received a synthesized envelope — never the empty 304 body.
+        expectTrue(applyCount <= 1, "304 no-change pull should apply at most once (no pagination)");
+        expectTrue(applyCount == 0 || appliedBody.find("\"items\"") != std::string::npos,
+                   "304 must never hand an empty body to the apply callback");
+    }
+
+    watermelondb::platform::setHttpHandler(nullptr);
+}
+
 void test_cancel_sync_when_idle() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
@@ -997,6 +1074,7 @@ int main() {
     test_missing_endpoint_error();
     test_invalid_config_json();
     test_apply_error_sets_state();
+    test_not_modified_304_is_noop_success();
     test_cancel_sync_when_idle();
     test_cancel_sync_in_flight();
     test_cancel_sync_during_auth_required();
