@@ -71,3 +71,29 @@ describe('Collection._fetchRecord re-guards the adapter across the async fallbac
     expect(cbResult.error).toBeInstanceOf(Error)
   })
 })
+
+describe('Collection query paths report a caught error (not a false success) during reset — MOBILE-6149', () => {
+  it('_fetchQuery surfaces an error result, not an empty-success', () => {
+    const { database, tasks } = mockDatabase()
+    const query = tasks.query()
+    database.adapter = new ErrorAdapter()
+
+    let result
+    expect(() => tasks._fetchQuery(query, (r) => (result = r))).not.toThrow()
+    // A caught error — NOT { value: [] }, which would be indistinguishable from
+    // a genuinely empty table and could mislead callers.
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.value).toBeUndefined()
+  })
+
+  it('_fetchCount surfaces an error result, not a false 0 count', () => {
+    const { database, tasks } = mockDatabase()
+    const query = tasks.query()
+    database.adapter = new ErrorAdapter()
+
+    let result
+    expect(() => tasks._fetchCount(query, (r) => (result = r))).not.toThrow()
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.value).toBeUndefined()
+  })
+})

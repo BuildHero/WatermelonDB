@@ -203,11 +203,15 @@ export default class Collection<Record extends Model> {
   _fetchQuery(query: Query<Record>, callback: ResultCallback<Record[]>): void {
     const underlyingAdapter = this.database.adapter?.underlyingAdapter
 
-    // MOBILE-6149: no adapter to query while the database is being reset —
-    // resolve with an empty result instead of dereferencing a null adapter (the
-    // forced-reset path reloads the app once the wipe settles).
+    // MOBILE-6149: the database is being reset. Report a caught error rather
+    // than a false-empty success — an empty result would be indistinguishable
+    // from "no records exist" and could drive incorrect state decisions (and
+    // would hide the illegal access). The Result flows through toPromise as a
+    // rejection, which query consumers already handle; it is not a fatal throw.
     if (!underlyingAdapter) {
-      return callback({ value: [] })
+      return callback({
+        error: new Error(`Database is resetting; cannot run query on ${this.table}`),
+      })
     }
 
     const serializedQuery = query.serialize()
@@ -242,9 +246,12 @@ export default class Collection<Record extends Model> {
   _fetchCount(query: Query<Record>, callback: ResultCallback<number>): void {
     const underlyingAdapter = this.database.adapter?.underlyingAdapter
 
-    // MOBILE-6149: fail soft while the database is being reset.
+    // MOBILE-6149: report a caught error while the database is being reset,
+    // not a false 0 count (see _fetchQuery).
     if (!underlyingAdapter) {
-      return callback({ value: 0 })
+      return callback({
+        error: new Error(`Database is resetting; cannot count ${this.table}`),
+      })
     }
 
     underlyingAdapter.count(query.serialize(), callback)
