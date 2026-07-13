@@ -125,6 +125,105 @@ describe('Collection query paths report a caught error (not a false success) dur
     expect(result.error).toBeInstanceOf(Error)
     expect(result.value).toBeUndefined()
   })
+
+  it('_fetchRecord aborts an in-flight find that COMPLETES during a reset (no cache repopulation)', () => {
+    const { database, tasks } = mockDatabase()
+    const realAdapter = database.adapter.underlyingAdapter
+
+    let complete
+    jest.spyOn(realAdapter, 'find').mockImplementation((_table, _id, cb) => {
+      complete = cb
+    })
+
+    let result
+    tasks._fetchRecord('rec_1', (r) => (result = r))
+    expect(typeof complete).toBe('function')
+
+    // A reset begins while the find is in flight.
+    database.adapter = new ErrorAdapter()
+
+    // The native find returns a pre-reset raw record during the reset window.
+    // It must abort (caught error) rather than build+cache a Model that would
+    // repopulate the cache the reset is wiping.
+    expect(() =>
+      complete({ value: { id: 'rec_1', _status: 'synced' } })
+    ).not.toThrow()
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.value).toBeUndefined()
+    expect(tasks._cache.get('rec_1')).toBeFalsy()
+  })
+})
+
+// These exercise the CANONICAL reset signals (_isBeingReset + _resetCount epoch,
+// the same signals the sync engine's isSameDatabase() trusts) directly — not the
+// !underlyingAdapter proxy. The epoch case is the subtle one: a read that begins
+// before a reset and completes AFTER the entire reset cycle finishes sees a valid
+// adapter and _isBeingReset === false, yet must still be aborted (its data is
+// pre-reset). An in-flight-only check would miss it.
+describe('canonical reset-signal coverage (_isBeingReset + _resetCount epoch) — MOBILE-6149', () => {
+  it('_fetchQuery aborts a completion while _isBeingReset is true (adapter still looks valid)', () => {
+    const { database, tasks } = mockDatabase()
+    const realAdapter = database.adapter.underlyingAdapter
+    let complete
+    jest.spyOn(realAdapter, 'query').mockImplementation((_q, cb) => (complete = cb))
+
+    let result
+    tasks._fetchQuery(tasks.query(), (r) => (result = r))
+
+    // Reset in flight, adapter not yet swapped (the pre-swap window).
+    database._isBeingReset = true
+
+    expect(() => complete({ value: [{ id: 'x', _status: 'synced' }] })).not.toThrow()
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.value).toBeUndefined()
+  })
+
+  it('_fetchQuery aborts a query that COMPLETES AFTER a full reset cycle (epoch guard)', () => {
+    const { database, tasks } = mockDatabase()
+    const realAdapter = database.adapter.underlyingAdapter
+    let complete
+    jest.spyOn(realAdapter, 'query').mockImplementation((_q, cb) => (complete = cb))
+
+    let result
+    tasks._fetchQuery(tasks.query(), (r) => (result = r))
+
+    // An ENTIRE reset cycle completed: adapter restored (valid), _isBeingReset
+    // back to false — only the epoch advanced.
+    database._resetCount += 1
+
+    expect(() => complete({ value: [{ id: 'x', _status: 'synced' }] })).not.toThrow()
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.value).toBeUndefined()
+  })
+
+  it('_fetchCount aborts a completion during a reset (no stale count)', () => {
+    const { database, tasks } = mockDatabase()
+    const realAdapter = database.adapter.underlyingAdapter
+    let complete
+    jest.spyOn(realAdapter, 'count').mockImplementation((_q, cb) => (complete = cb))
+
+    let result
+    tasks._fetchCount(tasks.query(), (r) => (result = r))
+    database._isBeingReset = true
+
+    expect(() => complete({ value: 42 })).not.toThrow()
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.value).toBeUndefined()
+  })
+
+  it('unsafeFetchRecordsWithSQL aborts if a reset races the await (no cache repopulation)', async () => {
+    const { database, tasks } = mockDatabase()
+    database.adapter.unsafeSqlQuery = jest
+      .fn()
+      .mockResolvedValue([{ id: 'rec_1', _status: 'synced' }])
+
+    const pending = tasks.unsafeFetchRecordsWithSQL('SELECT * FROM mock_tasks')
+    // A full reset cycle completed while the SQL query was in flight.
+    database._resetCount += 1
+
+    await expect(pending).rejects.toThrow(/resetting/)
+    expect(tasks._cache.get('rec_1')).toBeFalsy()
+  })
 })
 
 // The CONFIRMED production crash path: a live query observer refetches
