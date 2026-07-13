@@ -308,6 +308,36 @@ describe('canonical reset-signal coverage (_isBeingReset + _resetCount epoch) �
     expect(errors).toHaveLength(0) // stream survived the reset tick
     sub.unsubscribe()
   })
+
+  it('observeCount(throttled) LOGS a genuine error and keeps the stream alive (not silent, not terminated)', async () => {
+    // The fork's count observers (both throttled and non-throttled) are
+    // resilient by design: they log errors and keep the last value rather than
+    // terminating or surfacing to the next-only public subscribers. Assert a
+    // genuine error is LOGGED (so it's not "silently" swallowed) and the stream
+    // does not error/terminate — matching the non-throttled path.
+    const common = require('../utils/common')
+    const logErrorSpy = jest.spyOn(common, 'logError').mockImplementation(() => {})
+
+    const { tasks } = mockDatabase()
+    jest
+      .spyOn(tasks, '_fetchCount')
+      .mockImplementation((_q, cb) => cb({ error: new Error('boom') }))
+
+    const errors = []
+    const sub = tasks
+      .query()
+      .observeCount(true)
+      .subscribe({ next: () => {}, error: (e) => errors.push(e) })
+
+    await tasks.create((m) => {
+      m.name = 'y'
+    }) // triggers a throttled recount (not resetting)
+    await new Promise((r) => setTimeout(r, 350))
+
+    expect(logErrorSpy).toHaveBeenCalled() // logged — NOT silent
+    expect(errors).toHaveLength(0) // stream not terminated
+    sub.unsubscribe()
+  })
 })
 
 // The CONFIRMED production crash path: a live query observer refetches

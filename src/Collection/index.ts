@@ -218,13 +218,17 @@ export default class Collection<Record extends Model> {
   //                           in `finally` but the real adapter was never restored
   //  - `_resetCount` moved  → a read that began before a reset is COMPLETING after
   //                           an entire reset cycle finished (stale pre-reset data)
-  _assertNotResetting(startResetCount?: number): void {
+  _isResetting(startResetCount?: number): boolean {
     const db = this.database
-    if (
+    return (
       db._isBeingReset ||
       !db.adapter?.underlyingAdapter ||
       (startResetCount !== undefined && db._resetCount !== startResetCount)
-    ) {
+    )
+  }
+
+  _assertNotResetting(startResetCount?: number): void {
+    if (this._isResetting(startResetCount)) {
       throw new Error(`Database is resetting; query on ${this.table} aborted`)
     }
   }
