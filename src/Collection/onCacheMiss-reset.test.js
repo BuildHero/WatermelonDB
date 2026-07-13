@@ -224,6 +224,38 @@ describe('canonical reset-signal coverage (_isBeingReset + _resetCount epoch) �
     await expect(pending).rejects.toThrow(/resetting/)
     expect(tasks._cache.get('rec_1')).toBeFalsy()
   })
+
+  it('_fetchRecord aborts a CACHE HIT during a reset (no stale cached record)', async () => {
+    const { database, tasks } = mockDatabase()
+    const rec = await tasks.create((m) => {
+      m.name = 'x'
+    })
+    expect(tasks._cache.get(rec.id)).toBeTruthy() // it's cached
+
+    // Reset in flight — the cache still holds the pre-reset record.
+    database._isBeingReset = true
+
+    let result
+    tasks._fetchRecord(rec.id, (r) => (result = r))
+    // Aborted, NOT served from cache as { value: rec }.
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.value).toBeUndefined()
+  })
+
+  it('_fetchQuery issues no adapter traffic if a reset is in flight (pre-swap window)', () => {
+    const { database, tasks } = mockDatabase()
+    const realAdapter = database.adapter.underlyingAdapter
+    const querySpy = jest.spyOn(realAdapter, 'query')
+
+    // Reset in flight, adapter NOT yet swapped — still the real adapter.
+    database._isBeingReset = true
+
+    let result
+    tasks._fetchQuery(tasks.query(), (r) => (result = r))
+
+    expect(result.error).toBeInstanceOf(Error)
+    expect(querySpy).not.toHaveBeenCalled() // no traffic to a resetting DB
+  })
 })
 
 // The CONFIRMED production crash path: a live query observer refetches
