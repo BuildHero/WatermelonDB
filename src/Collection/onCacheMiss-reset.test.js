@@ -287,6 +287,27 @@ describe('canonical reset-signal coverage (_isBeingReset + _resetCount epoch) â€
     expect(findSpy).toHaveBeenCalledTimes(1) // no second find
     expect(result.error).toBeInstanceOf(Error)
   })
+
+  it('observeCount(throttled) skips a reset tick without erroring/terminating the stream', async () => {
+    const { database, tasks } = mockDatabase()
+    const errors = []
+    const sub = tasks
+      .query()
+      .observeCount(true)
+      .subscribe({ next: () => {}, error: (e) => errors.push(e) })
+
+    // Enter the reset window, then cause a change that triggers a throttled
+    // recount â†’ _fetchCount returns { error }. The old toPromise() path errored
+    // and terminated the observable (this branch's exact target).
+    database._isBeingReset = true
+    await tasks.create((m) => {
+      m.name = 'x'
+    })
+    await new Promise((r) => setTimeout(r, 350)) // let throttleTime(250) fire
+
+    expect(errors).toHaveLength(0) // stream survived the reset tick
+    sub.unsubscribe()
+  })
 })
 
 // The CONFIRMED production crash path: a live query observer refetches

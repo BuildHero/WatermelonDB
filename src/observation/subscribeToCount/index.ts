@@ -1,6 +1,5 @@
 import {Observable, switchMap, distinctUntilChanged, throttleTime} from '../../utils/rx';
 import { logError } from '../../utils/common'
-import { toPromise } from '../../utils/fp/Result'
 import { Unsubscribe } from '../../utils/subscriptions'
 
 import type Query from '../../Query'
@@ -22,7 +21,26 @@ function observeCountThrottled<Record extends Model>(query: Query<Record>): Obse
   return collection.database.withChangesForTables(query.allTables).pipe(
     throttleTime(250), // Note: this has a bug, but we'll delete it anyway
     // @ts-ignore
-    switchMap(() => toPromise(callback => collection._fetchCount(query, callback))),
+    switchMap(
+      () =>
+        // MOBILE-6149: _fetchCount returns { error } during a reset. The old
+        // toPromise() path REJECTED, which errored and permanently TERMINATED
+        // this count observable (and the subscribe below has no error handler →
+        // uncaught). Map the Result to an observable that treats a reset-window
+        // error as "skip this tick" (complete with no emission), matching the
+        // non-throttled path, so the stream stays alive and resumes after reset.
+        new Observable<number>((observer) => {
+          collection._fetchCount(query, (result) => {
+            if ((result as any).error) {
+              logError((result as any).error.toString())
+              observer.complete()
+              return
+            }
+            observer.next((result as any).value)
+            observer.complete()
+          })
+        }),
+    ),
     distinctUntilChanged(),
   )
 }
