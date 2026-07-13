@@ -99,6 +99,32 @@ describe('Collection query paths report a caught error (not a false success) dur
     expect(result.error).toBeInstanceOf(Error)
     expect(result.value).toBeUndefined()
   })
+
+  it('_fetchQuery aborts an in-flight query that COMPLETES during a reset (no false-success)', () => {
+    const { database, tasks } = mockDatabase()
+    const realAdapter = database.adapter.underlyingAdapter
+
+    // Capture the native completion callback so we can fire it AFTER a reset
+    // has started — the query was issued while the adapter was still valid.
+    let complete
+    jest.spyOn(realAdapter, 'query').mockImplementation((_q, cb) => {
+      complete = cb
+    })
+
+    let result
+    tasks._fetchQuery(tasks.query(), (r) => (result = r))
+    expect(typeof complete).toBe('function')
+
+    // A reset begins while the query is in flight.
+    database.adapter = new ErrorAdapter()
+
+    // The native query returns during the reset window with raw rows. The
+    // result mapper must abort (caught error) rather than resolve a partial /
+    // null-holed array that would violate the Query.fetch Record[] contract.
+    expect(() => complete({ value: [{ id: 'x', _status: 'synced' }] })).not.toThrow()
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.value).toBeUndefined()
+  })
 })
 
 // The CONFIRMED production crash path: a live query observer refetches

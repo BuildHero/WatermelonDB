@@ -199,6 +199,18 @@ export default class Collection<Record extends Model> {
     return this.database.schema.tables[this.table]
   }
 
+  // MOBILE-6149: throw if a reset began. Called inside query-result mappers,
+  // which run in mapValue's try/catch, so the throw becomes a rejected Result
+  // rather than a partial/null array that would violate the Query.fetch
+  // contract. Guards the in-flight-completion race: a query issued while the
+  // adapter was valid can complete during a reset, and its cache-miss resolver
+  // yields null holes — abort instead of resolving a false-success array.
+  _assertNotResetting(): void {
+    if (!this.database.adapter?.underlyingAdapter) {
+      throw new Error(`Database is resetting; query on ${this.table} aborted`)
+    }
+  }
+
   // See: Query.fetch
   _fetchQuery(query: Query<Record>, callback: ResultCallback<Record[]>): void {
     const underlyingAdapter = this.database.adapter?.underlyingAdapter
@@ -224,10 +236,10 @@ export default class Collection<Record extends Model> {
         [],
         (result) =>
           callback(
-            mapValue(
-              (rawRecords) => mapToGraph(rawRecords, associations, this) as Record[],
-              result,
-            ),
+            mapValue((rawRecords) => {
+              this._assertNotResetting()
+              return mapToGraph(rawRecords, associations, this) as Record[]
+            }, result),
           ),
       )
     }
@@ -235,7 +247,10 @@ export default class Collection<Record extends Model> {
     return underlyingAdapter.query(query.serialize(), (result) =>
       callback(
         mapValue(
-          (rawRecords) => this._cache.recordsFromQueryResult(rawRecords) as Record[],
+          (rawRecords) => {
+            this._assertNotResetting()
+            return this._cache.recordsFromQueryResult(rawRecords) as Record[]
+          },
           result,
         ),
       ),
