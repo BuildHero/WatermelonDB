@@ -61,11 +61,20 @@ describe('Database', () => {
 
       const resetPromise = database.action(() => database.unsafeResetDatabase())
 
-      expect(() => database.adapter.underlyingAdapter).toThrow(
-        /Cannot call database.adapter.underlyingAdapter while the database is being reset/,
-      )
-      expect(() => database.adapter.schema).toThrow(/Cannot call database.adapter.schema/)
-      expect(() => database.adapter.migrations).toThrow(/Cannot call database.adapter.migrations/)
+      // MOBILE-6149: property GETTERS return undefined (not throw) during a
+      // reset. Callers inspect them via optional chaining / `&&` — including
+      // WatermelonDB's own query path (Collection._onCacheMiss) — and a throwing
+      // getter is not short-circuited by `?.`, so a benign property read during
+      // an in-flight reset was a fatal, uncaught crash.
+      expect(() => database.adapter.underlyingAdapter).not.toThrow()
+      expect(database.adapter.underlyingAdapter).toBeUndefined()
+      expect(() => database.adapter.schema).not.toThrow()
+      expect(database.adapter.schema).toBeUndefined()
+      expect(() => database.adapter.migrations).not.toThrow()
+      expect(database.adapter.migrations).toBeUndefined()
+
+      // Imperative METHODS still throw: a real database operation mid-reset is
+      // genuinely illegal and must fail loudly.
       expect(() => database.adapter.getLocal('test')).toThrow(
         /Cannot call database.adapter.getLocal/,
       )

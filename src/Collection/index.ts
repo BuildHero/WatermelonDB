@@ -57,8 +57,20 @@ export default class Collection<Record extends Model> {
   }
 
   _onCacheMiss(id: RecordId): Record {
-    const hasHybridJSI = this.database.adapter?.underlyingAdapter?._hybridJSIEnabled
-    const tag = this.database.adapter?.underlyingAdapter?._tag
+    const underlyingAdapter = this.database.adapter?.underlyingAdapter
+
+    // MOBILE-6149: during an in-flight unsafeResetDatabase() `database.adapter`
+    // is a placeholder whose `underlyingAdapter` is unavailable. A cache miss
+    // cannot be resolved against a database that is being wiped, and this runs
+    // synchronously inside RecordCache (outside any Promise/try-catch boundary),
+    // so bail soft instead of issuing a native query with a null tag — a throw
+    // here is a fatal, uncaught crash.
+    if (!underlyingAdapter) {
+      return undefined as any
+    }
+
+    const hasHybridJSI = underlyingAdapter._hybridJSIEnabled
+    const tag = underlyingAdapter._tag
 
     if (!hasHybridJSI) {
       invariant(id, `Record ID ${this.table}#${id} was sent over the bridge, but it's not cached`)
@@ -189,12 +201,21 @@ export default class Collection<Record extends Model> {
 
   // See: Query.fetch
   _fetchQuery(query: Query<Record>, callback: ResultCallback<Record[]>): void {
+    const underlyingAdapter = this.database.adapter?.underlyingAdapter
+
+    // MOBILE-6149: no adapter to query while the database is being reset —
+    // resolve with an empty result instead of dereferencing a null adapter (the
+    // forced-reset path reloads the app once the wipe settles).
+    if (!underlyingAdapter) {
+      return callback({ value: [] })
+    }
+
     const serializedQuery = query.serialize()
 
     const { description, associations } = serializedQuery
 
     if (description?.eagerJoinTables?.length) {
-      return this.database.adapter.underlyingAdapter.execSqlQuery(
+      return underlyingAdapter.execSqlQuery(
         encodeQuery(serializedQuery, false, this.database.schema),
         [],
         (result) =>
@@ -207,7 +228,7 @@ export default class Collection<Record extends Model> {
       )
     }
 
-    return this.database.adapter.underlyingAdapter.query(query.serialize(), (result) =>
+    return underlyingAdapter.query(query.serialize(), (result) =>
       callback(
         mapValue(
           (rawRecords) => this._cache.recordsFromQueryResult(rawRecords) as Record[],
@@ -219,7 +240,14 @@ export default class Collection<Record extends Model> {
 
   // See: Query.fetchCount
   _fetchCount(query: Query<Record>, callback: ResultCallback<number>): void {
-    this.database.adapter.underlyingAdapter.count(query.serialize(), callback)
+    const underlyingAdapter = this.database.adapter?.underlyingAdapter
+
+    // MOBILE-6149: fail soft while the database is being reset.
+    if (!underlyingAdapter) {
+      return callback({ value: 0 })
+    }
+
+    underlyingAdapter.count(query.serialize(), callback)
   }
 
   // Fetches exactly one record (See: Collection.find)
@@ -233,6 +261,18 @@ export default class Collection<Record extends Model> {
 
     if (cachedRecord) {
       callback({ value: cachedRecord })
+      return
+    }
+
+    const underlyingAdapter = this.database.adapter?.underlyingAdapter
+
+    // MOBILE-6149: the database is being reset — surface a soft error instead
+    // of dereferencing a null adapter (which would throw in an async `.then`
+    // continuation below, as an unhandled rejection).
+    if (!underlyingAdapter) {
+      callback({
+        error: new Error(`Database is resetting; cannot fetch ${this.table}#${id}`),
+      })
       return
     }
 
@@ -250,12 +290,12 @@ export default class Collection<Record extends Model> {
       }, result)
     }
 
-    this.database.adapter.underlyingAdapter.find(this.table, id, (result) => {
+    underlyingAdapter.find(this.table, id, (result) => {
       if (!result || !(result as any).value) {
         logger.log(`Record ${this.table}#${id} not found`)
         // @ts-ignore
         this.modelClass.fetchFromRemote(this.modelClass.table, id).then((_: void) => {
-          this.database.adapter.underlyingAdapter.find(this.table, id, (result) => {
+          underlyingAdapter.find(this.table, id, (result) => {
             callback(mapQueryResult(id, result) as Result<Record>)
           })
         })
