@@ -1,5 +1,8 @@
 import { mockDatabase } from '../__tests__/testModels'
 import ErrorAdapter from '../adapters/error'
+import Query from '../Query'
+import * as Q from '../QueryDescription'
+import subscribeToSimpleQuery from '../observation/subscribeToSimpleQuery'
 
 // MOBILE-6149 (Android fatal right after login):
 // `_onCacheMiss` runs synchronously inside RecordCache._cachedModelForId when a
@@ -95,5 +98,38 @@ describe('Collection query paths report a caught error (not a false success) dur
     expect(() => tasks._fetchCount(query, (r) => (result = r))).not.toThrow()
     expect(result.error).toBeInstanceOf(Error)
     expect(result.value).toBeUndefined()
+  })
+})
+
+// The CONFIRMED production crash path: a live query observer refetches
+// synchronously when the collection reports an external change (native CDC
+// write → SQLITE_UPDATE_HOOK → Database.notify → collection._notifyExternalChange
+// → empty changeset → subscribeToSimpleQuery calls _fetchQuery). That refetch
+// runs OUTSIDE any Promise/try-catch, so on the pre-fix build the throwing
+// underlyingAdapter getter escaped through notify() as a fatal, uncaught crash.
+describe('query-observer external-change refetch during a reset — MOBILE-6149 (the fatal notify path)', () => {
+  it('does not throw when an external-change refetch races an in-flight reset', async () => {
+    const { database, tasks } = mockDatabase()
+    await tasks.create((m) => {
+      m.name = 'foo'
+    })
+
+    const query = new Query(tasks, [Q.where('name', 'foo')])
+    const observer = jest.fn()
+    const unsubscribe = subscribeToSimpleQuery(query, observer)
+    await new Promise(process.nextTick) // let the initial emission settle
+    expect(observer).toHaveBeenCalled()
+
+    // Reset window: WatermelonDB swaps database.adapter for the throwing
+    // ErrorAdapter placeholder for the duration of unsafeResetDatabase().
+    const fetchSpy = jest.spyOn(tasks, '_fetchQuery')
+    database.adapter = new ErrorAdapter()
+
+    // An external change triggers the synchronous _fetchQuery refetch. It must
+    // fail soft (guard → { error } → observer skips) rather than throw fatally.
+    expect(() => tasks._notifyExternalChange()).not.toThrow()
+    expect(fetchSpy).toHaveBeenCalledTimes(1) // the refetch path was exercised
+
+    unsubscribe()
   })
 })
