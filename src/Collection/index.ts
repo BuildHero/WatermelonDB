@@ -356,12 +356,18 @@ export default class Collection<Record extends Model> {
         logger.log(`Record ${this.table}#${id} not found`)
         // @ts-ignore
         this.modelClass.fetchFromRemote(this.modelClass.table, id).then((_: void) => {
-          // MOBILE-6149: re-read the adapter after the async gap. A reset may
-          // have started while fetchFromRemote was in flight, so the reference
-          // captured above is stale (a torn-down adapter). Fail soft rather than
-          // querying it — do not bypass the reset guard with a captured adapter.
+          // MOBILE-6149: fetchFromRemote is a real async gap — a reset may have
+          // begun (incl. the pre-adapter-swap window where the adapter is still
+          // the REAL one) or completed entirely (epoch moved) while it was in
+          // flight. Check the full canonical signal, not just the adapter
+          // reference: issuing this second find would be adapter traffic during
+          // the reset window. Fail soft instead.
           const adapterAfterFetch = this.database.adapter?.underlyingAdapter
-          if (!adapterAfterFetch) {
+          if (
+            this.database._isBeingReset ||
+            !adapterAfterFetch ||
+            this.database._resetCount !== startResetCount
+          ) {
             callback({
               error: new Error(`Database is resetting; cannot fetch ${this.table}#${id}`),
             })

@@ -256,6 +256,37 @@ describe('canonical reset-signal coverage (_isBeingReset + _resetCount epoch) â€
     expect(result.error).toBeInstanceOf(Error)
     expect(querySpy).not.toHaveBeenCalled() // no traffic to a resetting DB
   })
+
+  it('_fetchRecord issues no second-find traffic if a reset begins during fetchFromRemote (pre-swap)', async () => {
+    const { database, tasks } = mockDatabase()
+    const realAdapter = database.adapter.underlyingAdapter
+
+    // First find â†’ not found, so the async fetchFromRemote fallback runs.
+    const findSpy = jest
+      .spyOn(realAdapter, 'find')
+      .mockImplementation((_t, _i, cb) => cb({ value: null }))
+
+    let resolveRemote
+    jest
+      .spyOn(tasks.modelClass, 'fetchFromRemote')
+      .mockImplementation(() => new Promise((res) => (resolveRemote = res)))
+
+    let result
+    tasks._fetchRecord('missing_1', (r) => (result = r))
+    expect(findSpy).toHaveBeenCalledTimes(1)
+
+    // Reset begins DURING fetchFromRemote, adapter NOT yet swapped (still real).
+    // The old re-guard only checked !adapterAfterFetch and would have issued a
+    // second find (traffic) against the resetting DB.
+    database._isBeingReset = true
+
+    resolveRemote()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(findSpy).toHaveBeenCalledTimes(1) // no second find
+    expect(result.error).toBeInstanceOf(Error)
+  })
 })
 
 // The CONFIRMED production crash path: a live query observer refetches
