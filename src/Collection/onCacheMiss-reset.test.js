@@ -28,3 +28,46 @@ describe('Collection._onCacheMiss during an in-flight database reset — MOBILE-
     ).not.toThrow()
   })
 })
+
+describe('Collection._fetchRecord re-guards the adapter across the async fallback — MOBILE-6149', () => {
+  it('does not query a stale adapter if a reset starts during fetchFromRemote', async () => {
+    const { database, tasks } = mockDatabase()
+    const realAdapter = database.adapter.underlyingAdapter
+
+    // First find returns "not found" synchronously so the async
+    // fetchFromRemote fallback runs deterministically.
+    const findSpy = jest
+      .spyOn(realAdapter, 'find')
+      .mockImplementation((_table, _id, cb) => cb({ value: null }))
+
+    // Hold fetchFromRemote open so we can start a reset mid-flight.
+    let resolveRemote
+    jest
+      .spyOn(tasks.modelClass, 'fetchFromRemote')
+      .mockImplementation(() => new Promise((res) => (resolveRemote = res)))
+
+    let cbResult
+    tasks._fetchRecord('missing_id', (r) => {
+      cbResult = r
+    })
+
+    // First find hit the real adapter exactly once.
+    expect(findSpy).toHaveBeenCalledTimes(1)
+
+    // A reset begins while fetchFromRemote is in flight — database.adapter is
+    // swapped for the throwing ErrorAdapter placeholder.
+    database.adapter = new ErrorAdapter()
+
+    // Let the fallback proceed.
+    resolveRemote()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // The captured (now stale/torn-down) adapter must NOT be queried a second
+    // time; the re-guard surfaces a soft error instead. (Before the fix, the
+    // fallback called the captured adapter's find again → findSpy twice.)
+    expect(findSpy).toHaveBeenCalledTimes(1)
+    expect(cbResult).toBeDefined()
+    expect(cbResult.error).toBeInstanceOf(Error)
+  })
+})

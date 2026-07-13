@@ -295,7 +295,18 @@ export default class Collection<Record extends Model> {
         logger.log(`Record ${this.table}#${id} not found`)
         // @ts-ignore
         this.modelClass.fetchFromRemote(this.modelClass.table, id).then((_: void) => {
-          underlyingAdapter.find(this.table, id, (result) => {
+          // MOBILE-6149: re-read the adapter after the async gap. A reset may
+          // have started while fetchFromRemote was in flight, so the reference
+          // captured above is stale (a torn-down adapter). Fail soft rather than
+          // querying it — do not bypass the reset guard with a captured adapter.
+          const adapterAfterFetch = this.database.adapter?.underlyingAdapter
+          if (!adapterAfterFetch) {
+            callback({
+              error: new Error(`Database is resetting; cannot fetch ${this.table}#${id}`),
+            })
+            return
+          }
+          adapterAfterFetch.find(this.table, id, (result) => {
             callback(mapQueryResult(id, result) as Result<Record>)
           })
         })
