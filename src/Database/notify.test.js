@@ -990,6 +990,7 @@ describe('database.notify()', () => {
 describe('database.applyNativePullChanges()', () => {
   it('refreshes an upserted cached record in place and notifies its observer (MOBILE-6276)', async () => {
     const { database, tasks } = mockDatabase({ actionsEnabled: true })
+    database._nativeCDCEnabled = true // the re-read returns full raws under CDC (see stub below)
 
     const task = await database.action(() =>
       tasks.create((t) => {
@@ -1044,20 +1045,25 @@ describe('database.applyNativePullChanges()', () => {
     sub.unsubscribe()
   })
 
-  it('caches a brand-new upserted record that was not previously in JS (MOBILE-6276)', async () => {
+  it('does not materialize an uncached upserted record; wakes query observers instead (MOBILE-6276)', async () => {
+    // Memory safety: a large pull must not mass-load every upserted row into the JS cache. An
+    // upserted id that isn't already cached is left for a live query observer to materialize lazily.
     const { database, tasks } = mockDatabase({ actionsEnabled: true })
     expect(tasks._cache.map.size).toBe(0)
 
-    const newRaw = { id: 'new-task-1', name: 'FromServer', _status: 'synced', _changed: '' }
-    jest
-      .spyOn(database.adapter.underlyingAdapter, 'query')
-      .mockImplementation((_query, cb) => cb({ value: [newRaw] }))
+    const querySpy = jest.spyOn(database.adapter.underlyingAdapter, 'query')
+    const wake = jest.fn()
+    const unsub = tasks.experimentalSubscribe(wake)
 
-    await database.applyNativePullChanges({ mock_tasks: { upserted: ['new-task-1'] } })
+    await database.applyNativePullChanges({ mock_tasks: { upserted: ['brand-new-id'] } })
 
-    expect(tasks._cache.map.has('new-task-1')).toBe(true)
-    const cached = tasks._cache.get('new-task-1')
-    expect(cached.name).toBe('FromServer')
+    // The uncached record was NOT force-read/materialized...
+    expect(querySpy).not.toHaveBeenCalled()
+    expect(tasks._cache.map.has('brand-new-id')).toBe(false)
+    // ...but the table's query observers were woken so a live query re-runs and picks it up.
+    expect(wake).toHaveBeenCalled()
+
+    unsub()
   })
 
   it('resolves without notifying on an empty changeset', async () => {

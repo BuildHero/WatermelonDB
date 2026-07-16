@@ -64,11 +64,6 @@ export class SyncManager {
   private static authTokenProvider: (() => Promise<string> | string) | null = null
   private static jsListeners = new Set<(event: SyncEvent) => void>()
 
-  // Above this many changed ids in one pull, skip the per-record refresh and degrade to a coarse
-  // notify(allTables) — a bootstrap/first pull isn't worth shipping a huge id list for, and little
-  // is cached yet. (MOBILE-6276)
-  private static MAX_REFRESH_CHANGESET_IDS = 5000
-
   static configure(config: SyncConfig): void {
     const {
       authTokenProvider,
@@ -145,27 +140,26 @@ export class SyncManager {
   // JS layer must be told what changed or it serves pre-sync values (stale UI until app restart).
   // The native engine resolves a JSON changeset ({ table: { upserted, deleted } }); apply it through
   // Database.applyNativePullChanges → the standard notify(changeSet) path, which fans create/update/
-  // delete out to every observer shape uniformly. Fallbacks (degrade to a coarse notify(allTables),
-  // which still re-runs query observers): no/empty/unparseable changeset, native that predates the
-  // changeset (resolves undefined), or a very large changeset (an initial bootstrap pull — the id
-  // list isn't worth shipping and little is cached yet). No-op when configured without a Database.
+  // delete out to every observer shape uniformly. Falls back to a coarse notify(allTables) (which
+  // still re-runs query observers) only when there is no usable changeset: absent/empty/unparseable,
+  // or a native build predating the changeset (resolves undefined). No-op without a Database.
   private static applyNativePullChanges(changeSetJson: string | void): Promise<void> {
     const database = SyncManager.database
     if (!database || !database.schema || typeof database.notify !== 'function') {
       return Promise.resolve()
     }
     const changeSet = SyncManager.parseChangeSet(changeSetJson)
-    if (
-      changeSet &&
-      typeof database.applyNativePullChanges === 'function' &&
-      SyncManager.countChangeSetIds(changeSet) <= SyncManager.MAX_REFRESH_CHANGESET_IDS
-    ) {
+    if (changeSet && typeof database.applyNativePullChanges === 'function') {
+      // applyNativePullChanges bounds its work by the JS cache size (not the pull size), so it is
+      // safe to run for pulls of any size — no id-count cap needed.
       return database.applyNativePullChanges(changeSet).catch((error: unknown) => {
         // The pull already applied to SQLite and resolved; a refresh failure only means stale UI,
         // never data loss. Surface it (visible during the Nitro rollout) rather than swallow it.
         SyncManager.emit({ type: 'error', message: 'native_pull_refresh_failed', error: String(error) })
       })
     }
+    // Fallback: no/unparseable changeset (e.g. a native build predating the changeset resolves
+    // undefined) → coarse table-level notify so query observers still re-run.
     const tables = Object.keys(database.schema.tables)
     if (tables.length > 0) {
       database.notify(tables)
@@ -183,15 +177,6 @@ export class SyncManager {
     } catch {
       return null
     }
-  }
-
-  private static countChangeSetIds(changeSet: NativePullChangeSet): number {
-    let total = 0
-    for (const table of Object.keys(changeSet)) {
-      const change = changeSet[table]
-      total += (change.upserted?.length ?? 0) + (change.deleted?.length ?? 0)
-    }
-    return total
   }
 
   static getState(): SyncState {

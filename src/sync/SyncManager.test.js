@@ -360,7 +360,7 @@ describe('SyncManager', () => {
     expect(notify).toHaveBeenCalledWith(['purchase_orders', 'purchase_order_receipts', 'visits'])
   })
 
-  it('falls back to notify(allTables) for an oversized bootstrap changeset (MOBILE-6276)', async () => {
+  it('applies a large changeset via applyNativePullChanges without a size cap (MOBILE-6276)', async () => {
     const { SyncManager, nativeSync } = makeModule()
     const notify = jest.fn()
     const applyNativePullChanges = jest.fn(() => Promise.resolve())
@@ -372,14 +372,17 @@ describe('SyncManager', () => {
       pullChangesUrl: 'https://example.com/pull',
     })
 
+    // A large changeset is still applied precisely — applyNativePullChanges bounds its work by the
+    // JS cache size, so there is no id-count cap / coarse fallback for big pulls.
     const bigIds = Array.from({ length: 6000 }, (_, i) => `id${i}`)
-    nativeSync.syncDatabaseAsync.mockResolvedValue(JSON.stringify({ visits: { upserted: bigIds } }))
+    const changeSet = { visits: { upserted: bigIds } }
+    nativeSync.syncDatabaseAsync.mockResolvedValue(JSON.stringify(changeSet))
 
     await SyncManager.syncDatabaseAsync('manual')
     await flushMicrotasks()
 
-    expect(applyNativePullChanges).not.toHaveBeenCalled()
-    expect(notify).toHaveBeenCalledWith(['visits'])
+    expect(applyNativePullChanges).toHaveBeenCalledWith(changeSet)
+    expect(notify).not.toHaveBeenCalled()
   })
 
   it('does not notify or apply changes when the native pull rejects (MOBILE-6276)', async () => {
