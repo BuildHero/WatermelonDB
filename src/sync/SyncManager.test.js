@@ -315,9 +315,33 @@ describe('SyncManager', () => {
     await expect(SyncManager.syncDatabaseAsync('manual')).rejects.toThrow('boom')
   })
 
-  it('notifies all collections after a native pull resolves (MOBILE-6276)', async () => {
+  it('applies the native changeset via applyNativePullChanges when the pull returns one (MOBILE-6276)', async () => {
+    const { SyncManager, nativeSync } = makeModule()
+    const notify = jest.fn()
+    const applyNativePullChanges = jest.fn(() => Promise.resolve())
+    const database = { schema: { tables: { purchase_orders: {}, visits: {} } }, notify, applyNativePullChanges }
+    SyncManager.configure({
+      database,
+      adapter: { _tag: 1 },
+      pushChangesProvider: jest.fn(),
+      pullChangesUrl: 'https://example.com/pull',
+    })
+
+    const changeSet = { purchase_orders: { upserted: ['po1'], deleted: [] } }
+    nativeSync.syncDatabaseAsync.mockResolvedValue(JSON.stringify(changeSet))
+
+    await SyncManager.syncDatabaseAsync('manual')
+    await flushMicrotasks()
+
+    // The precise changeset is applied through the record-level reconciliation path — no coarse fallback.
+    expect(applyNativePullChanges).toHaveBeenCalledWith(changeSet)
+    expect(notify).not.toHaveBeenCalled()
+  })
+
+  it('falls back to notify(allTables) when the native pull returns no changeset (MOBILE-6276)', async () => {
     const { SyncManager } = makeModule()
     const notify = jest.fn()
+    // No applyNativePullChanges + native resolves undefined (pre-changeset native) → coarse fallback.
     const database = {
       schema: { tables: { purchase_orders: {}, purchase_order_receipts: {}, visits: {} } },
       notify,
@@ -332,16 +356,37 @@ describe('SyncManager', () => {
     await SyncManager.syncDatabaseAsync('manual')
     await flushMicrotasks()
 
-    // The native pull writes straight to SQLite, bypassing Database.batch — without an
-    // explicit notify, JS observers never re-run and cached models stay stale (MOBILE-6276).
     expect(notify).toHaveBeenCalledTimes(1)
     expect(notify).toHaveBeenCalledWith(['purchase_orders', 'purchase_order_receipts', 'visits'])
   })
 
-  it('does not notify collections when the native pull rejects (MOBILE-6276)', async () => {
+  it('falls back to notify(allTables) for an oversized bootstrap changeset (MOBILE-6276)', async () => {
     const { SyncManager, nativeSync } = makeModule()
     const notify = jest.fn()
-    const database = { schema: { tables: { visits: {} } }, notify }
+    const applyNativePullChanges = jest.fn(() => Promise.resolve())
+    const database = { schema: { tables: { visits: {} } }, notify, applyNativePullChanges }
+    SyncManager.configure({
+      database,
+      adapter: { _tag: 1 },
+      pushChangesProvider: jest.fn(),
+      pullChangesUrl: 'https://example.com/pull',
+    })
+
+    const bigIds = Array.from({ length: 6000 }, (_, i) => `id${i}`)
+    nativeSync.syncDatabaseAsync.mockResolvedValue(JSON.stringify({ visits: { upserted: bigIds } }))
+
+    await SyncManager.syncDatabaseAsync('manual')
+    await flushMicrotasks()
+
+    expect(applyNativePullChanges).not.toHaveBeenCalled()
+    expect(notify).toHaveBeenCalledWith(['visits'])
+  })
+
+  it('does not notify or apply changes when the native pull rejects (MOBILE-6276)', async () => {
+    const { SyncManager, nativeSync } = makeModule()
+    const notify = jest.fn()
+    const applyNativePullChanges = jest.fn(() => Promise.resolve())
+    const database = { schema: { tables: { visits: {} } }, notify, applyNativePullChanges }
     SyncManager.configure({
       database,
       adapter: { _tag: 1 },
@@ -354,6 +399,7 @@ describe('SyncManager', () => {
     await flushMicrotasks()
 
     expect(notify).not.toHaveBeenCalled()
+    expect(applyNativePullChanges).not.toHaveBeenCalled()
   })
 
   it('cancelSync calls native cancelSync', () => {

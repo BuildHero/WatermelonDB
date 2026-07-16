@@ -18,6 +18,12 @@ import * as Q from '../QueryDescription'
 import CollectionMap from './CollectionMap'
 import ActionQueue, { ActionInterface } from './ActionQueue'
 
+// MOBILE-6276: the changeset the native (Nitro) sync engine reports for a pull — the exact set of
+// record ids it wrote (upserted: created/updated/partial-merged) or hard-deleted, per table.
+export type NativePullChangeSet = {
+  [table: string]: { upserted?: string[]; deleted?: string[] }
+}
+
 // Lazy-loaded event emitter to avoid circular dependencies
 let _eventEmitter: any = null
 let _eventEmitterLoaded = false
@@ -92,35 +98,51 @@ export default class Database {
     this.notify(tables)
   }
 
-  // MOBILE-6276: after a native (Nitro) pull, `notify(tables)` re-runs query observers, and
-  // under native CDC their refetch refreshes the involved cached records in place. But a record
-  // observed ONLY via findAndObserve / model.observe() — with no live collection query on its
-  // table — subscribes at the record level, which the empty-changeset notify path never pokes,
-  // so its cached _raw stays stale. Re-read each collection's currently-cached SYNCED records:
-  // recordsFromQueryResult → RecordCache._modelForRaw updates the cached instance's _raw in place
-  // and fires _notifyChanged() when the server raw differs, refreshing those observers too.
-  // Only synced records are touched — a record with unsynced local changes (created/updated/
-  // deleted) is skipped so we never overwrite a pending local edit. Records deleted server-side
-  // (absent from the re-read) are intentionally left to the normal delete path.
-  refreshCachedRecords = async (tableNames?: TableName<any>[]): Promise<void> => {
-    const tables = tableNames ?? (Object.keys(this.collections.map) as TableName<any>[])
+  // MOBILE-6276: apply the changeset the native (Nitro) sync engine reports for a pull, routing it
+  // through the standard notify(changeSet) reconciliation — the same path the legacy JS sync uses,
+  // which fans create/update/delete out to every observer shape (query observers, findAndObserve,
+  // relations) uniformly. `changeSet` maps table -> { upserted, deleted } record ids that the
+  // native apply actually wrote / removed (native computes this exactly; JS never has to guess).
+  //   - upserted ids: re-read their raws so RecordCache._modelForRaw refreshes the cached instance
+  //     in place (or caches a brand-new row), then notify 'upserted'.
+  //   - deleted ids: destroy the cached instance (cache evict + _notifyDestroyed) when present.
+  // Note: a cached upserted record whose raw actually changed is notified once by the re-read's
+  // _modelForRaw and again by notify()'s _notify — a harmless duplicate emission of fresh data.
+  applyNativePullChanges = async (changeSet: NativePullChangeSet): Promise<void> => {
     const CHUNK = 900 // stay under SQLite's ~999 bound-variable limit
-    for (const table of tables) {
-      const collection = this.collections.get(table)
+    const notifyChangeSet: Partial<Record<TableName<any>, CollectionChangeSet<any>>> = {}
+    for (const table of Object.keys(changeSet)) {
+      const collection = this.collections.get(table as TableName<any>)
       if (!collection) {
         continue
       }
-      const ids: string[] = []
-      collection._cache.map.forEach((record: Model) => {
-        if (record.syncStatus === 'synced') {
-          ids.push(record.id)
+      const upserted = changeSet[table].upserted ?? []
+      const deleted = changeSet[table].deleted ?? []
+      const ops: CollectionChangeSet<any> = []
+      // Upserts: re-read so _modelForRaw refreshes the cached instance in place (or caches a new row).
+      for (let i = 0; i < upserted.length; i += CHUNK) {
+        const chunk = upserted.slice(i, i + CHUNK)
+        // eslint-disable-next-line no-await-in-loop
+        const records = await collection.query(Q.where('id', Q.oneOf(chunk))).fetch()
+        // The re-read already inserted/refreshed each record in the cache via _modelForRaw; mark
+        // them 'updated' so notify() fires _notifyChanged + wakes query observers (an already-cached
+        // record makes 'updated' and 'upserted' equivalent here, and 'updated' is in the type union).
+        records.forEach((record) => ops.push({ record, type: CollectionChangeTypes.updated }))
+      }
+      // Deletes: native told us these ids are gone, so destroying a cached instance is safe (no
+      // "absent ⇒ deleted" guessing). Uncached ids need no notification — nothing observes them.
+      deleted.forEach((id) => {
+        const record = collection._cache.get(id)
+        if (record) {
+          ops.push({ record, type: CollectionChangeTypes.destroyed })
         }
       })
-      for (let i = 0; i < ids.length; i += CHUNK) {
-        const chunk = ids.slice(i, i + CHUNK)
-        // eslint-disable-next-line no-await-in-loop
-        await collection.query(Q.where('id', Q.oneOf(chunk))).fetch()
+      if (ops.length > 0) {
+        notifyChangeSet[table as TableName<any>] = ops
       }
+    }
+    if (Object.keys(notifyChangeSet).length > 0) {
+      this.notify(notifyChangeSet)
     }
   }
 

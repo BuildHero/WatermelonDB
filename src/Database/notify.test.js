@@ -987,11 +987,10 @@ describe('database.notify()', () => {
   })
 })
 
-describe('database.refreshCachedRecords()', () => {
-  it('refreshes a synced cached record updated out-of-band, notifying its observer (MOBILE-6276)', async () => {
+describe('database.applyNativePullChanges()', () => {
+  it('refreshes an upserted cached record in place and notifies its observer (MOBILE-6276)', async () => {
     const { database, tasks } = mockDatabase({ actionsEnabled: true })
 
-    // A settled, synced record — present in both the store and the JS cache.
     const task = await database.action(() =>
       tasks.create((t) => {
         t.name = 'Original'
@@ -1004,56 +1003,67 @@ describe('database.refreshCachedRecords()', () => {
     const sub = task.observe().subscribe((t) => emissions.push(t.name))
     expect(emissions).toEqual(['Original'])
 
-    // Simulate the native pull: the row was updated in the store and, because native CDC is on,
-    // the adapter re-reads it as a FULL RAW (not an id) — which is what lets RecordCache
-    // ._modelForRaw refresh the cached instance in place. (The LokiJS test adapter can't toggle
-    // CDC, so we stub the raw return that the SQLite adapter produces under CDC.)
+    // The native pull wrote a new value; because native CDC is on, the re-read returns a FULL RAW
+    // (not an id), which lets RecordCache._modelForRaw refresh the cached instance in place. (The
+    // LokiJS test adapter can't toggle CDC, so we stub the raw return the SQLite adapter produces.)
     const serverRaw = { ...task._raw, name: 'ServerUpdated' }
     jest
       .spyOn(database.adapter.underlyingAdapter, 'query')
       .mockImplementation((_query, cb) => cb({ value: [serverRaw] }))
-    expect(task.name).toBe('Original')
 
-    await database.refreshCachedRecords(['mock_tasks'])
+    await database.applyNativePullChanges({ mock_tasks: { upserted: [task.id] } })
 
-    // The cached instance is refreshed in place and the record observer fired.
     expect(task.name).toBe('ServerUpdated')
     expect(emissions[emissions.length - 1]).toBe('ServerUpdated')
 
     sub.unsubscribe()
   })
 
-  it('does not clobber a record that has unsynced local changes (MOBILE-6276)', async () => {
+  it('destroys a deleted cached record — evicts it and emits a destroyed change (MOBILE-6276)', async () => {
     const { database, tasks } = mockDatabase({ actionsEnabled: true })
 
     const task = await database.action(() =>
       tasks.create((t) => {
-        t.name = 'Original'
+        t.name = 'Doomed'
         t._raw._status = 'synced'
       }),
     )
+    expect(tasks._cache.map.has(task.id)).toBe(true)
 
-    // A local edit the user has not yet pushed — record is now 'updated' (unsynced).
-    await database.action(() => task.update((t) => { t.name = 'LocalEdit' }))
-    expect(task.syncStatus).toBe('updated')
+    const changeEmissions = []
+    const sub = tasks.changes.subscribe((cs) => changeEmissions.push(cs))
 
-    // If the guard were missing, refresh would re-read this record and _modelForRaw would
-    // overwrite the local edit with the server value. Stub the raw the adapter would return so
-    // a clobber would be observable — then assert the record is never even queried.
-    const querySpy = jest
-      .spyOn(database.adapter.underlyingAdapter, 'query')
-      .mockImplementation((_query, cb) => cb({ value: [{ ...task._raw, name: 'ServerValue', _status: 'synced' }] }))
+    await database.applyNativePullChanges({ mock_tasks: { deleted: [task.id] } })
 
-    await database.refreshCachedRecords(['mock_tasks'])
+    // Evicted from cache + a destroyed op emitted on the collection — reaches every observer shape.
+    expect(tasks._cache.map.has(task.id)).toBe(false)
+    expect(
+      changeEmissions.some((cs) => cs.some((op) => op.type === 'destroyed' && op.record.id === task.id)),
+    ).toBe(true)
 
-    // The pending local edit must survive — refresh skips non-synced records entirely.
-    expect(querySpy).not.toHaveBeenCalled()
-    expect(task.name).toBe('LocalEdit')
-    expect(task.syncStatus).toBe('updated')
+    sub.unsubscribe()
   })
 
-  it('resolves without error when a collection cache is empty', async () => {
+  it('caches a brand-new upserted record that was not previously in JS (MOBILE-6276)', async () => {
+    const { database, tasks } = mockDatabase({ actionsEnabled: true })
+    expect(tasks._cache.map.size).toBe(0)
+
+    const newRaw = { id: 'new-task-1', name: 'FromServer', _status: 'synced', _changed: '' }
+    jest
+      .spyOn(database.adapter.underlyingAdapter, 'query')
+      .mockImplementation((_query, cb) => cb({ value: [newRaw] }))
+
+    await database.applyNativePullChanges({ mock_tasks: { upserted: ['new-task-1'] } })
+
+    expect(tasks._cache.map.has('new-task-1')).toBe(true)
+    const cached = tasks._cache.get('new-task-1')
+    expect(cached.name).toBe('FromServer')
+  })
+
+  it('resolves without notifying on an empty changeset', async () => {
     const { database } = mockDatabase({ actionsEnabled: true })
-    await expect(database.refreshCachedRecords(['mock_tasks'])).resolves.toBeUndefined()
+    const notifySpy = jest.spyOn(database, 'notify')
+    await expect(database.applyNativePullChanges({})).resolves.toBeUndefined()
+    expect(notifySpy).not.toHaveBeenCalled()
   })
 })

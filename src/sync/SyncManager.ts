@@ -1,4 +1,4 @@
-import type Database from '../Database'
+import type { default as Database, NativePullChangeSet } from '../Database'
 import { getLastPulledAt } from './impl'
 import {
   configureSync as nativeConfigureSync,
@@ -63,6 +63,11 @@ export class SyncManager {
   private static database: Database | null = null
   private static authTokenProvider: (() => Promise<string> | string) | null = null
   private static jsListeners = new Set<(event: SyncEvent) => void>()
+
+  // Above this many changed ids in one pull, skip the per-record refresh and degrade to a coarse
+  // notify(allTables) — a bootstrap/first pull isn't worth shipping a huge id list for, and little
+  // is cached yet. (MOBILE-6276)
+  private static MAX_REFRESH_CHANGESET_IDS = 5000
 
   static configure(config: SyncConfig): void {
     const {
@@ -133,34 +138,60 @@ export class SyncManager {
     return SyncManager.refreshPullChangesUrlFromSequenceId()
       .catch(() => { })
       .then(() => nativeSyncDatabaseAsync(reason))
-      .then(() => SyncManager.refreshJsAfterNativePull())
+      .then((changeSetJson) => SyncManager.applyNativePullChanges(changeSetJson))
   }
 
-  // MOBILE-6276: the native pull applies rows straight to SQLite, bypassing Database.batch, so
-  // nothing refreshes the JS layer and cached models keep serving pre-sync values (stale UI
-  // until app restart). Once the pull resolves, deterministically refresh the JS layer:
-  //   1. notify(allTables) — re-runs query observers (the app-wide useFetch +
-  //      useSubscribeToTableUpdates pattern); under native CDC their refetch returns full raws,
-  //      so RecordCache._modelForRaw refreshes the involved cached records in place.
-  //   2. refreshCachedRecords(allTables) — re-reads the cached SYNCED records so records observed
-  //      only via findAndObserve/model.observe() (no live query on their table) refresh too.
-  // Runs only on success (a rejected pull short-circuits this .then). A no-op when configured
-  // with a bare connectionTag/adapter (no Database instance). A refresh failure is swallowed —
-  // the pull already succeeded and the notify already fired.
-  private static refreshJsAfterNativePull(): Promise<void> {
+  // MOBILE-6276: the native pull applies rows straight to SQLite, bypassing Database.batch, so the
+  // JS layer must be told what changed or it serves pre-sync values (stale UI until app restart).
+  // The native engine resolves a JSON changeset ({ table: { upserted, deleted } }); apply it through
+  // Database.applyNativePullChanges → the standard notify(changeSet) path, which fans create/update/
+  // delete out to every observer shape uniformly. Fallbacks (degrade to a coarse notify(allTables),
+  // which still re-runs query observers): no/empty/unparseable changeset, native that predates the
+  // changeset (resolves undefined), or a very large changeset (an initial bootstrap pull — the id
+  // list isn't worth shipping and little is cached yet). No-op when configured without a Database.
+  private static applyNativePullChanges(changeSetJson: string | void): Promise<void> {
     const database = SyncManager.database
     if (!database || !database.schema || typeof database.notify !== 'function') {
       return Promise.resolve()
     }
-    const tables = Object.keys(database.schema.tables)
-    if (tables.length === 0) {
-      return Promise.resolve()
+    const changeSet = SyncManager.parseChangeSet(changeSetJson)
+    if (
+      changeSet &&
+      typeof database.applyNativePullChanges === 'function' &&
+      SyncManager.countChangeSetIds(changeSet) <= SyncManager.MAX_REFRESH_CHANGESET_IDS
+    ) {
+      return database.applyNativePullChanges(changeSet).catch((error: unknown) => {
+        // The pull already applied to SQLite and resolved; a refresh failure only means stale UI,
+        // never data loss. Surface it (visible during the Nitro rollout) rather than swallow it.
+        SyncManager.emit({ type: 'error', message: 'native_pull_refresh_failed', error: String(error) })
+      })
     }
-    database.notify(tables)
-    if (typeof database.refreshCachedRecords === 'function') {
-      return database.refreshCachedRecords(tables).catch(() => { })
+    const tables = Object.keys(database.schema.tables)
+    if (tables.length > 0) {
+      database.notify(tables)
     }
     return Promise.resolve()
+  }
+
+  private static parseChangeSet(changeSetJson: string | void): NativePullChangeSet | null {
+    if (typeof changeSetJson !== 'string' || changeSetJson.length === 0) {
+      return null
+    }
+    try {
+      const parsed = JSON.parse(changeSetJson)
+      return parsed && typeof parsed === 'object' ? (parsed as NativePullChangeSet) : null
+    } catch {
+      return null
+    }
+  }
+
+  private static countChangeSetIds(changeSet: NativePullChangeSet): number {
+    let total = 0
+    for (const table of Object.keys(changeSet)) {
+      const change = changeSet[table]
+      total += (change.upserted?.length ?? 0) + (change.deleted?.length ?? 0)
+    }
+    return total
   }
 
   static getState(): SyncState {

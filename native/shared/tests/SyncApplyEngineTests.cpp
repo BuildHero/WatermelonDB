@@ -667,6 +667,80 @@ void test_server_payload_with_status_fields_does_not_corrupt() {
     sqlite3_close(db);
 }
 
+void test_changeset_reports_upsert_delete_and_excludes_dirty() {
+    // MOBILE-6276: the engine reports exactly what it wrote — an upsert + a hard-delete — and
+    // EXCLUDES a locally-dirty ('created') row it skipped, so JS never refreshes a pending edit.
+    sqlite3* db = nullptr;
+    sqlite3_open(":memory:", &db);
+    std::string error;
+    execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT, _status TEXT, _changed TEXT)", error);
+    execSql(db, "INSERT INTO tasks (id, name, _status, _changed) VALUES ('dirty1','local','created','')", error);
+    execSql(db, "INSERT INTO tasks (id, name, _status, _changed) VALUES ('del1','gone','synced','')", error);
+
+    std::string payload = R"({
+        "items": [
+          { "_table": "tasks", "row": { "id": "up1", "name": "alpha" } },
+          { "_table": "tasks", "row": { "id": "dirty1", "name": "server" } },
+          { "_table": "tasks", "_deleted": true, "id": "del1" }
+        ]
+      })";
+
+    watermelondb::SyncChangeset cs;
+    bool ok = watermelondb::applySyncPayload(db, payload, error, cs);
+    expectTrue(ok, "apply should succeed");
+    expectTrue(watermelondb::serializeChangeset(cs) == R"({"tasks":{"upserted":["up1"],"deleted":["del1"]}})",
+               "changeset must list only written upserts + hard-deletes, excluding skipped dirty rows");
+
+    std::string name;
+    querySingleText(db, "SELECT name FROM tasks WHERE id='dirty1'", name);
+    expectTrue(name == "local", "locally-created row must be preserved (and excluded from changeset)");
+
+    sqlite3_close(db);
+}
+
+void test_changeset_includes_partial_merged_record() {
+    // A locally-'updated' row gets server columns merged in (applyPartialUpdate) — that IS a write,
+    // so its id must be reported as upserted while the locally-changed column is preserved.
+    sqlite3* db = nullptr;
+    sqlite3_open(":memory:", &db);
+    std::string error;
+    execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT, description TEXT, _status TEXT, _changed TEXT)", error);
+    execSql(db, "INSERT INTO tasks (id, name, description, _status, _changed) "
+                "VALUES ('m1','local','olddesc','updated','name')", error);
+
+    std::string payload = R"({
+        "items": [
+          { "_table": "tasks", "row": { "id": "m1", "name": "server", "description": "newdesc" } }
+        ]
+      })";
+
+    watermelondb::SyncChangeset cs;
+    bool ok = watermelondb::applySyncPayload(db, payload, error, cs);
+    expectTrue(ok, "partial-merge apply should succeed");
+    expectTrue(watermelondb::serializeChangeset(cs) == R"({"tasks":{"upserted":["m1"],"deleted":[]}})",
+               "partial-merged record id must be reported as upserted");
+
+    std::string name;
+    querySingleText(db, "SELECT name FROM tasks WHERE id='m1'", name);
+    expectTrue(name == "local", "locally-changed 'name' must be preserved through the merge");
+
+    sqlite3_close(db);
+}
+
+void test_empty_pull_changeset_is_empty_object() {
+    sqlite3* db = nullptr;
+    sqlite3_open(":memory:", &db);
+    std::string error;
+    execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT)", error);
+
+    watermelondb::SyncChangeset cs;
+    bool ok = watermelondb::applySyncPayload(db, "{\"items\":[]}", error, cs);
+    expectTrue(ok, "empty pull apply should succeed");
+    expectTrue(watermelondb::serializeChangeset(cs) == "{}", "empty pull must serialize to {}");
+
+    sqlite3_close(db);
+}
+
 } // namespace
 
 int main() {
@@ -692,6 +766,9 @@ int main() {
     test_mixed_dirty_and_synced_records();
     test_table_without_status_columns();
     test_server_payload_with_status_fields_does_not_corrupt();
+    test_changeset_reports_upsert_delete_and_excludes_dirty();
+    test_changeset_includes_partial_merged_record();
+    test_empty_pull_changeset_is_empty_object();
 
     if (gFailures > 0) {
         std::cerr << gFailures << " test(s) failed\n";

@@ -56,7 +56,7 @@ JSISwiftWrapperModule::JSISwiftWrapperModule(std::shared_ptr<CallInvoker> jsInvo
     syncEngine_->setEventCallback([this](const std::string &eventJson) {
         emitSyncEventLocked(eventJson);
     });
-    syncEngine_->setApplyCallback([this](const std::string &payload, std::string &errorMessage) {
+    syncEngine_->setApplyCallback([this](const std::string &payload, std::string &errorMessage, watermelondb::SyncChangeset &changeset) {
         @autoreleasepool {
             RCTBridge *bridge = [RCTBridge currentBridge];
             DatabaseBridge *db = [bridge moduleForClass: DatabaseBridge.class];
@@ -97,7 +97,7 @@ JSISwiftWrapperModule::JSISwiftWrapperModule(std::shared_ptr<CallInvoker> jsInvo
                 return false;
             }
             NSTimeInterval applyStart = diagOn ? [NSDate timeIntervalSinceReferenceDate] : 0;
-            bool result = watermelondb::applySyncPayload(sqlite, payload, errorMessage);
+            bool result = watermelondb::applySyncPayload(sqlite, payload, errorMessage, changeset);
             if (diagOn) {
                 double applyMs = ([NSDate timeIntervalSinceReferenceDate] - applyStart) * 1000.0;
                 if (!result) {
@@ -310,21 +310,35 @@ jsi::Value JSISwiftWrapperModule::syncDatabaseAsync(jsi::Runtime &rt, jsi::Strin
     auto jsInvoker = jsInvoker_;
     const std::string reasonUtf8 = reason.utf8(rt);
     
-    return createPromiseAsJSIValue(rt, [engine, jsInvoker, reasonUtf8](jsi::Runtime &rt2, std::shared_ptr<Promise> promise) {
+    return createPromiseAsJSIValue(rt, [engine, jsInvoker, state, reasonUtf8](jsi::Runtime &rt2, std::shared_ptr<Promise> promise) {
         if (!engine) {
             jsInvoker->invokeAsync([promise]() mutable {
                 promise->reject("Sync engine not available");
             });
             return;
         }
-        engine->startWithCompletion(reasonUtf8, [jsInvoker, promise](bool success, const std::string& errorMessage) mutable {
-            jsInvoker->invokeAsync([promise, success, errorMessage]() mutable {
+        engine->startWithCompletion(reasonUtf8, [engine, jsInvoker, state, promise](bool success, const std::string& errorMessage) mutable {
+            // MOBILE-6276: read the changeset accumulated across this pull's pages synchronously in
+            // the completion body (before any queued sync can reset it), then resolve it to JS so
+            // Database.applyNativePullChanges can reconcile the JS cache/observers precisely.
+            const std::string changesetJson = success ? engine->takeAccumulatedChangesetJson() : std::string("{}");
+            jsInvoker->invokeAsync([promise, success, errorMessage, changesetJson, state]() mutable {
                 if (!success) {
                     const std::string message = errorMessage.empty() ? "Sync failed" : errorMessage;
                     promise->reject(message);
-                } else {
-                    promise->resolve(jsi::Value::undefined());
+                    return;
                 }
+                if (!state) {
+                    promise->reject("Sync runtime unavailable");
+                    return;
+                }
+                const std::lock_guard<std::mutex> lock(state->mutex);
+                if (!state->alive || !state->runtime) {
+                    promise->reject("Sync runtime unavailable");
+                    return;
+                }
+                jsi::Runtime &rt3 = *state->runtime;
+                promise->resolve(jsi::String::createFromUtf8(rt3, changesetJson));
             });
         });
     });
