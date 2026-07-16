@@ -6,7 +6,7 @@ import type { TurboModule } from 'react-native'
 interface NativeSyncModule extends TurboModule {
   configureSync(configJson: string): void
   startSync(reason: string): void
-  syncDatabaseAsync(reason: string): Promise<void>
+  syncDatabaseAsync(reason: string): Promise<string>
   setSyncPullUrl(pullEndpointUrl: string): void
   getSyncStateJson(): string
   addSyncListener(listener: (eventJson: string) => void): number
@@ -52,7 +52,10 @@ export function startSync(reason: string): void {
   module.startSync(reason ?? 'unknown')
 }
 
-export function syncDatabaseAsync(reason: string): Promise<void> {
+// Resolves a JSON envelope on every outcome (even a push failure), so the pulled rows refresh JS
+// regardless: { "changeset": { "<table>": { "upserted": [...], "deleted": [...] } }, "error": string | null }.
+// SyncManager applies the changeset then rethrows any error — see SyncManager.applyNativePullResult.
+export function syncDatabaseAsync(reason: string): Promise<string> {
   const module = getNativeModule()
   return module.syncDatabaseAsync(reason ?? 'unknown')
 }

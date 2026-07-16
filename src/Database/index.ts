@@ -2,7 +2,7 @@ import { values } from 'rambdax'
 
 import { Observable, startWith, merge as merge$ } from '../utils/rx'
 import { Unsubscribe } from '../utils/subscriptions'
-import { invariant } from '../utils/common'
+import { invariant, logError } from '../utils/common'
 import { noop } from '../utils/fp'
 import { toPromise } from '../utils/fp/Result'
 
@@ -13,9 +13,16 @@ import type Collection from '../Collection'
 import type { CollectionChangeSet } from '../Collection'
 import { CollectionChangeTypes } from '../Collection/common'
 import type { TableName, AppSchema } from '../Schema'
+import * as Q from '../QueryDescription'
 
 import CollectionMap from './CollectionMap'
 import ActionQueue, { ActionInterface } from './ActionQueue'
+
+// MOBILE-6276: the changeset the native (Nitro) sync engine reports for a pull — the exact set of
+// record ids it wrote (upserted: created/updated/partial-merged) or hard-deleted, per table.
+export type NativePullChangeSet = {
+  [table: string]: { upserted?: string[]; deleted?: string[] }
+}
 
 // Lazy-loaded event emitter to avoid circular dependencies
 let _eventEmitter: any = null
@@ -89,6 +96,83 @@ export default class Database {
     })
 
     this.notify(tables)
+  }
+
+  // MOBILE-6276: apply the changeset the native (Nitro) sync engine reports for a pull. `changeSet`
+  // maps table -> { upserted, deleted } record ids the native apply actually wrote / removed (native
+  // computes this exactly; JS never guesses). Two concerns, kept separate on purpose:
+  //
+  //   1. Refresh already-cached instances in place so record-level observers (findAndObserve /
+  //      model.observe / relations) see fresh data:
+  //        - cached upserts: re-read via _modelForRaw (updates _raw in place + fires _notifyChanged).
+  //          Only records already in the JS cache are re-read — bounded by cache size, not pull size,
+  //          so a large pull can't mass-load every row into memory.
+  //        - cached deletes: evict from the cache + _notifyDestroyed the instance.
+  //   2. Wake EVERY changed table's query observers with the empty-changeset (full-refetch) signal,
+  //      so simple AND reloading observers re-query SQLite and correctly reflect inserts/updates/
+  //      deletes — including rows never cached in JS. We deliberately never hand query observers a
+  //      partial changeset: subscribeToSimpleQuery applies a non-empty changeset INCREMENTALLY and
+  //      would miss an uncached newly-inserted row on a table that also had cached changes.
+  //
+  // No size cap is needed. The in-place refresh relies on native CDC returning full records (the
+  // Nitro path enables it before syncing); without CDC the re-read yields ids and cannot refresh —
+  // warn rather than fail silently.
+  applyNativePullChanges = async (changeSet: NativePullChangeSet): Promise<void> => {
+    const CHUNK = 900 // stay under SQLite's ~999 bound-variable limit
+    const changedTables: TableName<any>[] = []
+    let hasCachedUpserts = false
+    for (const table of Object.keys(changeSet)) {
+      const collection = this.collections.get(table as TableName<any>)
+      if (!collection) {
+        continue
+      }
+      changedTables.push(table as TableName<any>)
+      // Best-effort in-place refresh of already-cached instances (reaches findAndObserve). A failure
+      // here MUST NOT abort the loop or skip the query-observer wake below — that wake re-queries
+      // SQLite (the source of truth) and is the load-bearing refresh — so isolate it per table.
+      try {
+        const upserted = changeSet[table].upserted ?? []
+        const deleted = changeSet[table].deleted ?? []
+        // Refresh only upserted records already in the cache (memory-safe; uncached rows are picked
+        // up lazily by the query-observer refetch below).
+        const cachedUpsertedIds = upserted.filter((id) => collection._cache.map.has(id))
+        if (cachedUpsertedIds.length > 0) {
+          hasCachedUpserts = true
+        }
+        for (let i = 0; i < cachedUpsertedIds.length; i += CHUNK) {
+          const chunk = cachedUpsertedIds.slice(i, i + CHUNK)
+          // eslint-disable-next-line no-await-in-loop
+          await collection.query(Q.where('id', Q.oneOf(chunk))).fetch()
+        }
+        // Destroy cached deletes directly (evict + notify the record), so we never emit a partial
+        // collection changeset. Query observers learn of the deletion via the full-refetch wake below.
+        for (const id of deleted) {
+          const record = collection._cache.get(id)
+          if (record) {
+            collection._cache.delete(record)
+            record._notifyDestroyed()
+          }
+        }
+      } catch (error) {
+        logError(
+          `[WatermelonDB] applyNativePullChanges: in-place refresh failed for table ${table}: ${String(
+            error,
+          )}. Query observers are still woken below and reconcile from SQLite.`,
+        )
+      }
+    }
+    if (hasCachedUpserts && !this._nativeCDCEnabled) {
+      logError(
+        '[WatermelonDB] applyNativePullChanges refreshed cached records while native CDC is disabled; ' +
+          'the in-place _raw refresh needs CDC (full-record reads) and may be a no-op.',
+      )
+    }
+    // Full-refetch wake for every changed table (empty changeset → simple + reloading observers
+    // re-query SQLite). Runs even if an in-place refresh above threw, so a successful sync never
+    // leaves lists/counts stale. Never a partial changeset, so no observer can miss an uncached row.
+    if (changedTables.length > 0) {
+      this.notify(changedTables)
+    }
   }
 
   _cdcSubscription: { remove: () => void } | null = null

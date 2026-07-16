@@ -244,7 +244,7 @@ JSIAndroidBridgeModule::JSIAndroidBridgeModule(std::shared_ptr<CallInvoker> jsIn
     syncEngine_->setEventCallback([this](const std::string &eventJson) {
         emitSyncEventLocked(eventJson);
     });
-    syncEngine_->setApplyCallback([this](const std::string &payload, std::string &errorMessage) {
+    syncEngine_->setApplyCallback([this](const std::string &payload, std::string &errorMessage, watermelondb::SyncChangeset &changeset) {
         if (syncConnectionTag_ <= 0) {
             errorMessage = "Missing connectionTag in sync config";
             return false;
@@ -260,7 +260,7 @@ JSIAndroidBridgeModule::JSIAndroidBridgeModule(std::shared_ptr<CallInvoker> jsIn
             errorMessage = error;
             return false;
         }
-        bool ok = watermelondb::applySyncPayload(db, payload, errorMessage);
+        bool ok = watermelondb::applySyncPayload(db, payload, errorMessage, changeset);
         releaseSqlite(databaseBridge, (jint)syncConnectionTag_);
         return ok;
     });
@@ -532,21 +532,36 @@ jsi::Value JSIAndroidBridgeModule::syncDatabaseAsync(jsi::Runtime &rt, jsi::Stri
     auto jsInvoker = jsInvoker_;
     const std::string reasonUtf8 = reason.utf8(rt);
     
-    return createPromiseAsJSIValue(rt, [engine, jsInvoker, reasonUtf8](jsi::Runtime &rt2, std::shared_ptr<Promise> promise) {
+    return createPromiseAsJSIValue(rt, [engine, jsInvoker, state, reasonUtf8](jsi::Runtime &rt2, std::shared_ptr<Promise> promise) {
         if (!engine) {
             jsInvoker->invokeAsync([promise]() mutable {
                 promise->reject("Sync engine not available");
             });
             return;
         }
-        engine->startWithCompletion(reasonUtf8, [jsInvoker, promise](bool success, const std::string& errorMessage) mutable {
-            jsInvoker->invokeAsync([promise, success, errorMessage]() mutable {
-                if (!success) {
-                    const std::string message = errorMessage.empty() ? "Sync failed" : errorMessage;
-                    promise->reject(message);
-                } else {
-                    promise->resolve(jsi::Value::undefined());
+        engine->startWithCompletion(reasonUtf8, [engine, jsInvoker, state, promise](bool success, const std::string& errorMessage) mutable {
+            // MOBILE-6276: read the pulled changeset on EVERY outcome (success, pull failure, push
+            // failure) synchronously in the completion body (before a queued sync can reset it). The
+            // pull already committed to SQLite, so JS must refresh those rows even when the push leg
+            // fails. Resolve a { "changeset": <obj>, "error": <null|string> } envelope — SyncManager
+            // applies the changeset then rethrows the error, preserving the caller's pass/fail contract.
+            const std::string changesetJson = engine->takeAccumulatedChangesetJson();
+            jsInvoker->invokeAsync([promise, success, errorMessage, changesetJson, state]() mutable {
+                if (!state) {
+                    promise->reject("Sync runtime unavailable");
+                    return;
                 }
+                const std::lock_guard<std::mutex> lock(state->mutex);
+                if (!state->alive || !state->runtime) {
+                    promise->reject("Sync runtime unavailable");
+                    return;
+                }
+                jsi::Runtime &rt3 = *state->runtime;
+                const std::string envelope = std::string("{\"changeset\":") + changesetJson + ",\"error\":" +
+                    (success ? std::string("null")
+                             : (std::string("\"") + watermelondb::json_utils::escapeJsonString(errorMessage) + "\"")) +
+                    "}";
+                promise->resolve(jsi::String::createFromUtf8(rt3, envelope));
             });
         });
     });

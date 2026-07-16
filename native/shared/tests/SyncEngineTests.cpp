@@ -87,7 +87,7 @@ void test_success_flow() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
-    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
     engine->setPushChangesCallback([&](std::function<void(bool, const std::string&)> completion) {
         completion(true, "");
     });
@@ -110,7 +110,7 @@ void test_auth_required() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
-    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
 
     watermelondb::platform::setHttpHandler([](const watermelondb::platform::HttpRequest&,
                                               std::function<void(const watermelondb::platform::HttpResponse&)> done) {
@@ -129,7 +129,7 @@ void test_retry_flow() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
-    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
     engine->setPushChangesCallback([&](std::function<void(bool, const std::string&)> completion) {
         completion(true, "");
     });
@@ -173,7 +173,7 @@ void test_cursor_pagination() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
-    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
     engine->setPushChangesCallback([&](std::function<void(bool, const std::string&)> completion) {
         completion(true, "");
     });
@@ -204,11 +204,67 @@ void test_cursor_pagination() {
     expectTrue(recorder.waitForContains("\"state\":\"done\""), "expected done after pagination");
 }
 
+void test_changeset_accumulates_across_pages() {
+    // MOBILE-6276: the engine must merge EACH pulled page's changeset and hand the total to the
+    // completion consumer via takeAccumulatedChangesetJson() — not just the last page's.
+    auto engine = std::make_shared<watermelondb::SyncEngine>();
+
+    std::mutex applyMutex;
+    int applyPage = 0;
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset& changeset) {
+        std::lock_guard<std::mutex> lock(applyMutex);
+        changeset["tasks"].upserted.push_back(applyPage == 0 ? "page0" : "page1");
+        applyPage++;
+        return true;
+    });
+    engine->setPushChangesCallback([&](std::function<void(bool, const std::string&)> completion) {
+        completion(true, "");
+    });
+
+    static int callCount = 0;
+    callCount = 0;
+    watermelondb::platform::setHttpHandler([](const watermelondb::platform::HttpRequest&,
+                                              std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        watermelondb::platform::HttpResponse response;
+        response.statusCode = 200;
+        response.body = (callCount == 0) ? "{\"changes\":{},\"next\":{\"c\":1}}"
+                                         : "{\"changes\":{},\"next\":null}";
+        callCount++;
+        done(response);
+    });
+
+    std::mutex m;
+    std::condition_variable cv;
+    bool completed = false;
+    std::string capturedJson;
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
+    engine->startWithCompletion("accumulate", [&](bool, const std::string&) {
+        // Read exactly as the native bridge will — synchronously in the completion body.
+        capturedJson = engine->takeAccumulatedChangesetJson();
+        {
+            std::lock_guard<std::mutex> lock(m);
+            completed = true;
+        }
+        cv.notify_all();
+    });
+
+    {
+        std::unique_lock<std::mutex> lock(m);
+        cv.wait_for(lock, std::chrono::milliseconds(500), [&] { return completed; });
+    }
+    expectTrue(completed, "accumulate sync should complete");
+    expectTrue(capturedJson == R"({"tasks":{"upserted":["page0","page1"],"deleted":[]}})",
+               "changeset must accumulate ids from BOTH pages, not just the last");
+    expectTrue(engine->takeAccumulatedChangesetJson() == "{}", "take clears the accumulator");
+
+    watermelondb::platform::setHttpHandler(nullptr);
+}
+
 void test_auth_required_resumes_cursor() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
-    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
 
     engine->setAuthTokenRequestCallback([engine]() { engine->setAuthToken("token-2"); });
     engine->setAuthToken("token-1");
@@ -259,7 +315,7 @@ void test_shutdown_prevents_events() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
-    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
 
     watermelondb::platform::setHttpHandler([](const watermelondb::platform::HttpRequest&,
                                               std::function<void(const watermelondb::platform::HttpResponse&)> done) {
@@ -280,7 +336,7 @@ void test_auth_token_restart() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
-    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
 
     watermelondb::platform::setHttpHandler([](const watermelondb::platform::HttpRequest&,
                                               std::function<void(const watermelondb::platform::HttpResponse&)> done) {
@@ -309,7 +365,7 @@ void test_completion_preserved_after_auth_refresh() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
-    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
 
     std::mutex completionMutex;
     std::condition_variable completionCv;
@@ -357,7 +413,7 @@ void test_queue_when_in_flight() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
-    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
     std::function<void(bool, const std::string&)> pushCompletion;
     engine->setPushChangesCallback([&](std::function<void(bool, const std::string&)> completion) {
         pushCompletion = std::move(completion);
@@ -386,7 +442,7 @@ void test_backoff_delay_cap() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
-    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
 
     watermelondb::platform::setHttpHandler([](const watermelondb::platform::HttpRequest&,
                                               std::function<void(const watermelondb::platform::HttpResponse&)> done) {
@@ -407,7 +463,7 @@ void test_missing_endpoint_error() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
-    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
 
     watermelondb::platform::setHttpHandler(nullptr);
 
@@ -423,7 +479,7 @@ void test_invalid_config_json() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
-    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
 
     watermelondb::platform::setHttpHandler(nullptr);
 
@@ -439,7 +495,7 @@ void test_apply_error_sets_state() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
-    engine->setApplyCallback([&](const std::string&, std::string& errorMessage) {
+    engine->setApplyCallback([&](const std::string&, std::string& errorMessage, watermelondb::SyncChangeset&) {
         errorMessage = "apply failed";
         return false;
     });
@@ -476,7 +532,7 @@ void test_not_modified_304_is_noop_success() {
     std::mutex applyMutex;
     int applyCount = 0;
     std::string appliedBody;
-    engine->setApplyCallback([&](const std::string& body, std::string& errorMessage) {
+    engine->setApplyCallback([&](const std::string& body, std::string& errorMessage, watermelondb::SyncChangeset&) {
         {
             std::lock_guard<std::mutex> lock(applyMutex);
             applyCount++;
@@ -555,7 +611,7 @@ void test_cancel_sync_in_flight() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
-    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
 
     // Hold sync in push phase so we can cancel it
     engine->setPushChangesCallback([&](std::function<void(bool, const std::string&)> cb) {
@@ -611,7 +667,7 @@ void test_cancel_sync_during_auth_required() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
-    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
     engine->setAuthTokenRequestCallback([]() {
         // Don't provide a token — simulates JS auth provider not responding yet
     });
@@ -672,7 +728,7 @@ void test_cancel_sync_fires_pending_completion() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
-    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
 
     // Hold sync in push phase
     engine->setPushChangesCallback([&](std::function<void(bool, const std::string&)> cb) {
@@ -746,7 +802,7 @@ void test_cancel_restores_push_callback_via_completion() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
-    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
 
     engine->setPushChangesCallback([&](std::function<void(bool, const std::string&)> completion) {
         realPushCalled = true;
@@ -808,7 +864,7 @@ void test_foreground_overrides_background_sync() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
-    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
 
     auto realPush = [&](std::function<void(bool, const std::string&)> cb) {
         realPushCalled = true;
@@ -909,7 +965,7 @@ void test_cancel_during_http_allows_new_sync() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
-    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
     engine->setPushChangesCallback([](std::function<void(bool, const std::string&)> cb) { cb(true, ""); });
 
     std::function<void(const watermelondb::platform::HttpResponse&)> firstHttpDone;
@@ -961,7 +1017,7 @@ void test_rapid_cancel_and_restart() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
-    engine->setApplyCallback([&](const std::string&, std::string&) { return true; });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
     engine->setPushChangesCallback([](std::function<void(bool, const std::string&)> cb) { cb(true, ""); });
 
     // Hold HTTP responses so sync is genuinely in-flight when cancelSync() runs.
@@ -1065,6 +1121,7 @@ int main() {
     test_auth_required();
     test_retry_flow();
     test_cursor_pagination();
+    test_changeset_accumulates_across_pages();
     test_auth_required_resumes_cursor();
     test_shutdown_prevents_events();
     test_auth_token_restart();
