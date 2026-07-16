@@ -52,8 +52,9 @@ export function startSync(reason: string): void {
   module.startSync(reason ?? 'unknown')
 }
 
-// Resolves the JSON changeset the native engine applied for this pull
-// ({ "<table>": { "upserted": [...ids], "deleted": [...ids] } }) — see Database.applyNativePullChanges.
+// Resolves a JSON envelope on every outcome (even a push failure), so the pulled rows refresh JS
+// regardless: { "changeset": { "<table>": { "upserted": [...], "deleted": [...] } }, "error": string | null }.
+// SyncManager applies the changeset then rethrows any error — see SyncManager.applyNativePullResult.
 export function syncDatabaseAsync(reason: string): Promise<string> {
   const module = getNativeModule()
   return module.syncDatabaseAsync(reason ?? 'unknown')

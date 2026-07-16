@@ -328,7 +328,7 @@ describe('SyncManager', () => {
     })
 
     const changeSet = { purchase_orders: { upserted: ['po1'], deleted: [] } }
-    nativeSync.syncDatabaseAsync.mockResolvedValue(JSON.stringify(changeSet))
+    nativeSync.syncDatabaseAsync.mockResolvedValue(JSON.stringify({ changeset: changeSet, error: null }))
 
     await SyncManager.syncDatabaseAsync('manual')
     await flushMicrotasks()
@@ -336,6 +336,29 @@ describe('SyncManager', () => {
     // The precise changeset is applied through the record-level reconciliation path — no coarse fallback.
     expect(applyNativePullChanges).toHaveBeenCalledWith(changeSet)
     expect(notify).not.toHaveBeenCalled()
+  })
+
+  it('applies the pulled changeset then rejects when the envelope carries an error (push-fail) (MOBILE-6276)', async () => {
+    const { SyncManager, nativeSync } = makeModule()
+    const applyNativePullChanges = jest.fn(() => Promise.resolve())
+    const database = { schema: { tables: { purchase_orders: {} } }, notify: jest.fn(), applyNativePullChanges }
+    SyncManager.configure({
+      database,
+      adapter: { _tag: 1 },
+      pushChangesProvider: jest.fn(),
+      pullChangesUrl: 'https://example.com/pull',
+    })
+
+    // Pull succeeded (rows are in SQLite) but the push leg failed: native resolves the envelope with
+    // both the changeset AND the error. The pulled changes must refresh JS, THEN the sync rejects.
+    const changeSet = { purchase_orders: { upserted: ['po1'], deleted: [] } }
+    nativeSync.syncDatabaseAsync.mockResolvedValue(JSON.stringify({ changeset: changeSet, error: 'push failed' }))
+
+    await expect(SyncManager.syncDatabaseAsync('manual')).rejects.toThrow('push failed')
+    await flushMicrotasks()
+
+    // Refresh happened despite the failure — the pulled rows are not left JS-stale.
+    expect(applyNativePullChanges).toHaveBeenCalledWith(changeSet)
   })
 
   it('falls back to notify(allTables) when the native pull returns no changeset (MOBILE-6276)', async () => {
@@ -376,7 +399,7 @@ describe('SyncManager', () => {
     // JS cache size, so there is no id-count cap / coarse fallback for big pulls.
     const bigIds = Array.from({ length: 6000 }, (_, i) => `id${i}`)
     const changeSet = { visits: { upserted: bigIds } }
-    nativeSync.syncDatabaseAsync.mockResolvedValue(JSON.stringify(changeSet))
+    nativeSync.syncDatabaseAsync.mockResolvedValue(JSON.stringify({ changeset: changeSet, error: null }))
 
     await SyncManager.syncDatabaseAsync('manual')
     await flushMicrotasks()
@@ -385,7 +408,9 @@ describe('SyncManager', () => {
     expect(notify).not.toHaveBeenCalled()
   })
 
-  it('does not notify or apply changes when the native pull rejects (MOBILE-6276)', async () => {
+  it('does not notify or apply changes when the native pull hard-rejects (MOBILE-6276)', async () => {
+    // Native resolves the envelope on pull/push failure; it only rejects the promise on a hard
+    // pre-flight failure (e.g. runtime unavailable) — in which nothing was applied, so no refresh.
     const { SyncManager, nativeSync } = makeModule()
     const notify = jest.fn()
     const applyNativePullChanges = jest.fn(() => Promise.resolve())

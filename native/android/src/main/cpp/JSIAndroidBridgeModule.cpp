@@ -540,16 +540,13 @@ jsi::Value JSIAndroidBridgeModule::syncDatabaseAsync(jsi::Runtime &rt, jsi::Stri
             return;
         }
         engine->startWithCompletion(reasonUtf8, [engine, jsInvoker, state, promise](bool success, const std::string& errorMessage) mutable {
-            // MOBILE-6276: read the changeset accumulated across this pull's pages synchronously in
-            // the completion body (before any queued sync can reset it), then resolve it to JS so
-            // Database.applyNativePullChanges can reconcile the JS cache/observers precisely.
-            const std::string changesetJson = success ? engine->takeAccumulatedChangesetJson() : std::string("{}");
+            // MOBILE-6276: read the pulled changeset on EVERY outcome (success, pull failure, push
+            // failure) synchronously in the completion body (before a queued sync can reset it). The
+            // pull already committed to SQLite, so JS must refresh those rows even when the push leg
+            // fails. Resolve a { "changeset": <obj>, "error": <null|string> } envelope — SyncManager
+            // applies the changeset then rethrows the error, preserving the caller's pass/fail contract.
+            const std::string changesetJson = engine->takeAccumulatedChangesetJson();
             jsInvoker->invokeAsync([promise, success, errorMessage, changesetJson, state]() mutable {
-                if (!success) {
-                    const std::string message = errorMessage.empty() ? "Sync failed" : errorMessage;
-                    promise->reject(message);
-                    return;
-                }
                 if (!state) {
                     promise->reject("Sync runtime unavailable");
                     return;
@@ -560,7 +557,11 @@ jsi::Value JSIAndroidBridgeModule::syncDatabaseAsync(jsi::Runtime &rt, jsi::Stri
                     return;
                 }
                 jsi::Runtime &rt3 = *state->runtime;
-                promise->resolve(jsi::String::createFromUtf8(rt3, changesetJson));
+                const std::string envelope = std::string("{\"changeset\":") + changesetJson + ",\"error\":" +
+                    (success ? std::string("null")
+                             : (std::string("\"") + watermelondb::json_utils::escapeJsonString(errorMessage) + "\"")) +
+                    "}";
+                promise->resolve(jsi::String::createFromUtf8(rt3, envelope));
             });
         });
     });
