@@ -127,28 +127,39 @@ export default class Database {
         continue
       }
       changedTables.push(table as TableName<any>)
-      const upserted = changeSet[table].upserted ?? []
-      const deleted = changeSet[table].deleted ?? []
-      // Refresh only upserted records already in the cache (memory-safe; uncached rows are picked up
-      // lazily by the query-observer refetch below).
-      const cachedUpsertedIds = upserted.filter((id) => collection._cache.map.has(id))
-      if (cachedUpsertedIds.length > 0) {
-        hasCachedUpserts = true
-      }
-      for (let i = 0; i < cachedUpsertedIds.length; i += CHUNK) {
-        const chunk = cachedUpsertedIds.slice(i, i + CHUNK)
-        // eslint-disable-next-line no-await-in-loop
-        await collection.query(Q.where('id', Q.oneOf(chunk))).fetch()
-      }
-      // Destroy cached deletes directly (evict + notify the record), so we never emit a partial
-      // collection changeset. Query observers learn of the deletion via the full-refetch wake below.
-      deleted.forEach((id) => {
-        const record = collection._cache.get(id)
-        if (record) {
-          collection._cache.delete(record)
-          record._notifyDestroyed()
+      // Best-effort in-place refresh of already-cached instances (reaches findAndObserve). A failure
+      // here MUST NOT abort the loop or skip the query-observer wake below — that wake re-queries
+      // SQLite (the source of truth) and is the load-bearing refresh — so isolate it per table.
+      try {
+        const upserted = changeSet[table].upserted ?? []
+        const deleted = changeSet[table].deleted ?? []
+        // Refresh only upserted records already in the cache (memory-safe; uncached rows are picked
+        // up lazily by the query-observer refetch below).
+        const cachedUpsertedIds = upserted.filter((id) => collection._cache.map.has(id))
+        if (cachedUpsertedIds.length > 0) {
+          hasCachedUpserts = true
         }
-      })
+        for (let i = 0; i < cachedUpsertedIds.length; i += CHUNK) {
+          const chunk = cachedUpsertedIds.slice(i, i + CHUNK)
+          // eslint-disable-next-line no-await-in-loop
+          await collection.query(Q.where('id', Q.oneOf(chunk))).fetch()
+        }
+        // Destroy cached deletes directly (evict + notify the record), so we never emit a partial
+        // collection changeset. Query observers learn of the deletion via the full-refetch wake below.
+        for (const id of deleted) {
+          const record = collection._cache.get(id)
+          if (record) {
+            collection._cache.delete(record)
+            record._notifyDestroyed()
+          }
+        }
+      } catch (error) {
+        logError(
+          `[WatermelonDB] applyNativePullChanges: in-place refresh failed for table ${table}: ${String(
+            error,
+          )}. Query observers are still woken below and reconcile from SQLite.`,
+        )
+      }
     }
     if (hasCachedUpserts && !this._nativeCDCEnabled) {
       logError(
@@ -157,7 +168,8 @@ export default class Database {
       )
     }
     // Full-refetch wake for every changed table (empty changeset → simple + reloading observers
-    // re-query SQLite). Never a partial changeset, so no observer can miss an uncached new row.
+    // re-query SQLite). Runs even if an in-place refresh above threw, so a successful sync never
+    // leaves lists/counts stale. Never a partial changeset, so no observer can miss an uncached row.
     if (changedTables.length > 0) {
       this.notify(changedTables)
     }

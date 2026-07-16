@@ -1096,6 +1096,34 @@ describe('database.applyNativePullChanges()', () => {
     unsub()
   })
 
+  it('still wakes query observers when the in-place refresh throws (MOBILE-6276)', async () => {
+    // Robustness: a failed in-place re-read (adapter/DB error) must not abort the reconciliation —
+    // the query-observer wake (which re-reads SQLite) is the load-bearing refresh and must still fire,
+    // so a successful sync never silently leaves lists stale.
+    const { database, tasks } = mockDatabase({ actionsEnabled: true })
+    database._nativeCDCEnabled = true
+    const cached = await database.action(() =>
+      tasks.create((t) => {
+        t.name = 'C'
+        t._raw._status = 'synced'
+      }),
+    )
+    jest
+      .spyOn(database.adapter.underlyingAdapter, 'query')
+      .mockImplementation((_query, cb) => cb({ error: new Error('boom') }))
+    const wake = jest.fn()
+    const unsub = tasks.experimentalSubscribe(wake)
+
+    await expect(
+      database.applyNativePullChanges({ mock_tasks: { upserted: [cached.id] } }),
+    ).resolves.toBeUndefined()
+
+    // The in-place re-read threw and was swallowed, but query observers were still woken.
+    expect(wake).toHaveBeenCalledWith([])
+
+    unsub()
+  })
+
   it('resolves without notifying on an empty changeset', async () => {
     const { database } = mockDatabase({ actionsEnabled: true })
     const notifySpy = jest.spyOn(database, 'notify')
