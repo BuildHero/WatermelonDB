@@ -359,6 +359,13 @@ static bool applyRowObject(sqlite3* db, const std::string& table, const JsonValu
         std::vector<std::string> keys;
         keys.reserve(rowValue.objectValue.size());
         for (const auto& kv : rowValue.objectValue) {
+            // MOBILE-6276: never take _status/_changed from the server payload — they are
+            // sync metadata that this engine sets itself below. Skipping them (rather than
+            // binding them) both ignores a stray server value and avoids a duplicate column
+            // in the INSERT when the literals are appended.
+            if (kv.first == "_status" || kv.first == "_changed") {
+                continue;
+            }
             if (allowedColumns->find(kv.first) != allowedColumns->end()) {
                 keys.push_back(kv.first);
             } else {
@@ -404,7 +411,22 @@ static bool applyRowObject(sqlite3* db, const std::string& table, const JsonValu
         columns += quoteIdentifier(keys[i]);
         placeholders += "?";
     }
-    
+
+    // MOBILE-6276: a full overwrite must mark the row synced, mirroring the legacy JS
+    // prepareCreateFromRaw path (_status='synced', _changed=''). Without this the row keeps
+    // whatever these columns defaulted to (NULL on a fresh INSERT OR REPLACE), which makes it
+    // invisible to the app's `_status != 'deleted'` filters. Guarded on column existence so
+    // non-synced tables (e.g. local_storage/settings) are unaffected. keys is non-empty here
+    // (id is required above), so columns/placeholders already have a leading term.
+    if (allowedColumns->find("_status") != allowedColumns->end()) {
+        columns += "," + quoteIdentifier("_status");
+        placeholders += ",'synced'";
+    }
+    if (allowedColumns->find("_changed") != allowedColumns->end()) {
+        columns += "," + quoteIdentifier("_changed");
+        placeholders += ",''";
+    }
+
     std::string sql = "INSERT OR REPLACE INTO " + quoteIdentifier(table) +
     " (" + columns + ") VALUES (" + placeholders + ")";
     

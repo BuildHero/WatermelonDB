@@ -133,6 +133,27 @@ export class SyncManager {
     return SyncManager.refreshPullChangesUrlFromSequenceId()
       .catch(() => { })
       .then(() => nativeSyncDatabaseAsync(reason))
+      .then(() => {
+        SyncManager.notifyCollectionsAfterNativePull()
+      })
+  }
+
+  // MOBILE-6276: the native pull applies rows straight to SQLite, bypassing Database.batch,
+  // so JS query observers never re-run and cached models keep serving pre-sync values (stale
+  // UI until app restart). Deterministically notify every collection once the pull resolves;
+  // under native CDC the adapter returns full raws, so RecordCache._modelForRaw refreshes each
+  // cached record in place and drives Model.observe() subscribers. Runs only on success (a
+  // rejected native pull short-circuits this .then), and is a no-op when configured with a
+  // bare connectionTag/adapter (no Database instance to notify).
+  private static notifyCollectionsAfterNativePull(): void {
+    const database = SyncManager.database
+    if (!database || !database.schema || typeof database.notify !== 'function') {
+      return
+    }
+    const tables = Object.keys(database.schema.tables)
+    if (tables.length > 0) {
+      database.notify(tables)
+    }
   }
 
   static getState(): SyncState {

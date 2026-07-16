@@ -315,6 +315,47 @@ describe('SyncManager', () => {
     await expect(SyncManager.syncDatabaseAsync('manual')).rejects.toThrow('boom')
   })
 
+  it('notifies all collections after a native pull resolves (MOBILE-6276)', async () => {
+    const { SyncManager } = makeModule()
+    const notify = jest.fn()
+    const database = {
+      schema: { tables: { purchase_orders: {}, purchase_order_receipts: {}, visits: {} } },
+      notify,
+    }
+    SyncManager.configure({
+      database,
+      adapter: { _tag: 1 },
+      pushChangesProvider: jest.fn(),
+      pullChangesUrl: 'https://example.com/pull',
+    })
+
+    await SyncManager.syncDatabaseAsync('manual')
+    await flushMicrotasks()
+
+    // The native pull writes straight to SQLite, bypassing Database.batch — without an
+    // explicit notify, JS observers never re-run and cached models stay stale (MOBILE-6276).
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify).toHaveBeenCalledWith(['purchase_orders', 'purchase_order_receipts', 'visits'])
+  })
+
+  it('does not notify collections when the native pull rejects (MOBILE-6276)', async () => {
+    const { SyncManager, nativeSync } = makeModule()
+    const notify = jest.fn()
+    const database = { schema: { tables: { visits: {} } }, notify }
+    SyncManager.configure({
+      database,
+      adapter: { _tag: 1 },
+      pushChangesProvider: jest.fn(),
+      pullChangesUrl: 'https://example.com/pull',
+    })
+
+    nativeSync.syncDatabaseAsync.mockRejectedValue(new Error('boom'))
+    await expect(SyncManager.syncDatabaseAsync('manual')).rejects.toThrow('boom')
+    await flushMicrotasks()
+
+    expect(notify).not.toHaveBeenCalled()
+  })
+
   it('cancelSync calls native cancelSync', () => {
     const { SyncManager, nativeSync } = makeModule()
     SyncManager.configure({
