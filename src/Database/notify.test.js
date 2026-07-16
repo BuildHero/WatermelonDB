@@ -1020,7 +1020,7 @@ describe('database.applyNativePullChanges()', () => {
     sub.unsubscribe()
   })
 
-  it('destroys a deleted cached record — evicts it and emits a destroyed change (MOBILE-6276)', async () => {
+  it('destroys a deleted cached record — evicts it, notifies it destroyed, wakes query observers (MOBILE-6276)', async () => {
     const { database, tasks } = mockDatabase({ actionsEnabled: true })
 
     const task = await database.action(() =>
@@ -1031,18 +1031,48 @@ describe('database.applyNativePullChanges()', () => {
     )
     expect(tasks._cache.map.has(task.id)).toBe(true)
 
-    const changeEmissions = []
-    const sub = tasks.changes.subscribe((cs) => changeEmissions.push(cs))
+    const destroyedSpy = jest.spyOn(task, '_notifyDestroyed')
+    const wake = jest.fn()
+    const unsub = tasks.experimentalSubscribe(wake)
 
     await database.applyNativePullChanges({ mock_tasks: { deleted: [task.id] } })
 
-    // Evicted from cache + a destroyed op emitted on the collection — reaches every observer shape.
+    // Evicted from cache + the record instance notified of destruction (reaches findAndObserve)...
     expect(tasks._cache.map.has(task.id)).toBe(false)
-    expect(
-      changeEmissions.some((cs) => cs.some((op) => op.type === 'destroyed' && op.record.id === task.id)),
-    ).toBe(true)
+    expect(destroyedSpy).toHaveBeenCalled()
+    // ...and the table's query observers are woken (empty-changeset full refetch) so lists drop it.
+    expect(wake).toHaveBeenCalledWith([])
 
-    sub.unsubscribe()
+    unsub()
+  })
+
+  it('does not hand query observers a partial changeset for a mixed cached+uncached upsert (MOBILE-6276)', async () => {
+    // Regression for the -27 bug: subscribeToSimpleQuery applies a NON-empty changeset incrementally
+    // and would miss an uncached newly-inserted row on a table that also had a cached change. The fix
+    // wakes query observers only with the empty (full-refetch) signal — never a partial changeset.
+    const { database, tasks } = mockDatabase({ actionsEnabled: true })
+    database._nativeCDCEnabled = true
+    const cached = await database.action(() =>
+      tasks.create((t) => {
+        t.name = 'Cached'
+        t._raw._status = 'synced'
+      }),
+    )
+    jest
+      .spyOn(database.adapter.underlyingAdapter, 'query')
+      .mockImplementation((_query, cb) => cb({ value: [{ ...cached._raw }] }))
+
+    const changesets = []
+    const sub = tasks.experimentalSubscribe((cs) => changesets.push(cs))
+
+    await database.applyNativePullChanges({ mock_tasks: { upserted: [cached.id, 'uncached-new'] } })
+
+    // The collection observer was woken only with empty changesets (full refetch), so a simple query
+    // observer re-queries SQLite and picks up the uncached new row — never an incomplete incremental set.
+    expect(changesets.length).toBeGreaterThan(0)
+    expect(changesets.every((cs) => cs.length === 0)).toBe(true)
+
+    sub()
   })
 
   it('does not materialize an uncached upserted record; wakes query observers instead (MOBILE-6276)', async () => {
