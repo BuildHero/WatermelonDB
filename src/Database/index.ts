@@ -13,6 +13,7 @@ import type Collection from '../Collection'
 import type { CollectionChangeSet } from '../Collection'
 import { CollectionChangeTypes } from '../Collection/common'
 import type { TableName, AppSchema } from '../Schema'
+import * as Q from '../QueryDescription'
 
 import CollectionMap from './CollectionMap'
 import ActionQueue, { ActionInterface } from './ActionQueue'
@@ -89,6 +90,38 @@ export default class Database {
     })
 
     this.notify(tables)
+  }
+
+  // MOBILE-6276: after a native (Nitro) pull, `notify(tables)` re-runs query observers, and
+  // under native CDC their refetch refreshes the involved cached records in place. But a record
+  // observed ONLY via findAndObserve / model.observe() — with no live collection query on its
+  // table — subscribes at the record level, which the empty-changeset notify path never pokes,
+  // so its cached _raw stays stale. Re-read each collection's currently-cached SYNCED records:
+  // recordsFromQueryResult → RecordCache._modelForRaw updates the cached instance's _raw in place
+  // and fires _notifyChanged() when the server raw differs, refreshing those observers too.
+  // Only synced records are touched — a record with unsynced local changes (created/updated/
+  // deleted) is skipped so we never overwrite a pending local edit. Records deleted server-side
+  // (absent from the re-read) are intentionally left to the normal delete path.
+  refreshCachedRecords = async (tableNames?: TableName<any>[]): Promise<void> => {
+    const tables = tableNames ?? (Object.keys(this.collections.map) as TableName<any>[])
+    const CHUNK = 900 // stay under SQLite's ~999 bound-variable limit
+    for (const table of tables) {
+      const collection = this.collections.get(table)
+      if (!collection) {
+        continue
+      }
+      const ids: string[] = []
+      collection._cache.map.forEach((record: Model) => {
+        if (record.syncStatus === 'synced') {
+          ids.push(record.id)
+        }
+      })
+      for (let i = 0; i < ids.length; i += CHUNK) {
+        const chunk = ids.slice(i, i + CHUNK)
+        // eslint-disable-next-line no-await-in-loop
+        await collection.query(Q.where('id', Q.oneOf(chunk))).fetch()
+      }
+    }
   }
 
   _cdcSubscription: { remove: () => void } | null = null

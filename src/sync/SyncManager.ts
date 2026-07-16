@@ -133,27 +133,34 @@ export class SyncManager {
     return SyncManager.refreshPullChangesUrlFromSequenceId()
       .catch(() => { })
       .then(() => nativeSyncDatabaseAsync(reason))
-      .then(() => {
-        SyncManager.notifyCollectionsAfterNativePull()
-      })
+      .then(() => SyncManager.refreshJsAfterNativePull())
   }
 
-  // MOBILE-6276: the native pull applies rows straight to SQLite, bypassing Database.batch,
-  // so JS query observers never re-run and cached models keep serving pre-sync values (stale
-  // UI until app restart). Deterministically notify every collection once the pull resolves;
-  // under native CDC the adapter returns full raws, so RecordCache._modelForRaw refreshes each
-  // cached record in place and drives Model.observe() subscribers. Runs only on success (a
-  // rejected native pull short-circuits this .then), and is a no-op when configured with a
-  // bare connectionTag/adapter (no Database instance to notify).
-  private static notifyCollectionsAfterNativePull(): void {
+  // MOBILE-6276: the native pull applies rows straight to SQLite, bypassing Database.batch, so
+  // nothing refreshes the JS layer and cached models keep serving pre-sync values (stale UI
+  // until app restart). Once the pull resolves, deterministically refresh the JS layer:
+  //   1. notify(allTables) — re-runs query observers (the app-wide useFetch +
+  //      useSubscribeToTableUpdates pattern); under native CDC their refetch returns full raws,
+  //      so RecordCache._modelForRaw refreshes the involved cached records in place.
+  //   2. refreshCachedRecords(allTables) — re-reads the cached SYNCED records so records observed
+  //      only via findAndObserve/model.observe() (no live query on their table) refresh too.
+  // Runs only on success (a rejected pull short-circuits this .then). A no-op when configured
+  // with a bare connectionTag/adapter (no Database instance). A refresh failure is swallowed —
+  // the pull already succeeded and the notify already fired.
+  private static refreshJsAfterNativePull(): Promise<void> {
     const database = SyncManager.database
     if (!database || !database.schema || typeof database.notify !== 'function') {
-      return
+      return Promise.resolve()
     }
     const tables = Object.keys(database.schema.tables)
-    if (tables.length > 0) {
-      database.notify(tables)
+    if (tables.length === 0) {
+      return Promise.resolve()
     }
+    database.notify(tables)
+    if (typeof database.refreshCachedRecords === 'function') {
+      return database.refreshCachedRecords(tables).catch(() => { })
+    }
+    return Promise.resolve()
   }
 
   static getState(): SyncState {
