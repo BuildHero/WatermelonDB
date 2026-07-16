@@ -2,8 +2,23 @@
 
 /* eslint-disable getter-return */
 
-// Used as a placeholder during reset database to catch illegal
-// adapter calls
+// Placeholder adapter installed on `database.adapter` for the duration of
+// `unsafeResetDatabase()` (see Database/index.ts) to catch code that touches
+// the adapter while the native database is being wiped.
+//
+// Imperative METHODS (find/query/batch/getLocal/…) throw: issuing a real
+// database operation mid-reset is genuinely illegal and should fail loudly.
+//
+// Property GETTERS (underlyingAdapter/schema/migrations) return `undefined`
+// instead of throwing. Callers inspect these defensively via optional chaining
+// / `&&` — both in the app and inside WatermelonDB's own query path (e.g.
+// Collection._onCacheMiss reads `database.adapter?.underlyingAdapter?._tag`,
+// Database CDC toggles read `this.adapter.underlyingAdapter`). Optional
+// chaining does NOT short-circuit a getter that throws, so a throwing getter
+// turned a benign property read during an in-flight reset into a fatal,
+// uncaught crash (MOBILE-6149: Android fatal right after login). Returning
+// `undefined` keeps those nullish-safe reads working — they simply observe
+// "no adapter available while resetting" and no-op.
 
 const throwError = (name: string) => {
   throw new Error(`Cannot call database.adapter.${name} while the database is being reset`)
@@ -29,15 +44,15 @@ export default class ErrorAdapter {
     })
   }
 
-  get underlyingAdapter(): void {
-    throwError('underlyingAdapter')
+  get underlyingAdapter(): undefined {
+    return undefined
   }
 
-  get schema(): void {
-    throwError('schema')
+  get schema(): undefined {
+    return undefined
   }
 
-  get migrations(): void {
-    throwError('migrations')
+  get migrations(): undefined {
+    return undefined
   }
 }

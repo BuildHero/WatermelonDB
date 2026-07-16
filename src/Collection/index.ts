@@ -57,8 +57,20 @@ export default class Collection<Record extends Model> {
   }
 
   _onCacheMiss(id: RecordId): Record {
-    const hasHybridJSI = this.database.adapter?.underlyingAdapter?._hybridJSIEnabled
-    const tag = this.database.adapter?.underlyingAdapter?._tag
+    const underlyingAdapter = this.database.adapter?.underlyingAdapter
+
+    // MOBILE-6149: during an in-flight unsafeResetDatabase() `database.adapter`
+    // is a placeholder whose `underlyingAdapter` is unavailable. A cache miss
+    // cannot be resolved against a database that is being wiped, and this runs
+    // synchronously inside RecordCache (outside any Promise/try-catch boundary),
+    // so bail soft instead of issuing a native query with a null tag — a throw
+    // here is a fatal, uncaught crash.
+    if (this.database._isBeingReset || !underlyingAdapter) {
+      return undefined as any
+    }
+
+    const hasHybridJSI = underlyingAdapter._hybridJSIEnabled
+    const tag = underlyingAdapter._tag
 
     if (!hasHybridJSI) {
       invariant(id, `Record ID ${this.table}#${id} was sent over the bridge, but it's not cached`)
@@ -170,9 +182,15 @@ export default class Collection<Record extends Model> {
       typeof adapter.unsafeSqlQuery === 'function',
       'unsafeFetchRecordsWithSQL called on database that does not support SQL',
     )
+    const startResetCount = this.database._resetCount
+    // MOBILE-6149: no adapter traffic if a reset is already in flight.
+    this._assertNotResetting()
     // @ts-ignore
     const rawRecords = await adapter.unsafeSqlQuery(this.modelClass.table, sql)
 
+    // MOBILE-6149: a reset may have raced the await above — abort rather than
+    // repopulate the cache with pre-reset records.
+    this._assertNotResetting(startResetCount)
     return this._cache.recordsFromQueryResult(rawRecords)
   }
 
@@ -187,30 +205,76 @@ export default class Collection<Record extends Model> {
     return this.database.schema.tables[this.table]
   }
 
+  // MOBILE-6149: throw if a database reset is racing this read. Called inside
+  // query-result mappers (which run in mapValue's try/catch) and after awaited
+  // reads, so the throw becomes a rejected Result rather than a partial/null
+  // array, a stale count, or a cache repopulated with pre-reset records.
+  //
+  // Keyed off the same signals the sync engine trusts (see
+  // sync/impl/helpers.ts isSameDatabase), covering all three race windows:
+  //  - `_isBeingReset`      → a reset is in flight (incl. the pre-adapter-swap gap)
+  //  - `!underlyingAdapter` → the ErrorAdapter placeholder is installed; also the
+  //                           failed-wipe case where `_isBeingReset` was cleared
+  //                           in `finally` but the real adapter was never restored
+  //  - `_resetCount` moved  → a read that began before a reset is COMPLETING after
+  //                           an entire reset cycle finished (stale pre-reset data)
+  _isResetting(startResetCount?: number): boolean {
+    const db = this.database
+    return (
+      db._isBeingReset ||
+      !db.adapter?.underlyingAdapter ||
+      (startResetCount !== undefined && db._resetCount !== startResetCount)
+    )
+  }
+
+  _assertNotResetting(startResetCount?: number): void {
+    if (this._isResetting(startResetCount)) {
+      throw new Error(`Database is resetting; query on ${this.table} aborted`)
+    }
+  }
+
   // See: Query.fetch
   _fetchQuery(query: Query<Record>, callback: ResultCallback<Record[]>): void {
+    const underlyingAdapter = this.database.adapter?.underlyingAdapter
+
+    // MOBILE-6149: no reads during a reset — report a caught error rather than a
+    // false-empty success (indistinguishable from "no records exist") or real
+    // adapter traffic. `_isBeingReset` covers the pre-adapter-swap window where
+    // the real adapter is still installed; `!underlyingAdapter` covers the
+    // ErrorAdapter window + the failed-wipe case. The Result flows through
+    // toPromise as a rejection, which query consumers already handle.
+    if (this.database._isBeingReset || !underlyingAdapter) {
+      return callback({
+        error: new Error(`Database is resetting; cannot run query on ${this.table}`),
+      })
+    }
+
+    const startResetCount = this.database._resetCount
     const serializedQuery = query.serialize()
 
     const { description, associations } = serializedQuery
 
     if (description?.eagerJoinTables?.length) {
-      return this.database.adapter.underlyingAdapter.execSqlQuery(
+      return underlyingAdapter.execSqlQuery(
         encodeQuery(serializedQuery, false, this.database.schema),
         [],
         (result) =>
           callback(
-            mapValue(
-              (rawRecords) => mapToGraph(rawRecords, associations, this) as Record[],
-              result,
-            ),
+            mapValue((rawRecords) => {
+              this._assertNotResetting(startResetCount)
+              return mapToGraph(rawRecords, associations, this) as Record[]
+            }, result),
           ),
       )
     }
 
-    return this.database.adapter.underlyingAdapter.query(query.serialize(), (result) =>
+    return underlyingAdapter.query(query.serialize(), (result) =>
       callback(
         mapValue(
-          (rawRecords) => this._cache.recordsFromQueryResult(rawRecords) as Record[],
+          (rawRecords) => {
+            this._assertNotResetting(startResetCount)
+            return this._cache.recordsFromQueryResult(rawRecords) as Record[]
+          },
           result,
         ),
       ),
@@ -219,13 +283,47 @@ export default class Collection<Record extends Model> {
 
   // See: Query.fetchCount
   _fetchCount(query: Query<Record>, callback: ResultCallback<number>): void {
-    this.database.adapter.underlyingAdapter.count(query.serialize(), callback)
+    const underlyingAdapter = this.database.adapter?.underlyingAdapter
+
+    // MOBILE-6149: report a caught error while the database is being reset,
+    // not a false 0 count or real adapter traffic (see _fetchQuery).
+    if (this.database._isBeingReset || !underlyingAdapter) {
+      return callback({
+        error: new Error(`Database is resetting; cannot count ${this.table}`),
+      })
+    }
+
+    // MOBILE-6149: a count issued before a reset can complete during/after it —
+    // abort rather than deliver a stale count.
+    const startResetCount = this.database._resetCount
+    underlyingAdapter.count(query.serialize(), (result) =>
+      callback(
+        mapValue((n) => {
+          this._assertNotResetting(startResetCount)
+          return n
+        }, result),
+      ),
+    )
   }
 
   // Fetches exactly one record (See: Collection.find)
   _fetchRecord(id: RecordId, callback: ResultCallback<Record>): void {
     if (typeof id !== 'string') {
       callback({ error: new Error(`Invalid record ID ${this.table}#${id}`) })
+      return
+    }
+
+    const underlyingAdapter = this.database.adapter?.underlyingAdapter
+
+    // MOBILE-6149: no reads during a reset — checked BEFORE the cache hit, since
+    // the cache still holds pre-reset records until _unsafeClearCaches runs, and
+    // before the async find below (whose `.then` continuation would otherwise
+    // throw as an unhandled rejection). `_isBeingReset` covers the
+    // pre-adapter-swap window; `!underlyingAdapter` the ErrorAdapter/failed-wipe.
+    if (this.database._isBeingReset || !underlyingAdapter) {
+      callback({
+        error: new Error(`Database is resetting; cannot fetch ${this.table}#${id}`),
+      })
       return
     }
 
@@ -236,6 +334,8 @@ export default class Collection<Record extends Model> {
       return
     }
 
+    const startResetCount = this.database._resetCount
+
     const mapQueryResult = (
       id: RecordId,
       result:
@@ -245,17 +345,39 @@ export default class Collection<Record extends Model> {
         },
     ) => {
       return mapValue((rawRecord) => {
+        // MOBILE-6149: a find issued before a reset can complete during or after
+        // it. Abort rather than build+cache a Model from pre-reset data (which
+        // would repopulate the JS cache the reset is wiping). Runs in mapValue's
+        // try/catch → becomes a rejected Result.
+        this._assertNotResetting(startResetCount)
         invariant(rawRecord, `Record ${this.table}#${id} not found`)
         return this._cache.recordFromQueryResult(rawRecord as any)
       }, result)
     }
 
-    this.database.adapter.underlyingAdapter.find(this.table, id, (result) => {
+    underlyingAdapter.find(this.table, id, (result) => {
       if (!result || !(result as any).value) {
         logger.log(`Record ${this.table}#${id} not found`)
         // @ts-ignore
         this.modelClass.fetchFromRemote(this.modelClass.table, id).then((_: void) => {
-          this.database.adapter.underlyingAdapter.find(this.table, id, (result) => {
+          // MOBILE-6149: fetchFromRemote is a real async gap — a reset may have
+          // begun (incl. the pre-adapter-swap window where the adapter is still
+          // the REAL one) or completed entirely (epoch moved) while it was in
+          // flight. Check the full canonical signal, not just the adapter
+          // reference: issuing this second find would be adapter traffic during
+          // the reset window. Fail soft instead.
+          const adapterAfterFetch = this.database.adapter?.underlyingAdapter
+          if (
+            this.database._isBeingReset ||
+            !adapterAfterFetch ||
+            this.database._resetCount !== startResetCount
+          ) {
+            callback({
+              error: new Error(`Database is resetting; cannot fetch ${this.table}#${id}`),
+            })
+            return
+          }
+          adapterAfterFetch.find(this.table, id, (result) => {
             callback(mapQueryResult(id, result) as Result<Record>)
           })
         })
