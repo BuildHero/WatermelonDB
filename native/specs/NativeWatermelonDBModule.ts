@@ -10,7 +10,8 @@ export interface Spec extends TurboModule {
   ): Promise<void>
   configureSync(configJson: string): void
   startSync(reason: string): void
-  syncDatabaseAsync(reason: string): Promise<void>
+  // Resolves the JSON changeset the pull applied ({ "<table>": { "upserted": [...], "deleted": [...] } }).
+  syncDatabaseAsync(reason: string): Promise<string>
   setSyncPullUrl(pullEndpointUrl: string): void
   getSyncStateJson(): string
   addSyncListener(listener: (eventJson: string) => void): number

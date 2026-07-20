@@ -359,6 +359,13 @@ static bool applyRowObject(sqlite3* db, const std::string& table, const JsonValu
         std::vector<std::string> keys;
         keys.reserve(rowValue.objectValue.size());
         for (const auto& kv : rowValue.objectValue) {
+            // MOBILE-6276: never take _status/_changed from the server payload — they are
+            // sync metadata that this engine sets itself below. Skipping them (rather than
+            // binding them) both ignores a stray server value and avoids a duplicate column
+            // in the INSERT when the literals are appended.
+            if (kv.first == "_status" || kv.first == "_changed") {
+                continue;
+            }
             if (allowedColumns->find(kv.first) != allowedColumns->end()) {
                 keys.push_back(kv.first);
             } else {
@@ -404,7 +411,22 @@ static bool applyRowObject(sqlite3* db, const std::string& table, const JsonValu
         columns += quoteIdentifier(keys[i]);
         placeholders += "?";
     }
-    
+
+    // MOBILE-6276: a full overwrite must mark the row synced, mirroring the legacy JS
+    // prepareCreateFromRaw path (_status='synced', _changed=''). Without this the row keeps
+    // whatever these columns defaulted to (NULL on a fresh INSERT OR REPLACE), which makes it
+    // invisible to the app's `_status != 'deleted'` filters. Guarded on column existence so
+    // non-synced tables (e.g. local_storage/settings) are unaffected. keys is non-empty here
+    // (id is required above), so columns/placeholders already have a leading term.
+    if (allowedColumns->find("_status") != allowedColumns->end()) {
+        columns += "," + quoteIdentifier("_status");
+        placeholders += ",'synced'";
+    }
+    if (allowedColumns->find("_changed") != allowedColumns->end()) {
+        columns += "," + quoteIdentifier("_changed");
+        placeholders += ",''";
+    }
+
     std::string sql = "INSERT OR REPLACE INTO " + quoteIdentifier(table) +
     " (" + columns + ") VALUES (" + placeholders + ")";
     
@@ -785,6 +807,12 @@ static std::string formatTableCounts(const std::unordered_map<std::string, size_
 } // namespace
 
 bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& errorMessage) {
+    SyncChangeset ignored;
+    return applySyncPayload(db, payload, errorMessage, ignored);
+}
+
+bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& errorMessage,
+                      SyncChangeset& changeset) {
     if (!db) {
         errorMessage = "SQLite db is null";
         return false;
@@ -829,6 +857,12 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
     size_t totalMerged = 0;
     std::unordered_map<std::string, size_t> skippedDirtyByTable;
     std::unordered_map<std::string, size_t> mergedByTable;
+
+    // MOBILE-6276: ids actually written (upsert or partial-merge) / hard-deleted this page, so the
+    // caller can tell the JS layer exactly what changed instead of guessing. Folded into `changeset`
+    // only after COMMIT succeeds.
+    std::unordered_map<std::string, std::vector<std::string>> upsertedIdsByTable;
+    std::unordered_map<std::string, std::vector<std::string>> deletedIdsByTable;
 
     for (const auto& entry : items->arrayValue) {
         if (entry.type != JsonValue::Type::Object) {
@@ -883,6 +917,12 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
                 execSql(db, "ROLLBACK", errorMessage);
                 return false;
             }
+            // Capture the id string before deleteId is moved into the delete array below.
+            const std::string deleteIdStr = (deleteId.type == JsonValue::Type::String)
+                                                ? deleteId.stringValue
+                                                : (deleteId.type == JsonValue::Type::Number)
+                                                      ? deleteId.numberValue
+                                                      : std::string();
             JsonValue& deleteArray = deletesByTable[table];
             if (deleteArray.type != JsonValue::Type::Array) {
                 deleteArray.type = JsonValue::Type::Array;
@@ -891,6 +931,9 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
             deleteArray.arrayValue.emplace_back(std::move(deleteId));
             totalDeletes++;
             deletesCountByTable[table]++;
+            if (!deleteIdStr.empty()) {
+                deletedIdsByTable[table].push_back(deleteIdStr);
+            }
         } else {
             if (!rowPtr || rowPtr->type != JsonValue::Type::Object) {
                 errorMessage = "Invalid row payload";
@@ -938,6 +981,9 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
                 }
                 totalMerged++;
                 mergedByTable[table]++;
+                if (!recordId.empty()) {
+                    upsertedIdsByTable[table].push_back(recordId);
+                }
             } else {
                 // Record is synced or new — full overwrite
                 if (!applyRowObject(db, table, *rowPtr, errorMessage)) {
@@ -946,6 +992,9 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
                 }
                 totalUpserts++;
                 upsertsByTable[table]++;
+                if (!recordId.empty()) {
+                    upsertedIdsByTable[table].push_back(recordId);
+                }
             }
         }
     }
@@ -968,7 +1017,18 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
     if (!execSql(db, "COMMIT", errorMessage)) {
         return false;
     }
-    
+
+    // MOBILE-6276: only after the page's transaction commits, append its committed ids into the
+    // caller's accumulator (so a rolled-back page never leaks into the reported changeset).
+    for (auto& kv : upsertedIdsByTable) {
+        auto& dst = changeset[kv.first].upserted;
+        dst.insert(dst.end(), kv.second.begin(), kv.second.end());
+    }
+    for (auto& kv : deletedIdsByTable) {
+        auto& dst = changeset[kv.first].deleted;
+        dst.insert(dst.end(), kv.second.begin(), kv.second.end());
+    }
+
     const std::string upsertsSummary = formatTableCounts(upsertsByTable);
     const std::string deletesSummary = formatTableCounts(deletesCountByTable);
     std::string message = "SyncApplyEngine batch applied: items=" + std::to_string(totalItems) +

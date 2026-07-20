@@ -986,3 +986,148 @@ describe('database.notify()', () => {
     })
   })
 })
+
+describe('database.applyNativePullChanges()', () => {
+  it('refreshes an upserted cached record in place and notifies its observer (MOBILE-6276)', async () => {
+    const { database, tasks } = mockDatabase({ actionsEnabled: true })
+    database._nativeCDCEnabled = true // the re-read returns full raws under CDC (see stub below)
+
+    const task = await database.action(() =>
+      tasks.create((t) => {
+        t.name = 'Original'
+        t._raw._status = 'synced'
+      }),
+    )
+
+    // Observe it the findAndObserve way: a single record, no live collection query on its table.
+    const emissions = []
+    const sub = task.observe().subscribe((t) => emissions.push(t.name))
+    expect(emissions).toEqual(['Original'])
+
+    // The native pull wrote a new value; because native CDC is on, the re-read returns a FULL RAW
+    // (not an id), which lets RecordCache._modelForRaw refresh the cached instance in place. (The
+    // LokiJS test adapter can't toggle CDC, so we stub the raw return the SQLite adapter produces.)
+    const serverRaw = { ...task._raw, name: 'ServerUpdated' }
+    jest
+      .spyOn(database.adapter.underlyingAdapter, 'query')
+      .mockImplementation((_query, cb) => cb({ value: [serverRaw] }))
+
+    await database.applyNativePullChanges({ mock_tasks: { upserted: [task.id] } })
+
+    expect(task.name).toBe('ServerUpdated')
+    expect(emissions[emissions.length - 1]).toBe('ServerUpdated')
+
+    sub.unsubscribe()
+  })
+
+  it('destroys a deleted cached record — evicts it, notifies it destroyed, wakes query observers (MOBILE-6276)', async () => {
+    const { database, tasks } = mockDatabase({ actionsEnabled: true })
+
+    const task = await database.action(() =>
+      tasks.create((t) => {
+        t.name = 'Doomed'
+        t._raw._status = 'synced'
+      }),
+    )
+    expect(tasks._cache.map.has(task.id)).toBe(true)
+
+    const destroyedSpy = jest.spyOn(task, '_notifyDestroyed')
+    const wake = jest.fn()
+    const unsub = tasks.experimentalSubscribe(wake)
+
+    await database.applyNativePullChanges({ mock_tasks: { deleted: [task.id] } })
+
+    // Evicted from cache + the record instance notified of destruction (reaches findAndObserve)...
+    expect(tasks._cache.map.has(task.id)).toBe(false)
+    expect(destroyedSpy).toHaveBeenCalled()
+    // ...and the table's query observers are woken (empty-changeset full refetch) so lists drop it.
+    expect(wake).toHaveBeenCalledWith([])
+
+    unsub()
+  })
+
+  it('does not hand query observers a partial changeset for a mixed cached+uncached upsert (MOBILE-6276)', async () => {
+    // Regression for the -27 bug: subscribeToSimpleQuery applies a NON-empty changeset incrementally
+    // and would miss an uncached newly-inserted row on a table that also had a cached change. The fix
+    // wakes query observers only with the empty (full-refetch) signal — never a partial changeset.
+    const { database, tasks } = mockDatabase({ actionsEnabled: true })
+    database._nativeCDCEnabled = true
+    const cached = await database.action(() =>
+      tasks.create((t) => {
+        t.name = 'Cached'
+        t._raw._status = 'synced'
+      }),
+    )
+    jest
+      .spyOn(database.adapter.underlyingAdapter, 'query')
+      .mockImplementation((_query, cb) => cb({ value: [{ ...cached._raw }] }))
+
+    const changesets = []
+    const sub = tasks.experimentalSubscribe((cs) => changesets.push(cs))
+
+    await database.applyNativePullChanges({ mock_tasks: { upserted: [cached.id, 'uncached-new'] } })
+
+    // The collection observer was woken only with empty changesets (full refetch), so a simple query
+    // observer re-queries SQLite and picks up the uncached new row — never an incomplete incremental set.
+    expect(changesets.length).toBeGreaterThan(0)
+    expect(changesets.every((cs) => cs.length === 0)).toBe(true)
+
+    sub()
+  })
+
+  it('does not materialize an uncached upserted record; wakes query observers instead (MOBILE-6276)', async () => {
+    // Memory safety: a large pull must not mass-load every upserted row into the JS cache. An
+    // upserted id that isn't already cached is left for a live query observer to materialize lazily.
+    const { database, tasks } = mockDatabase({ actionsEnabled: true })
+    expect(tasks._cache.map.size).toBe(0)
+
+    const querySpy = jest.spyOn(database.adapter.underlyingAdapter, 'query')
+    const wake = jest.fn()
+    const unsub = tasks.experimentalSubscribe(wake)
+
+    await database.applyNativePullChanges({ mock_tasks: { upserted: ['brand-new-id'] } })
+
+    // The uncached record was NOT force-read/materialized...
+    expect(querySpy).not.toHaveBeenCalled()
+    expect(tasks._cache.map.has('brand-new-id')).toBe(false)
+    // ...but the table's query observers were woken so a live query re-runs and picks it up.
+    expect(wake).toHaveBeenCalled()
+
+    unsub()
+  })
+
+  it('still wakes query observers when the in-place refresh throws (MOBILE-6276)', async () => {
+    // Robustness: a failed in-place re-read (adapter/DB error) must not abort the reconciliation —
+    // the query-observer wake (which re-reads SQLite) is the load-bearing refresh and must still fire,
+    // so a successful sync never silently leaves lists stale.
+    const { database, tasks } = mockDatabase({ actionsEnabled: true })
+    database._nativeCDCEnabled = true
+    const cached = await database.action(() =>
+      tasks.create((t) => {
+        t.name = 'C'
+        t._raw._status = 'synced'
+      }),
+    )
+    jest
+      .spyOn(database.adapter.underlyingAdapter, 'query')
+      .mockImplementation((_query, cb) => cb({ error: new Error('boom') }))
+    const wake = jest.fn()
+    const unsub = tasks.experimentalSubscribe(wake)
+
+    await expect(
+      database.applyNativePullChanges({ mock_tasks: { upserted: [cached.id] } }),
+    ).resolves.toBeUndefined()
+
+    // The in-place re-read threw and was swallowed, but query observers were still woken.
+    expect(wake).toHaveBeenCalledWith([])
+
+    unsub()
+  })
+
+  it('resolves without notifying on an empty changeset', async () => {
+    const { database } = mockDatabase({ actionsEnabled: true })
+    const notifySpy = jest.spyOn(database, 'notify')
+    await expect(database.applyNativePullChanges({})).resolves.toBeUndefined()
+    expect(notifySpy).not.toHaveBeenCalled()
+  })
+})

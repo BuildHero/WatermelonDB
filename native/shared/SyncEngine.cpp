@@ -390,6 +390,7 @@ void SyncEngine::startWithCompletion(const std::string& reason, CompletionCallba
             if (!resumeFromAuth) {
                 currentRequestId_ = platform::generateRequestId();
                 currentPullUrl_ = pullEndpointUrl_;
+                accumulatedChangeset_.clear(); // MOBILE-6276: fresh sync starts a fresh changeset
             } else if (currentRequestId_.empty()) {
                 currentRequestId_ = platform::generateRequestId();
             }
@@ -745,9 +746,10 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
         response.statusCode == 304 ? std::string("{\"items\":[]}") : response.body;
 
     std::string applyError;
+    SyncChangeset pageChangeset;
 
     if (applyCb) {
-        if (!applyCb(pullBody, applyError)) {
+        if (!applyCb(pullBody, applyError, pageChangeset)) {
             CompletionCallback completionToCall;
             CompletionCallback pendingToCall;
             {
@@ -773,6 +775,18 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
                 pendingToCall(false, applyError);
             }
             return;
+        }
+        // MOBILE-6276: fold this committed page's ids into the sync-wide accumulator (pages are
+        // applied sequentially; guard on syncId so a superseded sync can't contaminate a new one).
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (syncId == syncId_) {
+                for (auto& kv : pageChangeset) {
+                    auto& dst = accumulatedChangeset_[kv.first];
+                    dst.upserted.insert(dst.upserted.end(), kv.second.upserted.begin(), kv.second.upserted.end());
+                    dst.deleted.insert(dst.deleted.end(), kv.second.deleted.begin(), kv.second.deleted.end());
+                }
+            }
         }
     }
 
@@ -915,6 +929,13 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
             start(pendingReason);
         }
     }
+}
+
+std::string SyncEngine::takeAccumulatedChangesetJson() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::string json = serializeChangeset(accumulatedChangeset_);
+    accumulatedChangeset_.clear();
+    return json;
 }
 
 bool SyncEngine::scheduleRetryLocked(int64_t syncId, int statusCode, const std::string& message) {

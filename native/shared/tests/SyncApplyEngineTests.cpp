@@ -413,7 +413,7 @@ void test_synced_record_full_overwrite() {
     execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT, _status TEXT, _changed TEXT)", error);
 
     // Insert a synced record (no local changes)
-    execSql(db, "INSERT INTO tasks (id, name, _status, _changed) VALUES ('t1', 'old-name', NULL, '')", error);
+    execSql(db, "INSERT INTO tasks (id, name, _status, _changed) VALUES ('t1', 'old-name', 'synced', '')", error);
 
     // Server sends updated values
     std::string payload = R"({
@@ -430,6 +430,47 @@ void test_synced_record_full_overwrite() {
     std::string name;
     expectTrue(querySingleText(db, "SELECT name FROM tasks WHERE id='t1'", name), "row should exist");
     expectTrue(name == "new-name", "synced record should be fully overwritten");
+
+    // MOBILE-6276: the full-overwrite must keep _status='synced'/_changed='' to match the
+    // legacy JS prepareCreateFromRaw path. Server rows carry no _status, so a plain
+    // INSERT OR REPLACE leaves _status NULL — and the app's pervasive `_status != 'deleted'`
+    // raw-SQL filters silently drop the row (NULL != 'deleted' is not TRUE in SQLite).
+    std::string status;
+    expectTrue(querySingleText(db, "SELECT _status FROM tasks WHERE id='t1'", status), "_status column should be readable");
+    expectTrue(status == "synced", "overwritten synced record must have _status='synced', not NULL");
+    expectTrue(querySingleInt(db, "SELECT _changed IS NULL FROM tasks WHERE id='t1'") == 0,
+               "overwritten synced record must have _changed='', not NULL");
+
+    sqlite3_close(db);
+}
+
+void test_new_record_pull_gets_synced_status() {
+    // MOBILE-6276: a brand-new row delivered by a native pull (a record created on another
+    // device, or the server echo of a locally-created record) must land with _status='synced'.
+    // Otherwise it is invisible to the app's `_status != 'deleted'` counts (e.g. the visit
+    // "Purchase orders — N Added" checklist, useVisitReportDetails.ts) → silent undercount.
+    sqlite3* db = nullptr;
+    sqlite3_open(":memory:", &db);
+    std::string error;
+    execSql(db, "CREATE TABLE purchase_orders (id TEXT PRIMARY KEY, po_number TEXT, status TEXT, _status TEXT, _changed TEXT)", error);
+
+    std::string payload = R"({
+        "count": 1,
+        "items": [
+          { "_table": "purchase_orders", "row": { "id": "fc05b880", "po_number": "9311", "status": "Fulfilled" } }
+        ]
+      })";
+
+    bool ok = watermelondb::applySyncPayload(db, payload, error);
+    expectTrue(ok, "applySyncPayload should succeed for a fresh pulled row");
+
+    std::string status;
+    expectTrue(querySingleText(db, "SELECT _status FROM purchase_orders WHERE id='fc05b880'", status), "pulled row should exist");
+    expectTrue(status == "synced", "freshly-pulled row must have _status='synced', not NULL (MOBILE-6276)");
+
+    // Direct reproduction of Symptom B: the count filter must include the pulled row.
+    expectTrue(querySingleInt(db, "SELECT COUNT(*) FROM purchase_orders WHERE _status != 'deleted'") == 1,
+               "`_status != 'deleted'` must count the pulled row (returns 0 when _status is NULL)");
 
     sqlite3_close(db);
 }
@@ -589,17 +630,13 @@ void test_server_payload_with_status_fields_does_not_corrupt() {
     expectTrue(querySingleText(db, "SELECT name FROM tasks WHERE id='t1'", name), "row should exist");
     expectTrue(name == "new-name", "name should be updated from server");
 
-    // _status should NOT be corrupted by server payload — INSERT OR REPLACE will set it,
-    // but the next sync cycle's markAsSynced will clean it up. The key thing is we
-    // don't accidentally turn a synced record into a 'created' one that blocks future pulls.
-    // Note: INSERT OR REPLACE does include _status from payload since it's a valid column.
-    // This test documents the current behavior for awareness.
+    // MOBILE-6276: server-supplied _status/_changed must be IGNORED. The native apply skips
+    // them from the payload and forces _status='synced'/_changed='' on the full-overwrite path,
+    // so a stray server _status:'created' can neither turn a synced record into a 'created' one
+    // (which would block future pulls) nor leave the row with _status=NULL.
     std::string status;
-    bool hasStatus = querySingleText(db, "SELECT _status FROM tasks WHERE id='t1'", status);
-    if (hasStatus) {
-        // Document what actually happens: INSERT OR REPLACE writes all columns including _status
-        expectTrue(true, "server _status was written (expected with INSERT OR REPLACE)");
-    }
+    expectTrue(querySingleText(db, "SELECT _status FROM tasks WHERE id='t1'", status), "_status should exist");
+    expectTrue(status == "synced", "server-supplied _status must be ignored and forced to 'synced'");
 
     // For a dirty (updated) record, _status/_changed from server should be excluded
     execSql(db, "DELETE FROM tasks", error);
@@ -630,6 +667,80 @@ void test_server_payload_with_status_fields_does_not_corrupt() {
     sqlite3_close(db);
 }
 
+void test_changeset_reports_upsert_delete_and_excludes_dirty() {
+    // MOBILE-6276: the engine reports exactly what it wrote — an upsert + a hard-delete — and
+    // EXCLUDES a locally-dirty ('created') row it skipped, so JS never refreshes a pending edit.
+    sqlite3* db = nullptr;
+    sqlite3_open(":memory:", &db);
+    std::string error;
+    execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT, _status TEXT, _changed TEXT)", error);
+    execSql(db, "INSERT INTO tasks (id, name, _status, _changed) VALUES ('dirty1','local','created','')", error);
+    execSql(db, "INSERT INTO tasks (id, name, _status, _changed) VALUES ('del1','gone','synced','')", error);
+
+    std::string payload = R"({
+        "items": [
+          { "_table": "tasks", "row": { "id": "up1", "name": "alpha" } },
+          { "_table": "tasks", "row": { "id": "dirty1", "name": "server" } },
+          { "_table": "tasks", "_deleted": true, "id": "del1" }
+        ]
+      })";
+
+    watermelondb::SyncChangeset cs;
+    bool ok = watermelondb::applySyncPayload(db, payload, error, cs);
+    expectTrue(ok, "apply should succeed");
+    expectTrue(watermelondb::serializeChangeset(cs) == R"({"tasks":{"upserted":["up1"],"deleted":["del1"]}})",
+               "changeset must list only written upserts + hard-deletes, excluding skipped dirty rows");
+
+    std::string name;
+    querySingleText(db, "SELECT name FROM tasks WHERE id='dirty1'", name);
+    expectTrue(name == "local", "locally-created row must be preserved (and excluded from changeset)");
+
+    sqlite3_close(db);
+}
+
+void test_changeset_includes_partial_merged_record() {
+    // A locally-'updated' row gets server columns merged in (applyPartialUpdate) — that IS a write,
+    // so its id must be reported as upserted while the locally-changed column is preserved.
+    sqlite3* db = nullptr;
+    sqlite3_open(":memory:", &db);
+    std::string error;
+    execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT, description TEXT, _status TEXT, _changed TEXT)", error);
+    execSql(db, "INSERT INTO tasks (id, name, description, _status, _changed) "
+                "VALUES ('m1','local','olddesc','updated','name')", error);
+
+    std::string payload = R"({
+        "items": [
+          { "_table": "tasks", "row": { "id": "m1", "name": "server", "description": "newdesc" } }
+        ]
+      })";
+
+    watermelondb::SyncChangeset cs;
+    bool ok = watermelondb::applySyncPayload(db, payload, error, cs);
+    expectTrue(ok, "partial-merge apply should succeed");
+    expectTrue(watermelondb::serializeChangeset(cs) == R"({"tasks":{"upserted":["m1"],"deleted":[]}})",
+               "partial-merged record id must be reported as upserted");
+
+    std::string name;
+    querySingleText(db, "SELECT name FROM tasks WHERE id='m1'", name);
+    expectTrue(name == "local", "locally-changed 'name' must be preserved through the merge");
+
+    sqlite3_close(db);
+}
+
+void test_empty_pull_changeset_is_empty_object() {
+    sqlite3* db = nullptr;
+    sqlite3_open(":memory:", &db);
+    std::string error;
+    execSql(db, "CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT)", error);
+
+    watermelondb::SyncChangeset cs;
+    bool ok = watermelondb::applySyncPayload(db, "{\"items\":[]}", error, cs);
+    expectTrue(ok, "empty pull apply should succeed");
+    expectTrue(watermelondb::serializeChangeset(cs) == "{}", "empty pull must serialize to {}");
+
+    sqlite3_close(db);
+}
+
 } // namespace
 
 int main() {
@@ -649,11 +760,15 @@ int main() {
     test_created_record_not_overwritten();
     test_updated_record_partial_merge();
     test_synced_record_full_overwrite();
+    test_new_record_pull_gets_synced_status();
     test_deleted_record_not_overwritten();
     test_updated_record_all_changed_skips_update();
     test_mixed_dirty_and_synced_records();
     test_table_without_status_columns();
     test_server_payload_with_status_fields_does_not_corrupt();
+    test_changeset_reports_upsert_delete_and_excludes_dirty();
+    test_changeset_includes_partial_merged_record();
+    test_empty_pull_changeset_is_empty_object();
 
     if (gFailures > 0) {
         std::cerr << gFailures << " test(s) failed\n";

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SyncPlatform.h"
+#include "SyncApplyEngine.h"
 
 #include <functional>
 #include <memory>
@@ -12,7 +13,10 @@ namespace watermelondb {
 class SyncEngine : public std::enable_shared_from_this<SyncEngine> {
 public:
     using EventCallback = std::function<void(const std::string&)>;
-    using ApplyCallback = std::function<bool(const std::string& payload, std::string& errorMessage)>;
+    // MOBILE-6276: the apply callback appends the ids it committed into `changeset` so the engine
+    // can accumulate them across paginated pages and hand the total to JS at completion.
+    using ApplyCallback = std::function<bool(const std::string& payload, std::string& errorMessage,
+                                             SyncChangeset& changeset)>;
     using AuthTokenRequestCallback = std::function<void()>;
     using PushChangesCallback = std::function<void(std::function<void(bool success, const std::string& errorMessage)>)>;
     using CompletionCallback = std::function<void(bool success, const std::string& errorMessage)>;
@@ -33,6 +37,9 @@ public:
     void startWithCompletion(const std::string& reason, CompletionCallback completion);
     void cancelSync();
     std::string stateJson() const;
+    // MOBILE-6276: serialize + clear the changeset accumulated across this sync's pulled pages
+    // (JSON: {"<table>":{"upserted":[...],"deleted":[...]}}). Call once, from the pull completion.
+    std::string takeAccumulatedChangesetJson();
     void shutdown();
 
 private:
@@ -60,6 +67,7 @@ private:
     int maxAuthRetries_ = 3;
     int64_t syncId_ = 0;
     std::string pendingReason_;
+    SyncChangeset accumulatedChangeset_; // MOBILE-6276: guarded by mutex_
     CompletionCallback completionCallback_;
     CompletionCallback pendingCompletionCallback_;
     std::string currentReason_;

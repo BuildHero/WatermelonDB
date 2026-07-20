@@ -1,4 +1,4 @@
-import type Database from '../Database'
+import type { default as Database, NativePullChangeSet } from '../Database'
 import { getLastPulledAt } from './impl'
 import {
   configureSync as nativeConfigureSync,
@@ -133,6 +133,75 @@ export class SyncManager {
     return SyncManager.refreshPullChangesUrlFromSequenceId()
       .catch(() => { })
       .then(() => nativeSyncDatabaseAsync(reason))
+      .then((resultJson) => SyncManager.applyNativePullResult(resultJson))
+  }
+
+  // MOBILE-6276: the native pull applies rows straight to SQLite, bypassing Database.batch, so the JS
+  // layer must be told what changed or it serves pre-sync values (stale UI until app restart). Native
+  // resolves an envelope { changeset: { table: { upserted, deleted } }, error: string | null } on
+  // EVERY outcome — success, a pull failure, or a push failure. Because the pulled rows are already
+  // committed to SQLite (and the cursor advanced) before the push runs, the changeset must refresh the
+  // JS layer even when the push leg fails and the sync ultimately rejects — otherwise those rows stay
+  // JS-stale until a later server change or app restart. So: apply the changeset first (through
+  // Database.applyNativePullChanges → the standard notify(changeSet) reconciliation), THEN rethrow any
+  // error so the caller still sees the failure. Falls back to a coarse notify(allTables) only when
+  // there is no usable changeset (a native build predating the envelope resolves undefined).
+  private static applyNativePullResult(resultJson: string | void): Promise<void> {
+    const { changeSet, error } = SyncManager.parsePullResult(resultJson)
+    return SyncManager.refreshFromChangeSet(changeSet).then(() => {
+      if (error) {
+        throw new Error(error)
+      }
+    })
+  }
+
+  private static refreshFromChangeSet(changeSet: NativePullChangeSet | null): Promise<void> {
+    const database = SyncManager.database
+    if (!database || !database.schema || typeof database.notify !== 'function') {
+      return Promise.resolve()
+    }
+    if (changeSet && typeof database.applyNativePullChanges === 'function') {
+      // applyNativePullChanges bounds its work by the JS cache size (not the pull size), so it is
+      // safe to run for pulls of any size — no id-count cap needed.
+      return database.applyNativePullChanges(changeSet).catch((refreshError: unknown) => {
+        // A refresh failure only means stale UI, never data loss (the rows are in SQLite). Surface it
+        // (visible during the Nitro rollout) rather than swallow it.
+        SyncManager.emit({ type: 'error', message: 'native_pull_refresh_failed', error: String(refreshError) })
+      })
+    }
+    // Fallback: no usable changeset (a native build predating the envelope resolves undefined) →
+    // coarse table-level notify so query observers still re-run.
+    const tables = Object.keys(database.schema.tables)
+    if (tables.length > 0) {
+      database.notify(tables)
+    }
+    return Promise.resolve()
+  }
+
+  private static parsePullResult(resultJson: string | void): {
+    changeSet: NativePullChangeSet | null
+    error: string | null
+  } {
+    if (typeof resultJson !== 'string' || resultJson.length === 0) {
+      return { changeSet: null, error: null }
+    }
+    let parsed: any
+    try {
+      parsed = JSON.parse(resultJson)
+    } catch {
+      return { changeSet: null, error: null }
+    }
+    if (!parsed || typeof parsed !== 'object') {
+      return { changeSet: null, error: null }
+    }
+    // Envelope form { changeset, error } (native + JS ship together, so this is what native sends).
+    if ('changeset' in parsed || 'error' in parsed) {
+      const cs = parsed.changeset && typeof parsed.changeset === 'object' ? (parsed.changeset as NativePullChangeSet) : null
+      const err = typeof parsed.error === 'string' && parsed.error.length > 0 ? parsed.error : null
+      return { changeSet: cs, error: err }
+    }
+    // Backward-compat: a bare changeset object from a pre-envelope native.
+    return { changeSet: parsed as NativePullChangeSet, error: null }
   }
 
   static getState(): SyncState {
