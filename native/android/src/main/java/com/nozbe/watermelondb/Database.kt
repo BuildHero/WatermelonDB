@@ -13,15 +13,64 @@ import android.util.Log
 import java.io.File
 import java.lang.reflect.Field
 import java.lang.reflect.Method
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Semaphore
 
 class Database(private val name: String, private val context: Context) {
 
     private val databasePath: String = resolveDatabasePath()
     private val transactionDepth = ThreadLocal<Int>()
 
+    companion object {
+        // MOBILE-6492 (Tier 2): one binary semaphore per underlying database file,
+        // shared across every `Database` instance (and, via DatabaseBridge's JNI
+        // accessors, the native sync-apply path) pointing at that same path. This is
+        // the Android port of iOS's `Database.swift#writerTransactionSemaphore` —
+        // Android's native sync-apply callback (`JSIAndroidBridgeModule.cpp`) writes
+        // to this same connection via `acquireSqliteConnection()` below, entirely
+        // outside `transaction()`'s own bookkeeping, so the semaphore must live at a
+        // scope both paths can reach, keyed by the one thing they agree on: the file.
+        private val writerTransactionSemaphores = ConcurrentHashMap<String, Semaphore>()
+        private val writerHolders = ConcurrentHashMap<String, String>()
+
+        internal fun writerTransactionSemaphoreFor(path: String): Semaphore =
+            writerTransactionSemaphores.getOrPut(path) { Semaphore(1) }
+    }
+
+    private val writerTransactionSemaphore: Semaphore
+        get() = writerTransactionSemaphoreFor(databasePath)
+
+    internal fun setWriterHolder(name: String) {
+        writerHolders[databasePath] = name
+    }
+
+    internal fun clearWriterHolder() {
+        writerHolders.remove(databasePath)
+    }
+
+    internal fun currentWriterHolder(): String? = writerHolders[databasePath]
+
+    // MOBILE-6492 (Tier 2): exposed for DatabaseBridge's JNI accessors, so the native
+    // sync-apply path (JSIAndroidBridgeModule.cpp's ApplyCallback) can acquire/release
+    // the same semaphore transaction() uses, around its own acquireSqliteConnection()/
+    // applySyncPayload()/releaseSQLiteConnection() sequence — mirroring iOS's
+    // JSISwiftWrapperModule.mm wait()/signal() around getRawConnection/applySyncPayload.
+    // Blocking — callers must invoke off the JS thread.
+    fun acquireWriterTransactionSemaphore() {
+        writerTransactionSemaphore.acquire()
+    }
+
+    fun releaseWriterTransactionSemaphore() {
+        writerTransactionSemaphore.release()
+    }
+
     private val writerDb: SQLiteDatabase by lazy {
         openWithRetry {
             SQLiteDatabase.openOrCreateDatabase(databasePath, null).also {
+                // Must be first — if another connection holds a lock, all subsequent
+                // PRAGMAs (including journal_mode) would throw immediately. Matches
+                // iOS's Database.swift#setWalMode (busy_timeout=5000, set first).
+                runPragma(it, "PRAGMA busy_timeout=5000")
                 runPragma(it, "PRAGMA journal_mode=WAL")
                 runPragma(it, "PRAGMA synchronous=NORMAL")  // FULL is too slow, NORMAL is safe with WAL
                 runPragma(it, "PRAGMA temp_store=MEMORY")   // Faster temp operations
@@ -39,6 +88,7 @@ class Database(private val name: String, private val context: Context) {
             openWithRetry {
                 SQLiteDatabase.openDatabase(databasePath, null, SQLiteDatabase.OPEN_READONLY).also {
                     try {
+                        runPragma(it, "PRAGMA busy_timeout=5000")
                         runPragma(it, "PRAGMA query_only=1")
                     } catch (_: Exception) {
                         // Best effort; some builds may not allow setting pragmas on read-only connections.
@@ -241,23 +291,35 @@ class Database(private val name: String, private val context: Context) {
     }
 
     fun transaction(function: () -> Unit) {
-        writerDb.beginTransaction()
-        incrementTransactionDepth()
-
+        // MOBILE-6492 (Tier 2): serialize against the native sync-apply path, which
+        // writes to this same file via acquireSqliteConnection() below, bypassing this
+        // method's own beginTransaction()/endTransaction() bookkeeping entirely.
+        // Mirrors iOS's Database.swift#inTransaction (writerTransactionSemaphore.wait()
+        // before beginTransaction(), signal() in the equivalent of `defer`).
+        writerTransactionSemaphore.acquire()
+        setWriterHolder("js-action")
         try {
-            function()
-            writerDb.setTransactionSuccessful()
-        } catch (e: SQLiteFullException) {
-            e.printStackTrace()
-            Log.e("watermelondb", "found this error ${e.localizedMessage}")
-            throw e
-        } finally {
+            writerDb.beginTransaction()
+            incrementTransactionDepth()
+
             try {
-                writerDb.endTransaction()
-            } catch (e: Exception) {
-                Log.e("watermelondb", "eee ${e.localizedMessage}")
+                function()
+                writerDb.setTransactionSuccessful()
+            } catch (e: SQLiteFullException) {
+                e.printStackTrace()
+                Log.e("watermelondb", "found this error ${e.localizedMessage}")
+                throw e
+            } finally {
+                try {
+                    writerDb.endTransaction()
+                } catch (e: Exception) {
+                    Log.e("watermelondb", "eee ${e.localizedMessage}")
+                }
+                decrementTransactionDepth()
             }
-            decrementTransactionDepth()
+        } finally {
+            clearWriterHolder()
+            writerTransactionSemaphore.release()
         }
     }
 

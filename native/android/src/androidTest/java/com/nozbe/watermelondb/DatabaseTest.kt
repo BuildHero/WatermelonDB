@@ -325,4 +325,216 @@ class DatabaseTest {
             readerError.get()
         )
     }
+
+    /**
+     * MOBILE-6492 fix verification. Previously (see git history:
+     * `alreadyOpenConnectionThrowsOnBusyWithNoRetry`), this reproduced a gap left by
+     * MOBILE-5065 / openWithRetry: retry-with-backoff only wrapped the ONE-TIME lazy
+     * `writerDb`/`readerDb` initializer block (open + PRAGMA setup). Once a connection
+     * had already completed that lazy init, every subsequent `execute()` /
+     * `transaction()` call went straight to the raw `SQLiteDatabase` object with zero
+     * retry and no `busy_timeout` — so a SECOND writer that had been open and idle for a
+     * while got no protection at all if it collided with another writer's long
+     * transaction, unlike a freshly-opening connection which openWithRetry covered.
+     *
+     * This was the production shape behind SIP-16015 / MOBILE-6492 (Android
+     * `SQLiteDatabaseLockedException` observed from `sync-coordinator`, `syncDatabase`,
+     * `VisitActions.js`, and `jobRepository.ts` — all long-lived, already-initialized
+     * connections, not fresh connection opens).
+     *
+     * Fix: `writerDb`/`readerDb` now set `PRAGMA busy_timeout=5000` (matching iOS's
+     * `Database.swift#setWalMode`), so SQLite's own native busy-handler waits instead of
+     * failing immediately on an already-open connection's ordinary write.
+     */
+    @Test(timeout = 30000)
+    fun alreadyOpenConnectionWaitsOnBusyInsteadOfThrowing() {
+        val sharedName = "wmdb-post-init-contention-${System.nanoTime()}"
+
+        val db1 = makeDatabaseWithName(sharedName)
+        val db2 = makeDatabaseWithName(sharedName)
+
+        // Force BOTH connections to complete their lazy writerDb init BEFORE the race,
+        // simulating long-lived connections that have already been open for a while —
+        // NOT the connection-init moment openWithRetry protects.
+        db1.execute("CREATE TABLE IF NOT EXISTS test_post_init (id TEXT PRIMARY KEY, value TEXT)")
+        db2.execute("CREATE TABLE IF NOT EXISTS test_post_init (id TEXT PRIMARY KEY, value TEXT)")
+
+        val writerStarted = CountDownLatch(1)
+        val writerDone = CountDownLatch(1)
+        val db2Error = AtomicReference<Throwable?>(null)
+        val db2Done = CountDownLatch(1)
+
+        // Thread 1: hold a write transaction well past requery's ~2.5s built-in busy
+        // timeout — same hold duration as concurrentWritersWithBusyTimeoutDoNotThrow,
+        // which openWithRetry successfully protects against for a FRESH connection.
+        val writerThread = Thread {
+            try {
+                db1.transaction {
+                    db1.execute(
+                        "INSERT OR REPLACE INTO test_post_init (id, value) VALUES (?, ?)",
+                        arrayOf("bg-sync-1", "background-data")
+                    )
+                    writerStarted.countDown()
+                    Thread.sleep(4000)
+                }
+            } finally {
+                writerDone.countDown()
+            }
+        }
+
+        // Thread 2: db2 is ALREADY initialized (see above) — this is an ordinary
+        // post-init write, not a connection open, so it is NOT wrapped in openWithRetry.
+        val secondWriterThread = Thread {
+            try {
+                writerStarted.await(10, TimeUnit.SECONDS)
+                Thread.sleep(50)
+                db2.transaction {
+                    db2.execute(
+                        "INSERT OR REPLACE INTO test_post_init (id, value) VALUES (?, ?)",
+                        arrayOf("fg-action-1", "foreground-data")
+                    )
+                }
+            } catch (e: Throwable) {
+                db2Error.set(e)
+            } finally {
+                db2Done.countDown()
+            }
+        }
+
+        writerThread.start()
+        secondWriterThread.start()
+
+        assertTrue("Writer thread timed out", writerDone.await(20, TimeUnit.SECONDS))
+        assertTrue("Second writer thread timed out", db2Done.await(20, TimeUnit.SECONDS))
+
+        // FIXED: with busy_timeout=5000 set on both writerDb and readerDb, db2's
+        // already-open connection now waits on SQLite's native busy-handler instead of
+        // throwing immediately — same protection concurrentWritersWithBusyTimeoutDoNotThrow
+        // already verified for a freshly-opening connection via openWithRetry.
+        assertNull(
+            "Expected no error now that busy_timeout protects already-open connections, but got: ${db2Error.get()?.message}",
+            db2Error.get()
+        )
+    }
+
+    /**
+     * MOBILE-6492 Tier 2 MRE. Confirmed via production log analysis (Jonathan
+     * DiCamillo, SIP-16015): the real incident was a ~9-minute continuous lock that
+     * survived a full JS re-init — not transient contention. A fixed `busy_timeout`
+     * cannot cover a holder that never releases within that window; it only delays
+     * the eventual throw. This characterizes that gap: a second, independent writer
+     * connection holds a transaction well past `busy_timeout` (Tier 1 fix), and an
+     * ordinary write from a separate already-open connection still throws once the
+     * timeout is exhausted.
+     *
+     * Root cause (confirmed by reading the fork's native sync-apply path):
+     * `JSIAndroidBridgeModule.cpp`'s `ApplyCallback` writes to SQLite via
+     * `Database.kt#acquireSqliteConnection()` + the shared `applySyncPayload()`
+     * free function (`native/shared/SyncApplyEngine.cpp`), entirely OUTSIDE
+     * `Database.kt#transaction()` and with zero serialization against it — unlike
+     * iOS, whose `Database.swift#writerTransactionSemaphore` wraps both
+     * `inTransaction()` and `JSISwiftWrapperModule.mm`'s equivalent sync-apply
+     * callback. Android's `JSIAndroidBridgeModule` has no semaphore/lock equivalent
+     * at all (confirmed via grep — zero synchronization primitives protect the
+     * writer there).
+     *
+     * This test models the two genuinely-separate-connection shape `applySyncPayload`
+     * produces (see `concurrentWritersWithBusyTimeoutDoNotThrow`'s docstring for why
+     * two distinct `Database` instances on the same file reproduce a real SQLite
+     * BUSY, unlike two threads sharing one connection pool, which just serializes at
+     * the Java level).
+     *
+     * Fix (Tier 2, implemented): a per-database-file writer semaphore
+     * (`Database.kt#writerTransactionSemaphore`, shared across every `Database`
+     * instance on the same path via a companion-object map — the Kotlin-level
+     * counterpart of what `DatabaseBridge.kt`'s native accessors will expose to the
+     * `ApplyCallback`), acquired/released around `transaction()` — mirroring iOS's
+     * `writerTransactionSemaphore` exactly. `db2`'s write now waits for `db1` to
+     * release instead of throwing, and only completes after `db1`'s hold duration has
+     * elapsed — verified below by asserting `db2Error` is null and its elapsed time is
+     * at least `holdDurationMs`.
+     */
+    @Test(timeout = 30000)
+    fun orphanedHolderBlocksSecondWriterUntilReleaseInsteadOfThrowing() {
+        val sharedName = "wmdb-orphaned-holder-${System.nanoTime()}"
+        val holdDurationMs = 7000L // comfortably past the 5000ms busy_timeout
+
+        val db1 = makeDatabaseWithName(sharedName)
+        val db2 = makeDatabaseWithName(sharedName)
+
+        // Force both connections to complete their lazy writerDb init before the race
+        // (already-open connections, not the connection-init case openWithRetry covers).
+        db1.execute("CREATE TABLE IF NOT EXISTS test_orphaned_holder (id TEXT PRIMARY KEY, value TEXT)")
+        db2.execute("CREATE TABLE IF NOT EXISTS test_orphaned_holder (id TEXT PRIMARY KEY, value TEXT)")
+
+        val writerStarted = CountDownLatch(1)
+        val writerDone = CountDownLatch(1)
+        val db2Error = AtomicReference<Throwable?>(null)
+        val db2Done = CountDownLatch(1)
+        val db2StartTime = AtomicReference<Long?>(null)
+        val db2EndTime = AtomicReference<Long?>(null)
+
+        // Thread 1: simulates the native sync-apply path's transaction, held well past
+        // busy_timeout — standing in for a background-sync writer that never releases
+        // within a reasonable window (WorkManager kill / unsafe ON_START cancel).
+        val writerThread = Thread {
+            try {
+                db1.transaction {
+                    db1.execute(
+                        "INSERT OR REPLACE INTO test_orphaned_holder (id, value) VALUES (?, ?)",
+                        arrayOf("bg-sync-1", "background-data")
+                    )
+                    writerStarted.countDown()
+                    Thread.sleep(holdDurationMs)
+                }
+            } finally {
+                writerDone.countDown()
+            }
+        }
+
+        // Thread 2: an ordinary already-open-connection write, simulating a foreground
+        // visit-action write colliding with the orphaned background writer.
+        val secondWriterThread = Thread {
+            try {
+                writerStarted.await(10, TimeUnit.SECONDS)
+                Thread.sleep(50)
+                db2StartTime.set(System.currentTimeMillis())
+                db2.transaction {
+                    db2.execute(
+                        "INSERT OR REPLACE INTO test_orphaned_holder (id, value) VALUES (?, ?)",
+                        arrayOf("fg-action-1", "foreground-data")
+                    )
+                }
+                db2EndTime.set(System.currentTimeMillis())
+            } catch (e: Throwable) {
+                db2Error.set(e)
+            } finally {
+                db2Done.countDown()
+            }
+        }
+
+        writerThread.start()
+        secondWriterThread.start()
+
+        assertTrue("Writer thread timed out", writerDone.await(20, TimeUnit.SECONDS))
+        assertTrue("Second writer thread timed out", db2Done.await(20, TimeUnit.SECONDS))
+
+        // FIXED (Tier 2): the writer semaphore makes db2 wait for db1 to release
+        // rather than racing SQLite's busy_timeout — no exception, regardless of how
+        // long db1 holds the lock.
+        assertNull(
+            "Expected no error now that the writer semaphore serializes db2 against " +
+                "db1's transaction, but got: ${db2Error.get()?.message}",
+            db2Error.get()
+        )
+
+        // And it must have genuinely WAITED for the semaphore (not raced SQLite and
+        // gotten lucky) — db2's write should only complete at or after db1's release.
+        val elapsedMs = (db2EndTime.get() ?: 0L) - (db2StartTime.get() ?: 0L)
+        assertTrue(
+            "Expected db2 to wait at least ${holdDurationMs}ms for db1's semaphore release, " +
+                "but only waited ${elapsedMs}ms",
+            elapsedMs >= holdDurationMs - 200 // small tolerance for scheduling jitter
+        )
+    }
 }

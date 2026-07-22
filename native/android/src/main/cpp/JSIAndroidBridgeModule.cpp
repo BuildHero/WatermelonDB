@@ -232,6 +232,58 @@ static void releaseSqlite(jobject bridge, jint tag) {
     }
 }
 
+// MOBILE-6492 (Tier 2): serialize this native sync-apply path against JS-driven
+// Database.kt#transaction() writes on the same file. Mirrors iOS's
+// JSISwiftWrapperModule.mm, which wraps its equivalent apply callback in
+// writerTransactionSemaphore.wait()/signal() around getRawConnection/applySyncPayload.
+// Blocking call (Semaphore.acquire() on the Kotlin side) — this callback already runs
+// off the JS thread (OkHttp's callback thread), so blocking here is safe.
+static void acquireWriterSemaphore(jobject bridge, jint tag, const char* holderName) {
+    JNIEnv* env = facebook::jni::Environment::current();
+    if (!env || !bridge) {
+        return;
+    }
+    jclass cls = env->GetObjectClass(bridge);
+    if (!cls) {
+        env->ExceptionClear();
+        return;
+    }
+    jmethodID acquireSem = env->GetMethodID(cls, "acquireWriterTransactionSemaphore", "(ILjava/lang/String;)V");
+    if (acquireSem) {
+        jstring jHolderName = env->NewStringUTF(holderName);
+        env->CallVoidMethod(bridge, acquireSem, tag, jHolderName);
+        env->DeleteLocalRef(jHolderName);
+    } else {
+        env->ExceptionClear();
+    }
+    env->DeleteLocalRef(cls);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+}
+
+static void releaseWriterSemaphore(jobject bridge, jint tag) {
+    JNIEnv* env = facebook::jni::Environment::current();
+    if (!env || !bridge) {
+        return;
+    }
+    jclass cls = env->GetObjectClass(bridge);
+    if (!cls) {
+        env->ExceptionClear();
+        return;
+    }
+    jmethodID releaseSem = env->GetMethodID(cls, "releaseWriterTransactionSemaphore", "(I)V");
+    if (releaseSem) {
+        env->CallVoidMethod(bridge, releaseSem, tag);
+    } else {
+        env->ExceptionClear();
+    }
+    env->DeleteLocalRef(cls);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+}
+
 JSIAndroidBridgeModule::JSIAndroidBridgeModule(std::shared_ptr<CallInvoker> jsInvoker)
 : NativeWatermelonDBModuleCxxSpec(std::move(jsInvoker)) {
     {
@@ -254,14 +306,21 @@ JSIAndroidBridgeModule::JSIAndroidBridgeModule(std::shared_ptr<CallInvoker> jsIn
             errorMessage = "DatabaseBridge not available";
             return false;
         }
+        // MOBILE-6492 (Tier 2): acquire before touching SQLite, release after —
+        // matches iOS's JSISwiftWrapperModule.mm wait()/signal() around this same
+        // apply-and-write sequence. Without this, this write raced JS-driven
+        // Database.kt#transaction() calls on the same file with no serialization.
+        acquireWriterSemaphore(databaseBridge, (jint)syncConnectionTag_, "native-sync:apply");
         std::string error;
         sqlite3* db = acquireSqlite(databaseBridge, (jint)syncConnectionTag_, error);
         if (!db) {
             errorMessage = error;
+            releaseWriterSemaphore(databaseBridge, (jint)syncConnectionTag_);
             return false;
         }
         bool ok = watermelondb::applySyncPayload(db, payload, errorMessage, changeset);
         releaseSqlite(databaseBridge, (jint)syncConnectionTag_);
+        releaseWriterSemaphore(databaseBridge, (jint)syncConnectionTag_);
         return ok;
     });
     syncEngine_->setAuthTokenRequestCallback([this]() {

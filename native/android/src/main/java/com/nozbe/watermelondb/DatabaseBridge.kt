@@ -403,6 +403,32 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
         }
     }
 
+    // MOBILE-6492 (Tier 2): JNI-callable accessors for the native sync-apply path
+    // (JSIAndroidBridgeModule.cpp's ApplyCallback) to serialize against JS-driven
+    // Database.kt#transaction() writes on the same underlying file. Mirrors iOS's
+    // DatabaseBridge.swift getWriterTransactionSemaphore/setWriterHolder/
+    // clearWriterHolder accessors used by JSISwiftWrapperModule.mm.
+    //
+    // Blocking call — must be invoked off the JS thread (the native sync-apply path
+    // already runs on OkHttp's callback thread, never the JS thread).
+    fun acquireWriterTransactionSemaphore(tag: ConnectionTag, holderName: String) {
+        val driver = getDriver(tag)
+        val database = driver.getDatabase()
+        database.acquireWriterTransactionSemaphore()
+        database.setWriterHolder(holderName)
+    }
+
+    fun releaseWriterTransactionSemaphore(tag: ConnectionTag) {
+        try {
+            val driver = getDriver(tag)
+            val database = driver.getDatabase()
+            database.clearWriterHolder()
+            database.releaseWriterTransactionSemaphore()
+        } catch (e: Exception) {
+            android.util.Log.e("WatermelonDB", "releaseWriterTransactionSemaphore failed for tag $tag", e)
+        }
+    }
+
     fun getSQLiteReadConnection(tag: ConnectionTag): Long {
         try {
             val driver = getDriver(tag)
