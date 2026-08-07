@@ -231,6 +231,71 @@ bool extractNextCursor(const std::string& body, CursorValue& cursorOut) {
     }
 }
 
+// MOBILE-6770: mobile-api returns an expired/invalid token as HTTP 200 with a
+// GraphQL-style error envelope {"errors":[{"extensions":{"code":"TOKEN_EXPIRED"}}],...}
+// that has no top-level "items". Detect that shape so handleHttpResponse can route
+// it into the existing re-auth path instead of letting it fall through to apply and
+// throw "Invalid JSON payload: missing 'items' array". A valid sync payload carries
+// "items" (not an "errors" array with an auth code), so this returns false for the
+// happy path, and false for non-JSON / non-object bodies.
+bool isAuthErrorEnvelope(const std::string& body) {
+    // Hot-path guard: this runs under the engine mutex for every 2xx response,
+    // including large successful pulls. An auth error envelope is tiny (mobile-api's
+    // TOKEN_EXPIRED/REQUEST_IGNORED envelopes are <1KB) and always carries a
+    // top-level "errors" array; a successful sync payload is orders of magnitude
+    // larger and has no "errors" key. Bail in O(1) on size FIRST so a large pull is
+    // never scanned or parsed on the hot path regardless of its contents, then
+    // require an "errors" key before the (small-body) structured parse. A body
+    // larger than any plausible auth envelope cannot be one.
+    constexpr size_t kMaxAuthEnvelopeBytes = 8192;
+    if (body.size() > kMaxAuthEnvelopeBytes) {
+        return false;
+    }
+    if (body.find("\"errors\"") == std::string::npos) {
+        return false;
+    }
+    try {
+        simdjson::dom::parser parser;
+        simdjson::dom::element doc = parser.parse(body);
+        if (doc.type() != simdjson::dom::element_type::OBJECT) {
+            return false;
+        }
+        simdjson::dom::object obj;
+        if (doc.get(obj)) {
+            return false;
+        }
+        auto errorsField = obj["errors"];
+        if (errorsField.error()) {
+            return false;
+        }
+        simdjson::dom::array errors;
+        if (errorsField.value().get(errors)) {
+            return false;
+        }
+        for (simdjson::dom::element err : errors) {
+            auto extField = err["extensions"];
+            if (extField.error()) {
+                continue;
+            }
+            auto codeField = extField.value()["code"];
+            if (codeField.error()) {
+                continue;
+            }
+            std::string_view code;
+            if (codeField.value().get(code)) {
+                continue;
+            }
+            if (code == "TOKEN_EXPIRED" || code == "UNAUTHENTICATED" ||
+                code == "UNAUTHORIZED") {
+                return true;
+            }
+        }
+        return false;
+    } catch (...) {
+        return false;
+    }
+}
+
 } // namespace
 
 SyncEngine::SyncEngine() = default;
@@ -644,7 +709,16 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
             shouldReturn = true;
         }
 
-        if (response.statusCode == 401 || response.statusCode == 403) {
+        // MOBILE-6770: an expired/invalid token can also arrive as HTTP 200 with an
+        // auth error envelope (no "items"). Route it into the same re-auth path as a
+        // 401/403 so the native pull recovers instead of falling through to apply and
+        // crashing. Only the native pull path reaches this branch — the JS axios client
+        // already handles the 200 envelope via its response interceptor.
+        const bool isAuthFailure =
+            response.statusCode == 401 || response.statusCode == 403 ||
+            (response.statusCode >= 200 && response.statusCode < 300 &&
+             isAuthErrorEnvelope(response.body));
+        if (isAuthFailure) {
             if (authRetryCount_ >= maxAuthRetries_) {
                 // Auth retries exhausted
                 emitLocked("{\"type\":\"auth_failed\",\"message\":\"Max auth retries exceeded\"}");

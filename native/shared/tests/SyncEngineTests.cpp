@@ -125,6 +125,108 @@ void test_auth_required() {
     expectTrue(recorder.waitForContains("\"type\":\"auth_required\""), "expected auth_required event");
 }
 
+void test_auth_error_envelope_200_routes_to_auth_required() {
+    // MOBILE-6770: mobile-api returns an expired/invalid token as HTTP 200 with a
+    // GraphQL-style auth error envelope (no top-level "items"). The native pull
+    // path must route it into the same re-auth flow as a 401 rather than falling
+    // through to apply and throwing "Invalid JSON payload: missing 'items' array".
+    EventRecorder recorder;
+    auto engine = std::make_shared<watermelondb::SyncEngine>();
+    engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
+
+    watermelondb::platform::setHttpHandler([](const watermelondb::platform::HttpRequest&,
+                                              std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        watermelondb::platform::HttpResponse response;
+        response.statusCode = 200;
+        response.body =
+            "{\"errors\":[{\"message\":\"jwt expired\",\"extensions\":{\"code\":\"TOKEN_EXPIRED\"}}],\"data\":{}}";
+        done(response);
+    });
+
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
+    engine->start("auth-200-envelope");
+
+    expectTrue(recorder.waitForContains("\"type\":\"auth_required\""),
+               "expected auth_required event for a 200 auth-error envelope");
+}
+
+void test_auth_error_envelope_200_reauths_and_completes() {
+    // MOBILE-6770: after a 200 auth-error envelope routes to re-auth, a refreshed
+    // token must let the retried pull complete — i.e. the sync recovers, it does not
+    // just surface auth_required and wedge.
+    EventRecorder recorder;
+    auto engine = std::make_shared<watermelondb::SyncEngine>();
+    engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
+
+    engine->setAuthTokenRequestCallback([engine]() { engine->setAuthToken("token-2"); });
+    engine->setAuthToken("token-1");
+
+    static int envCallCount = 0;
+    envCallCount = 0;
+    watermelondb::platform::setHttpHandler([&](const watermelondb::platform::HttpRequest& request,
+                                               std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        watermelondb::platform::HttpResponse response;
+        if (envCallCount == 0) {
+            // Expired token surfaces as a 200 auth-error envelope (no "items").
+            response.statusCode = 200;
+            response.body =
+                "{\"errors\":[{\"extensions\":{\"code\":\"TOKEN_EXPIRED\"}}],\"data\":{}}";
+        } else {
+            // After re-auth, the retried pull gets a real (empty) sync payload.
+            response.statusCode = 200;
+            response.body = "{\"changes\":{},\"next\":null}";
+            auto authIt = request.headers.find("Authorization");
+            expectTrue(authIt != request.headers.end() && authIt->second == "token-2",
+                       "expected refreshed auth token on retry after 200 auth envelope");
+        }
+        envCallCount++;
+        done(response);
+    });
+
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
+    engine->start("auth_200_recover");
+
+    expectTrue(recorder.waitForContains("\"state\":\"done\""),
+               "expected sync to recover to done after a 200 auth-error envelope");
+}
+
+void test_large_payload_200_not_treated_as_auth() {
+    // MOBILE-6770 hot-path guard: a large successful pull must complete normally and
+    // never be treated as an auth envelope. The envelope check bails in O(1) on the
+    // body size (this ~250KB payload is far above the auth-envelope cap), so no scan
+    // or parse of the payload happens under the mutex.
+    EventRecorder recorder;
+    auto engine = std::make_shared<watermelondb::SyncEngine>();
+    engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
+
+    // ~250KB payload with items and no "errors"/auth markers.
+    std::string body = "{\"changes\":{\"records\":[";
+    for (int i = 0; i < 5000; i++) {
+        if (i > 0) {
+            body += ",";
+        }
+        body += "{\"id\":\"rec-" + std::to_string(i) + "\",\"name\":\"sample record value\"}";
+    }
+    body += "]},\"next\":null}";
+
+    watermelondb::platform::setHttpHandler([body](const watermelondb::platform::HttpRequest&,
+                                                  std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        watermelondb::platform::HttpResponse response;
+        response.statusCode = 200;
+        response.body = body;
+        done(response);
+    });
+
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
+    engine->start("large-payload");
+
+    expectTrue(recorder.waitForContains("\"state\":\"done\""),
+               "expected a large 200 payload to complete, not be treated as auth");
+}
+
 void test_retry_flow() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
@@ -1119,6 +1221,9 @@ void test_shutdown_calls_completion() {
 int main() {
     test_success_flow();
     test_auth_required();
+    test_auth_error_envelope_200_routes_to_auth_required();
+    test_auth_error_envelope_200_reauths_and_completes();
+    test_large_payload_200_not_treated_as_auth();
     test_retry_flow();
     test_cursor_pagination();
     test_changeset_accumulates_across_pages();
