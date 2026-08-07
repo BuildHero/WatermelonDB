@@ -193,10 +193,10 @@ void test_auth_error_envelope_200_reauths_and_completes() {
 }
 
 void test_large_payload_200_not_treated_as_auth() {
-    // MOBILE-6770 hot-path guard: a large successful pull (no top-level "errors")
-    // must complete normally and never be treated as an auth envelope. The envelope
-    // check short-circuits on the missing "errors" key, so no full parse of the
-    // payload happens under the mutex.
+    // MOBILE-6770 hot-path guard: a large successful pull must complete normally and
+    // never be treated as an auth envelope. The envelope check bails in O(1) on the
+    // body size (this ~250KB payload is far above the auth-envelope cap), so no scan
+    // or parse of the payload happens under the mutex.
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
     engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });

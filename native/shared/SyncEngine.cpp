@@ -240,12 +240,17 @@ bool extractNextCursor(const std::string& body, CursorValue& cursorOut) {
 // happy path, and false for non-JSON / non-object bodies.
 bool isAuthErrorEnvelope(const std::string& body) {
     // Hot-path guard: this runs under the engine mutex for every 2xx response,
-    // including large successful pulls. An auth error envelope always carries a
-    // top-level "errors" array; a successful sync payload ({"items":...} /
-    // {"changes":...}) never does. Skip the full JSON parse entirely unless the
-    // body even contains an "errors" key, so the successful-pull path stays
-    // parse-free (a rare payload that mentions "errors" in data does one extra
-    // parse and still resolves to false — correct, just not free).
+    // including large successful pulls. An auth error envelope is tiny (mobile-api's
+    // TOKEN_EXPIRED/REQUEST_IGNORED envelopes are <1KB) and always carries a
+    // top-level "errors" array; a successful sync payload is orders of magnitude
+    // larger and has no "errors" key. Bail in O(1) on size FIRST so a large pull is
+    // never scanned or parsed on the hot path regardless of its contents, then
+    // require an "errors" key before the (small-body) structured parse. A body
+    // larger than any plausible auth envelope cannot be one.
+    constexpr size_t kMaxAuthEnvelopeBytes = 8192;
+    if (body.size() > kMaxAuthEnvelopeBytes) {
+        return false;
+    }
     if (body.find("\"errors\"") == std::string::npos) {
         return false;
     }
