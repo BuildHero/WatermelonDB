@@ -192,6 +192,41 @@ void test_auth_error_envelope_200_reauths_and_completes() {
                "expected sync to recover to done after a 200 auth-error envelope");
 }
 
+void test_large_payload_200_not_treated_as_auth() {
+    // MOBILE-6770 hot-path guard: a large successful pull (no top-level "errors")
+    // must complete normally and never be treated as an auth envelope. The envelope
+    // check short-circuits on the missing "errors" key, so no full parse of the
+    // payload happens under the mutex.
+    EventRecorder recorder;
+    auto engine = std::make_shared<watermelondb::SyncEngine>();
+    engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
+
+    // ~250KB payload with items and no "errors"/auth markers.
+    std::string body = "{\"changes\":{\"records\":[";
+    for (int i = 0; i < 5000; i++) {
+        if (i > 0) {
+            body += ",";
+        }
+        body += "{\"id\":\"rec-" + std::to_string(i) + "\",\"name\":\"sample record value\"}";
+    }
+    body += "]},\"next\":null}";
+
+    watermelondb::platform::setHttpHandler([body](const watermelondb::platform::HttpRequest&,
+                                                  std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        watermelondb::platform::HttpResponse response;
+        response.statusCode = 200;
+        response.body = body;
+        done(response);
+    });
+
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
+    engine->start("large-payload");
+
+    expectTrue(recorder.waitForContains("\"state\":\"done\""),
+               "expected a large 200 payload to complete, not be treated as auth");
+}
+
 void test_retry_flow() {
     EventRecorder recorder;
     auto engine = std::make_shared<watermelondb::SyncEngine>();
@@ -1188,6 +1223,7 @@ int main() {
     test_auth_required();
     test_auth_error_envelope_200_routes_to_auth_required();
     test_auth_error_envelope_200_reauths_and_completes();
+    test_large_payload_200_not_treated_as_auth();
     test_retry_flow();
     test_cursor_pagination();
     test_changeset_accumulates_across_pages();

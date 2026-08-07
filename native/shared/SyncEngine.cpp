@@ -239,6 +239,16 @@ bool extractNextCursor(const std::string& body, CursorValue& cursorOut) {
 // "items" (not an "errors" array with an auth code), so this returns false for the
 // happy path, and false for non-JSON / non-object bodies.
 bool isAuthErrorEnvelope(const std::string& body) {
+    // Hot-path guard: this runs under the engine mutex for every 2xx response,
+    // including large successful pulls. An auth error envelope always carries a
+    // top-level "errors" array; a successful sync payload ({"items":...} /
+    // {"changes":...}) never does. Skip the full JSON parse entirely unless the
+    // body even contains an "errors" key, so the successful-pull path stays
+    // parse-free (a rare payload that mentions "errors" in data does one extra
+    // parse and still resolves to false — correct, just not free).
+    if (body.find("\"errors\"") == std::string::npos) {
+        return false;
+    }
     try {
         simdjson::dom::parser parser;
         simdjson::dom::element doc = parser.parse(body);
