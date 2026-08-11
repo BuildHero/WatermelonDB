@@ -381,7 +381,12 @@ void SyncEngine::setAuthToken(const std::string& token) {
         authToken_ = token;
 
         authRequestInFlight_ = false;
-        authRetryCount_ = 0; // Reset auth retry count on successful token
+        // MOBILE-6770: do NOT reset the auth-retry budget merely because a token was
+        // fetched. If the server keeps rejecting the fetched token (a persistent 401
+        // or a 200 auth-error envelope), resetting here would let the re-auth loop run
+        // forever — a per-device retry storm (cf. MOBILE-6786). The budget is
+        // replenished only by a genuinely new sync (see start()) or a cancel, so a
+        // persistent auth failure now terminates at auth_failed after maxAuthRetries.
 
         if (!syncInFlight_ && stateJson_ == "{\"state\":\"auth_required\"}") {
             shouldRestart = true;
@@ -446,12 +451,18 @@ void SyncEngine::startWithCompletion(const std::string& reason, CompletionCallba
             syncInFlight_ = true;
             retryScheduled_ = false;
             retryCount_ = 0;
-            authRetryCount_ = 0; // Reset auth retry count on new sync
+            // MOBILE-6770: only a genuinely new sync replenishes the auth-retry budget.
+            // An auth-driven restart (resumeFromAuth) must NOT reset it, or a persistent
+            // server auth-rejection would re-auth forever instead of terminating at
+            // auth_failed after maxAuthRetries cycles.
+            const bool resumeFromAuth = (stateJson_ == "{\"state\":\"auth_required\"}") && !currentPullUrl_.empty();
+            if (!resumeFromAuth) {
+                authRetryCount_ = 0;
+            }
             currentReason_ = reason;
             if (completion) {
                 completionCallback_ = std::move(completion);
             }
-            const bool resumeFromAuth = (stateJson_ == "{\"state\":\"auth_required\"}") && !currentPullUrl_.empty();
             if (!resumeFromAuth) {
                 currentRequestId_ = platform::generateRequestId();
                 currentPullUrl_ = pullEndpointUrl_;

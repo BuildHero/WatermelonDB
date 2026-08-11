@@ -192,6 +192,56 @@ void test_auth_error_envelope_200_reauths_and_completes() {
                "expected sync to recover to done after a 200 auth-error envelope");
 }
 
+void test_persistent_auth_envelope_terminates_at_auth_failed() {
+    // MOBILE-6770: a *persistent* 200 auth-error envelope — the server keeps rejecting
+    // even a freshly fetched token — must terminate at auth_failed after maxAuthRetries
+    // re-auth cycles, NOT loop forever (a per-device retry storm; cf. MOBILE-6786).
+    // Regression guard: the auth-retry budget used to reset on every fetched token
+    // (setAuthToken) and on the auth-driven restart (start), so the maxAuthRetries guard
+    // never fired and the pull re-authed unbounded.
+    EventRecorder recorder;
+    auto engine = std::make_shared<watermelondb::SyncEngine>();
+    engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
+
+    // The token provider always SUCCEEDS with a fresh token — the persistent failure is
+    // the SERVER, not the provider. This is exactly the case the old resets masked.
+    static int tokenSeq = 0;
+    tokenSeq = 0;
+    engine->setAuthTokenRequestCallback([engine]() {
+        tokenSeq++;
+        engine->setAuthToken("fresh-token-" + std::to_string(tokenSeq));
+    });
+    engine->setAuthToken("token-1");
+
+    // The server sees every pull; the count must be bounded, not unbounded.
+    static int pullCount = 0;
+    pullCount = 0;
+    watermelondb::platform::setHttpHandler([](const watermelondb::platform::HttpRequest&,
+                                              std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        pullCount++;
+        watermelondb::platform::HttpResponse response;
+        response.statusCode = 200; // always the auth envelope — the token is never accepted
+        response.body =
+            "{\"errors\":[{\"extensions\":{\"code\":\"TOKEN_EXPIRED\"}}],\"data\":{}}";
+        done(response);
+    });
+
+    // maxAuthRetries defaults to 3.
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
+    engine->start("persistent_auth_envelope");
+
+    // Pre-fix this never arrives (the loop reruns forever) and waitForContains times out.
+    expectTrue(recorder.waitForContains("\"state\":\"auth_failed\"", 3000),
+               "a persistent 200 auth envelope must terminate at auth_failed, not loop forever");
+    // maxAuthRetries=3 => 3 re-auth cycles + the pull that trips the guard = 4 pulls.
+    // A small margin catches an unbounded loop without being flaky.
+    expectTrue(pullCount <= 6,
+               ("re-auth cycles must be bounded (pullCount=" + std::to_string(pullCount) + ")").c_str());
+
+    watermelondb::platform::setHttpHandler(nullptr);
+}
+
 void test_large_payload_200_not_treated_as_auth() {
     // MOBILE-6770 hot-path guard: a large successful pull must complete normally and
     // never be treated as an auth envelope. The envelope check bails in O(1) on the
@@ -1223,6 +1273,7 @@ int main() {
     test_auth_required();
     test_auth_error_envelope_200_routes_to_auth_required();
     test_auth_error_envelope_200_reauths_and_completes();
+    test_persistent_auth_envelope_terminates_at_auth_failed();
     test_large_payload_200_not_treated_as_auth();
     test_retry_flow();
     test_cursor_pagination();
