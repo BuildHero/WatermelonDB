@@ -782,6 +782,13 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
             completionError = std::string("HTTP ") + std::to_string(response.statusCode);
             shouldReturn = true;
         } else {
+            // MOBILE-6770: a successful (non-auth, non-error) pull response means the
+            // current token WORKS — real progress. Reset the auth-retry budget so the
+            // maxAuthRetries cap counts only *consecutive* re-auths without progress. A
+            // long multi-page sync that hits several intermittent token expiries, each
+            // resolved by a successful re-auth, must not exhaust a cumulative budget and
+            // fail; only a persistent reject (no successful pull between re-auths) does.
+            authRetryCount_ = 0;
             emitLocked(std::string("{\"type\":\"http\",\"phase\":\"pull\",\"status\":") +
                        std::to_string(response.statusCode) + "}");
         }
