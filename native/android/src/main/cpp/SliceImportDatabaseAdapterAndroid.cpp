@@ -98,8 +98,11 @@ public:
             // SliceImportDatabaseAdapter.mm::beginTransaction (wait() before BEGIN
             // IMMEDIATE) — serializes slice-import writes against JS-driven
             // Database.kt#transaction() and the native sync-apply path on the same file.
-            acquireWriterSemaphore();
-            semaphoreHeld_ = true;
+            // Track only what was actually granted. Setting this unconditionally would
+            // let a timed-out or JNI-failed acquire be "released" later, raising the
+            // binary semaphore's permit count and silently voiding mutual exclusion.
+            // Proceed either way — busy_timeout above arbitrates at the SQLite layer.
+            semaphoreHeld_ = acquireWriterSemaphore();
             if (!ensureConnection(errorMessage)) {
                 releaseWriterSemaphoreIfHeld();
                 ok = false;
@@ -261,20 +264,24 @@ private:
     // JSIAndroidBridgeModule.cpp's ApplyCallback and Database.kt#transaction() use —
     // completes the three-writer-path parity with iOS (inTransaction /
     // SliceImportDatabaseAdapter::beginTransaction / native-sync-apply).
-    void acquireWriterSemaphore() {
+    // Returns true only if the permit was actually taken. The caller must record this
+    // into semaphoreHeld_ and release iff it is true — see the note at the call site.
+    bool acquireWriterSemaphore() {
         JNIEnv* env = watermelondb::getEnv();
         if (!env || !bridgeGlobal_) {
-            return;
+            return false;
         }
         jclass cls = env->GetObjectClass(bridgeGlobal_);
         if (!cls) {
             env->ExceptionClear();
-            return;
+            return false;
         }
-        jmethodID acquireSem = env->GetMethodID(cls, "acquireWriterTransactionSemaphore", "(ILjava/lang/String;)V");
+        jmethodID acquireSem = env->GetMethodID(cls, "acquireWriterTransactionSemaphore", "(ILjava/lang/String;)Z");
+        bool acquired = false;
         if (acquireSem) {
             jstring jHolderName = env->NewStringUTF("slice-import");
-            env->CallVoidMethod(bridgeGlobal_, acquireSem, connectionTag_, jHolderName);
+            acquired = env->CallBooleanMethod(
+                bridgeGlobal_, acquireSem, connectionTag_, jHolderName) == JNI_TRUE;
             env->DeleteLocalRef(jHolderName);
         } else {
             env->ExceptionClear();
@@ -282,7 +289,11 @@ private:
         env->DeleteLocalRef(cls);
         if (env->ExceptionCheck()) {
             env->ExceptionClear();
+            // Pending throw — the Kotlin side did not complete, so its return value is
+            // not trustworthy. Treat as not acquired and never release.
+            acquired = false;
         }
+        return acquired;
     }
 
     void releaseWriterSemaphoreIfHeld() {

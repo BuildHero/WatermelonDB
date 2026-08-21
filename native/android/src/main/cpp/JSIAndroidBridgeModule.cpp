@@ -238,20 +238,28 @@ static void releaseSqlite(jobject bridge, jint tag) {
 // writerTransactionSemaphore.wait()/signal() around getRawConnection/applySyncPayload.
 // Blocking call (Semaphore.acquire() on the Kotlin side) — this callback already runs
 // off the JS thread (OkHttp's callback thread), so blocking here is safe.
-static void acquireWriterSemaphore(jobject bridge, jint tag, const char* holderName) {
+// Returns true only if the permit was actually taken — the caller must release iff it
+// gets true. Every early-out below returns false: previously this returned void, so a
+// JNI failure (no env, no class, missing method, or a Java-side throw cleared by the
+// ExceptionCheck at the end) was indistinguishable from success, and the caller went on
+// to release a permit it never held. On a binary semaphore that *raises* the permit
+// count from 1 to 2 and silently voids mutual exclusion for the process's lifetime —
+// turning Tier 2 into a no-op that still passes every test.
+static bool acquireWriterSemaphore(jobject bridge, jint tag, const char* holderName) {
     JNIEnv* env = facebook::jni::Environment::current();
     if (!env || !bridge) {
-        return;
+        return false;
     }
     jclass cls = env->GetObjectClass(bridge);
     if (!cls) {
         env->ExceptionClear();
-        return;
+        return false;
     }
-    jmethodID acquireSem = env->GetMethodID(cls, "acquireWriterTransactionSemaphore", "(ILjava/lang/String;)V");
+    jmethodID acquireSem = env->GetMethodID(cls, "acquireWriterTransactionSemaphore", "(ILjava/lang/String;)Z");
+    bool acquired = false;
     if (acquireSem) {
         jstring jHolderName = env->NewStringUTF(holderName);
-        env->CallVoidMethod(bridge, acquireSem, tag, jHolderName);
+        acquired = env->CallBooleanMethod(bridge, acquireSem, tag, jHolderName) == JNI_TRUE;
         env->DeleteLocalRef(jHolderName);
     } else {
         env->ExceptionClear();
@@ -259,7 +267,11 @@ static void acquireWriterSemaphore(jobject bridge, jint tag, const char* holderN
     env->DeleteLocalRef(cls);
     if (env->ExceptionCheck()) {
         env->ExceptionClear();
+        // A pending throw means the Kotlin side did not complete; its return value is
+        // not trustworthy, so treat this as "not acquired" and never release.
+        acquired = false;
     }
+    return acquired;
 }
 
 static void releaseWriterSemaphore(jobject bridge, jint tag) {
@@ -283,6 +295,33 @@ static void releaseWriterSemaphore(jobject bridge, jint tag) {
         env->ExceptionClear();
     }
 }
+
+// MOBILE-6492: RAII pairing for the writer semaphore. Releases exactly once, and only
+// if the acquire succeeded, on every exit path — early return, or a throw out of
+// applySyncPayload (its STL container work can raise std::bad_alloc under the memory
+// pressure that a wedged, WAL-growing database makes more likely, and a leaked permit
+// there would deadlock every writer until process death).
+class WriterSemaphoreGuard {
+public:
+    WriterSemaphoreGuard(jobject bridge, jint tag, const char* holderName)
+        : bridge_(bridge), tag_(tag), held_(acquireWriterSemaphore(bridge, tag, holderName)) {}
+
+    ~WriterSemaphoreGuard() {
+        if (held_) {
+            releaseWriterSemaphore(bridge_, tag_);
+        }
+    }
+
+    bool held() const { return held_; }
+
+    WriterSemaphoreGuard(const WriterSemaphoreGuard&) = delete;
+    WriterSemaphoreGuard& operator=(const WriterSemaphoreGuard&) = delete;
+
+private:
+    jobject bridge_;
+    jint tag_;
+    bool held_;
+};
 
 JSIAndroidBridgeModule::JSIAndroidBridgeModule(std::shared_ptr<CallInvoker> jsInvoker)
 : NativeWatermelonDBModuleCxxSpec(std::move(jsInvoker)) {
@@ -310,17 +349,21 @@ JSIAndroidBridgeModule::JSIAndroidBridgeModule(std::shared_ptr<CallInvoker> jsIn
         // matches iOS's JSISwiftWrapperModule.mm wait()/signal() around this same
         // apply-and-write sequence. Without this, this write raced JS-driven
         // Database.kt#transaction() calls on the same file with no serialization.
-        acquireWriterSemaphore(databaseBridge, (jint)syncConnectionTag_, "native-sync:apply");
+        //
+        // Proceed even when the permit was not granted (timeout, or a JNI failure):
+        // busy_timeout arbitrates at the SQLite layer, exactly as on the JS path in
+        // Database.kt#transaction(). Bailing out here instead would convert a
+        // contended sync into a failed one and stall the pull cursor.
+        WriterSemaphoreGuard writerGuard(
+            databaseBridge, (jint)syncConnectionTag_, "native-sync:apply");
         std::string error;
         sqlite3* db = acquireSqlite(databaseBridge, (jint)syncConnectionTag_, error);
         if (!db) {
             errorMessage = error;
-            releaseWriterSemaphore(databaseBridge, (jint)syncConnectionTag_);
             return false;
         }
         bool ok = watermelondb::applySyncPayload(db, payload, errorMessage, changeset);
         releaseSqlite(databaseBridge, (jint)syncConnectionTag_);
-        releaseWriterSemaphore(databaseBridge, (jint)syncConnectionTag_);
         return ok;
     });
     syncEngine_->setAuthTokenRequestCallback([this]() {

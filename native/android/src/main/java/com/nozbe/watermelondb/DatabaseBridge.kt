@@ -409,20 +409,85 @@ class DatabaseBridge(private val reactContext: ReactApplicationContext) :
     // DatabaseBridge.swift getWriterTransactionSemaphore/setWriterHolder/
     // clearWriterHolder accessors used by JSISwiftWrapperModule.mm.
     //
-    // Blocking call — must be invoked off the JS thread (the native sync-apply path
-    // already runs on OkHttp's callback thread, never the JS thread).
-    fun acquireWriterTransactionSemaphore(tag: ConnectionTag, holderName: String) {
-        val driver = getDriver(tag)
-        val database = driver.getDatabase()
-        database.acquireWriterTransactionSemaphore()
-        database.setWriterHolder(holderName)
+    // Blocking call, bounded by Database.writerSemaphoreTimeoutMs — must be invoked off
+    // the JS thread (the native sync-apply path already runs on OkHttp's callback
+    // thread, never the JS thread).
+    //
+    // Returns true only if the permit was actually taken; the caller must release iff
+    // it got true. Every failure path returns false rather than throwing across the
+    // JNI boundary: a Java exception here would be swallowed by the caller's
+    // ExceptionClear(), leaving it to "release" a permit it never held — which raises
+    // the binary semaphore's permit count and silently voids mutual exclusion for the
+    // remaining life of the process.
+    fun acquireWriterTransactionSemaphore(tag: ConnectionTag, holderName: String): Boolean {
+        return try {
+            val database = getDriver(tag).getDatabase()
+            // Pass the holder through — Database records it only for the outermost
+            // frame, so a nested acquire can't overwrite the real owner's name.
+            val acquired = database.acquireWriterTransactionSemaphore(holderName)
+            if (!acquired) {
+                android.util.Log.w(
+                    "WatermelonDB",
+                    "acquireWriterTransactionSemaphore timed out for tag $tag " +
+                        "(holder=${database.currentWriterHolder() ?: "unknown"}, " +
+                        "requester=$holderName)"
+                )
+            }
+            acquired
+        } catch (e: Exception) {
+            android.util.Log.e(
+                "WatermelonDB",
+                "acquireWriterTransactionSemaphore failed for tag $tag",
+                e
+            )
+            false
+        }
+    }
+
+    /**
+     * MOBILE-6492: writer-contention counters for this connection's database file.
+     *
+     * Exists so the app can fold them into its on-device issue report. That report is
+     * assembled from the JS logger and captures no logcat, so `Database`'s own
+     * `Log.w` on a semaphore timeout never reaches the one artifact a field
+     * investigation can read — which is why the blast-radius sweep could identify
+     * which call sites were *failing* but never which writer was *holding*.
+     *
+     * `maxWaitMs` is the field measurement that matters: it is how long a writer
+     * actually waited before succeeding, i.e. how long some other writer held the
+     * file. Values near `timeoutBoundMs` indicate a wedged holder; single-digit
+     * seconds indicate ordinary transient contention.
+     *
+     * Android-only for now — the app must guard the call (the iOS bridge has no
+     * counterpart yet), and nothing consumes it inside this package.
+     */
+    @ReactMethod
+    fun getWriterContentionStats(tag: ConnectionTag, promise: Promise) {
+        try {
+            val snapshot = getDriver(tag).getDatabase().writerContentionSnapshot()
+            val map = Arguments.createMap()
+            snapshot.forEach { (key, value) ->
+                when (value) {
+                    is Long -> map.putDouble(key, value.toDouble())
+                    is Int -> map.putInt(key, value)
+                    else -> map.putString(key, value.toString())
+                }
+            }
+            promise.resolve(map)
+        } catch (e: Exception) {
+            // Diagnostics must never break a caller. An unavailable connection is an
+            // expected outcome here, not an error worth rejecting on.
+            android.util.Log.w("WatermelonDB", "getWriterContentionStats failed for tag $tag", e)
+            promise.resolve(null)
+        }
     }
 
     fun releaseWriterTransactionSemaphore(tag: ConnectionTag) {
         try {
             val driver = getDriver(tag)
             val database = driver.getDatabase()
-            database.clearWriterHolder()
+            // No explicit clearWriterHolder() — release() clears it on the outermost
+            // frame only, so clearing here would wipe the owner mid-nesting.
             database.releaseWriterTransactionSemaphore()
         } catch (e: Exception) {
             android.util.Log.e("WatermelonDB", "releaseWriterTransactionSemaphore failed for tag $tag", e)

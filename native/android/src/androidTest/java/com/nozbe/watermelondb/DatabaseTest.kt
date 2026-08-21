@@ -537,4 +537,360 @@ class DatabaseTest {
             elapsedMs >= holdDurationMs - 200 // small tolerance for scheduling jitter
         )
     }
+
+    /**
+     * MOBILE-6492 — the case the incident actually was, and the one
+     * `orphanedHolderBlocksSecondWriterUntilReleaseInsteadOfThrowing` above does NOT
+     * cover: a holder that never releases at all.
+     *
+     * That test sleeps 7s and then releases, so it only proves a *bounded* hold no
+     * longer throws. The reported failure was a native sync-apply transaction orphaned
+     * by the ON_START foreground-cancel path (which resets bookkeeping without rolling
+     * back) — the lock was held for 9 minutes and survived a full JS re-init. Against a
+     * holder like that, an unbounded `Semaphore.acquire()` never returns, converting a
+     * visible SQLiteDatabaseLockedException into a permanent silent stall of every
+     * writer on the file.
+     *
+     * So the invariant under test is liveness, not success: a writer must always come
+     * back — with or without an error — inside a bound derived from
+     * `writerSemaphoreTimeoutMs`. It must never hang.
+     */
+    @Test
+    fun wedgedHolderDoesNotBlockSecondWriterForever() {
+        val sharedName = "wmdb-wedged-holder-${System.nanoTime()}"
+        val timeoutMs = 2000L
+
+        val originalTimeout = Database.writerSemaphoreTimeoutMs
+        Database.writerSemaphoreTimeoutMs = timeoutMs
+        try {
+            val db1 = makeDatabaseWithName(sharedName)
+            val db2 = makeDatabaseWithName(sharedName)
+            db1.execute(
+                "CREATE TABLE IF NOT EXISTS test_wedged (id TEXT PRIMARY KEY, value TEXT)"
+            )
+
+            // Take the permit through the same accessor the native sync-apply path uses
+            // and deliberately NEVER release it — standing in for the orphaned native
+            // apply transaction. No matching release anywhere in this test.
+            assertTrue(
+                "Precondition: the wedging acquire should succeed on an idle semaphore",
+                db1.acquireWriterTransactionSemaphore()
+            )
+
+            val db2Done = CountDownLatch(1)
+            val db2Error = AtomicReference<Throwable?>(null)
+            val startMs = System.currentTimeMillis()
+
+            Thread {
+                try {
+                    db2.transaction {
+                        db2.execute(
+                            "INSERT OR REPLACE INTO test_wedged (id, value) VALUES (?, ?)",
+                            arrayOf("w1", "written-despite-wedge")
+                        )
+                    }
+                } catch (t: Throwable) {
+                    db2Error.set(t)
+                } finally {
+                    db2Done.countDown()
+                }
+            }.start()
+
+            // The assertion that matters: it RETURNS. Generous ceiling so this fails on
+            // a genuine hang, not on emulator jitter. Pre-fix this times out here.
+            assertTrue(
+                "Second writer never returned — it is blocked forever behind a holder " +
+                    "that never releases (unbounded acquire regression)",
+                db2Done.await(timeoutMs * 5, TimeUnit.MILLISECONDS)
+            )
+
+            // It must have actually waited for the bound rather than sailing past a
+            // semaphore that was not really held.
+            val elapsedMs = System.currentTimeMillis() - startMs
+            assertTrue(
+                "Expected the writer to wait out the ${timeoutMs}ms bound, waited ${elapsedMs}ms",
+                elapsedMs >= timeoutMs - 200
+            )
+
+            // Whether the write itself succeeded is deliberately NOT asserted: past the
+            // bound we proceed unserialized and busy_timeout arbitrates, so either
+            // outcome is correct. Only hanging is a failure.
+        } finally {
+            Database.writerSemaphoreTimeoutMs = originalTimeout
+        }
+    }
+
+    /**
+     * MOBILE-6492 — the writer semaphore must be reentrant.
+     *
+     * `Database.transaction()` nests in production. Both `DatabaseDriver.setUpSchema`
+     * and `.migrate` do:
+     *
+     *     database.transaction {                        // takes the only permit
+     *         database.unsafeExecuteStatements(sql)     // transacts AGAIN, same thread
+     *         database.userVersion = ...
+     *     }
+     *
+     * and `unsafeExecuteStatements` is itself `transaction { ... }`. `Semaphore(1)` is
+     * not reentrant, so a non-reentrant implementation makes the inner frame wait on the
+     * permit its own thread holds — a self-deadlock with no counterparty to release it.
+     * Those two call sites are first-launch schema setup and every app upgrade carrying
+     * a migration, so this must never regress.
+     *
+     * The existing suite cannot catch it: every other test drives `Database` directly
+     * and never goes through `DatabaseDriver`, so neither nesting path is exercised.
+     * This test reproduces the nesting shape against the same public API.
+     */
+    @Test
+    fun nestedTransactionDoesNotSelfDeadlock() {
+        val timeoutMs = 1500L
+        val originalTimeout = Database.writerSemaphoreTimeoutMs
+        // Deliberately short: if reentrancy regresses, the inner frame blocks and this
+        // fails fast on the latch below instead of stalling the whole suite.
+        Database.writerSemaphoreTimeoutMs = timeoutMs
+        try {
+            val database = makeDatabase()
+            database.execute(
+                "CREATE TABLE IF NOT EXISTS test_nested (id TEXT PRIMARY KEY, value TEXT)"
+            )
+
+            val done = CountDownLatch(1)
+            val failure = AtomicReference<Throwable?>(null)
+            val startMs = System.currentTimeMillis()
+
+            Thread {
+                try {
+                    // Mirrors DatabaseDriver.setUpSchema: an outer transaction wrapping
+                    // unsafeExecuteStatements, which opens its own inner transaction.
+                    database.transaction {
+                        database.unsafeExecuteStatements(
+                            "INSERT OR REPLACE INTO test_nested (id, value) VALUES ('n1', 'inner');"
+                        )
+                        database.userVersion = 42
+                    }
+                } catch (t: Throwable) {
+                    failure.set(t)
+                } finally {
+                    done.countDown()
+                }
+            }.start()
+
+            assertTrue(
+                "Nested transaction never completed — the inner frame is deadlocked on " +
+                    "the permit its own thread holds (writer semaphore lost reentrancy)",
+                done.await(timeoutMs * 4, TimeUnit.MILLISECONDS)
+            )
+            assertNull("Nested transaction threw: ${failure.get()?.message}", failure.get())
+
+            // It must not have merely *survived* by timing out the inner acquire — that
+            // would still stall every schema setup and migration for the bound.
+            val elapsedMs = System.currentTimeMillis() - startMs
+            assertTrue(
+                "Nested transaction took ${elapsedMs}ms — it waited out the semaphore " +
+                    "bound instead of re-entering, so reentrancy is not working",
+                elapsedMs < timeoutMs
+            )
+
+            // The nested write really landed, and the permit was fully surrendered.
+            assertEquals(42, database.userVersion)
+            assertEquals(
+                "Permit must be back to exactly 1 after the outermost frame exits",
+                1,
+                database.availableWriterPermitsForTest()
+            )
+        } finally {
+            Database.writerSemaphoreTimeoutMs = originalTimeout
+        }
+    }
+
+    /**
+     * MOBILE-6492 — the writer-contention counters must capture the two facts a field
+     * investigation cannot otherwise get.
+     *
+     * The on-device issue report is assembled from the JS logger and captures no
+     * logcat, so `Database`'s `Log.w` on a timeout never reaches it. A sweep of 1,198
+     * production reports could therefore establish which call sites were *failing*
+     * (sync-coordinator, syncDatabase, JobTaskSync) but never which writer was
+     * *holding*, nor for how long — which is exactly what distinguishes a wedged
+     * holder from ordinary transient contention.
+     *
+     * So this pins both: the holder named at timeout, and `maxWaitMs` as a real
+     * measurement of how long another writer held the file.
+     */
+    @Test
+    fun writerContentionStatsRecordHolderAndWaitDuration() {
+        val sharedName = "wmdb-contention-stats-${System.nanoTime()}"
+        val timeoutMs = 800L
+        val holdMs = 400L
+
+        val originalTimeout = Database.writerSemaphoreTimeoutMs
+        Database.writerSemaphoreTimeoutMs = timeoutMs
+        try {
+            val db1 = makeDatabaseWithName(sharedName)
+            val db2 = makeDatabaseWithName(sharedName)
+
+            // 1. A timeout must name the holder that caused it.
+            assertTrue(
+                "Precondition: first acquire on an idle semaphore",
+                db1.acquireWriterTransactionSemaphore("test-holder")
+            )
+
+            val timedOutResult = AtomicReference<Boolean?>(null)
+            val timeoutDone = CountDownLatch(1)
+            Thread {
+                try {
+                    timedOutResult.set(db2.acquireWriterTransactionSemaphore())
+                } finally {
+                    timeoutDone.countDown()
+                }
+            }.start()
+
+            assertTrue(
+                "Contender never returned from acquire",
+                timeoutDone.await(timeoutMs * 6, TimeUnit.MILLISECONDS)
+            )
+            assertFalse("Contender should have timed out", timedOutResult.get()!!)
+
+            val afterTimeout = db1.writerContentionSnapshot()
+            assertEquals("One timeout should be recorded", 1L, afterTimeout["timeouts"])
+            assertEquals(
+                "The timeout must name the writer that was holding the permit",
+                "test-holder",
+                afterTimeout["lastTimeoutHolder"]
+            )
+
+            db1.releaseWriterTransactionSemaphore()
+
+            // 2. A contended-but-successful acquire must record how long it waited —
+            //    the proxy for how long the other writer actually held the file.
+            assertTrue(
+                "Re-acquire after release",
+                db1.acquireWriterTransactionSemaphore("holder-2")
+            )
+
+            val waitedResult = AtomicReference<Boolean?>(null)
+            val waitDone = CountDownLatch(1)
+            Thread {
+                try {
+                    val got = db2.acquireWriterTransactionSemaphore()
+                    waitedResult.set(got)
+                    // Release on the acquiring thread: reentrancy depth is per-thread,
+                    // so a cross-thread release would find depth 0 and correctly refuse.
+                    if (got) db2.releaseWriterTransactionSemaphore()
+                } finally {
+                    waitDone.countDown()
+                }
+            }.start()
+
+            Thread.sleep(holdMs)
+            db1.releaseWriterTransactionSemaphore()
+
+            assertTrue(
+                "Waiting writer never completed",
+                waitDone.await(timeoutMs * 6, TimeUnit.MILLISECONDS)
+            )
+            assertTrue(
+                "The waiting writer should have succeeded once the hold ended",
+                waitedResult.get()!!
+            )
+
+            val afterWait = db2.writerContentionSnapshot()
+            val maxWaitMs = afterWait["maxWaitMs"] as Long
+            assertTrue(
+                "maxWaitMs should reflect the ~${holdMs}ms hold, got ${maxWaitMs}ms",
+                maxWaitMs >= holdMs - 150
+            )
+            assertTrue(
+                "The contended acquire should have been counted, got ${afterWait["contendedAcquires"]}",
+                (afterWait["contendedAcquires"] as Long) >= 1L
+            )
+            assertEquals(
+                "The reported bound should be the active timeout",
+                timeoutMs,
+                afterWait["timeoutBoundMs"]
+            )
+        } finally {
+            Database.writerSemaphoreTimeoutMs = originalTimeout
+        }
+    }
+
+    /**
+     * MOBILE-6492 — guards the silent-no-op bug: releasing a binary Semaphore without a
+     * matching acquire *raises* its permit count (1 -> 2), after which two writers hold
+     * it simultaneously and Tier 2's mutual exclusion is gone for the life of the
+     * process, with every existing test still green.
+     *
+     * The reachable path was the JNI boundary: `acquireWriterSemaphore` used to return
+     * void, so a failure (no env/class, missing method, or a Java-side throw cleared by
+     * ExceptionCheck) was indistinguishable from success and the caller released
+     * anyway. Acquire now reports success and callers release only on true; this pins
+     * the invariant that a failed acquire followed by no release cannot inflate permits.
+     */
+    @Test
+    fun failedAcquireDoesNotInflatePermits() {
+        val sharedName = "wmdb-permit-inflation-${System.nanoTime()}"
+        val timeoutMs = 500L
+
+        val originalTimeout = Database.writerSemaphoreTimeoutMs
+        Database.writerSemaphoreTimeoutMs = timeoutMs
+        try {
+            val db1 = makeDatabaseWithName(sharedName)
+            val db2 = makeDatabaseWithName(sharedName)
+
+            assertTrue("First acquire should succeed", db1.acquireWriterTransactionSemaphore())
+            assertEquals(
+                "Binary semaphore should have no permits left while held",
+                0,
+                db1.availableWriterPermitsForTest()
+            )
+
+            // The contending acquire MUST run on another thread. Reentrancy is keyed on
+            // (thread, database file), so a second acquire on *this* thread would
+            // correctly re-enter and return true — that is the nesting case, not the
+            // contention case. Only a different thread actually contends for the permit.
+            val contenderResult = AtomicReference<Boolean?>(null)
+            val contenderDone = CountDownLatch(1)
+            Thread {
+                try {
+                    contenderResult.set(db2.acquireWriterTransactionSemaphore())
+                } finally {
+                    contenderDone.countDown()
+                }
+            }.start()
+
+            assertTrue(
+                "Contending thread never returned from acquire",
+                contenderDone.await(timeoutMs * 6, TimeUnit.MILLISECONDS)
+            )
+            assertFalse(
+                "A contending thread's acquire must time out and report false while " +
+                    "another thread holds the permit",
+                contenderResult.get()!!
+            )
+
+            // The failed acquirer correctly does not release. Only the real holder does.
+            db1.releaseWriterTransactionSemaphore()
+
+            assertEquals(
+                "Permit count must return to exactly 1 — anything higher means an " +
+                    "unmatched release inflated the semaphore and mutual exclusion is void",
+                1,
+                db1.availableWriterPermitsForTest()
+            )
+
+            // And exclusion still holds afterwards: one permit, taken by one acquirer.
+            assertTrue(
+                "Acquire should work after a clean release",
+                db1.acquireWriterTransactionSemaphore()
+            )
+            assertEquals(
+                "Still a binary semaphore after a full acquire/release cycle",
+                0,
+                db1.availableWriterPermitsForTest()
+            )
+            db1.releaseWriterTransactionSemaphore()
+        } finally {
+            Database.writerSemaphoreTimeoutMs = originalTimeout
+        }
+    }
 }

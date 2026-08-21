@@ -15,6 +15,8 @@ import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
 class Database(private val name: String, private val context: Context) {
 
@@ -35,7 +37,89 @@ class Database(private val name: String, private val context: Context) {
 
         internal fun writerTransactionSemaphoreFor(path: String): Semaphore =
             writerTransactionSemaphores.getOrPut(path) { Semaphore(1) }
+
+        // MOBILE-6492: how long a writer waits for the semaphore before giving up.
+        // Sized from the incident analysis: a real sync transaction holds the writer
+        // for 5-10s, so 30s leaves ample headroom for the legitimate case, while
+        // being far below the multi-minute wedge this bound exists to escape.
+        //
+        // A bound is mandatory, not defensive. `acquire()` never returns if a holder
+        // never releases — which is precisely the reported failure (a native
+        // sync-apply transaction orphaned by the ON_START foreground-cancel path,
+        // which resets bookkeeping without rolling back). Unbounded, that turns a
+        // visible `SQLiteDatabaseLockedException` into a silent, permanent stall of
+        // every writer on the file.
+        //
+        // `var` only so instrumented tests can shrink it; nothing in production
+        // reassigns it.
+        internal var writerSemaphoreTimeoutMs = 30_000L
+
+        // MOBILE-6492: reentrancy bookkeeping for the writer semaphore, keyed by
+        // database file, per thread.
+        //
+        // `transaction()` genuinely nests in production: DatabaseDriver.setUpSchema and
+        // .migrate both wrap `database.unsafeExecuteStatements(...)` inside their own
+        // `database.transaction { }`, and unsafeExecuteStatements transacts again.
+        // Semaphore(1) is NOT reentrant, so without this the inner frame waits on the
+        // permit its own thread is holding — an unbreakable self-deadlock on the two
+        // paths that must never hang: first-launch schema setup, and every migration.
+        //
+        // Per-thread is sound because all three writer paths acquire and release on one
+        // thread: JS transactions on the caller's thread, the native sync-apply inside a
+        // single OkHttp-callback invocation, and slice import on the single work-queue
+        // thread (SlicePlatformAndroid's gWorkThreadId) for both begin and commit.
+        private val writerDepths = object : ThreadLocal<MutableMap<String, Int>>() {
+            override fun initialValue(): MutableMap<String, Int> = HashMap()
+        }
+
+        // MOBILE-6492: writer-contention counters, per database file.
+        //
+        // These exist because the on-device issue report — the only artifact available
+        // for a field device — is written by the JS logger (`app/utils/logger`), and
+        // nothing anywhere captures logcat. So the Log.w this class emits on a timeout
+        // is invisible in exactly the artifact an investigation reads. A blast-radius
+        // sweep of 1,198 reports could establish who was failing but never who was
+        // *holding*, nor for how long.
+        //
+        // `maxWaitMs` is the load-bearing one: a successful acquire that waited N ms
+        // means some other writer held the file for ~N ms, which is a direct field
+        // measurement of real hold durations. Sustained values near
+        // `writerSemaphoreTimeoutMs` mean a genuinely wedged holder; values in the
+        // single-digit seconds mean ordinary transient contention.
+        //
+        // Read via DatabaseBridge.getWriterContentionStats so the app can fold them
+        // into its issue report.
+        private val writerStats = ConcurrentHashMap<String, WriterContentionStats>()
+
+        internal fun writerStatsFor(path: String): WriterContentionStats =
+            writerStats.getOrPut(path) { WriterContentionStats() }
+
+        // Anything above this is a real wait worth counting; below it is scheduler noise
+        // on an uncontended permit.
+        private const val CONTENDED_WAIT_THRESHOLD_MS = 50L
     }
+
+    internal class WriterContentionStats {
+        val contendedAcquires = AtomicLong(0)
+        val timeouts = AtomicLong(0)
+        val maxWaitMs = AtomicLong(0)
+
+        @Volatile
+        var lastTimeoutHolder: String? = null
+
+        fun recordWait(waitMs: Long) {
+            contendedAcquires.incrementAndGet()
+            // CAS loop: several writers can finish waiting concurrently, and a plain
+            // compare-then-set would let a smaller wait clobber a larger one.
+            while (true) {
+                val current = maxWaitMs.get()
+                if (waitMs <= current || maxWaitMs.compareAndSet(current, waitMs)) return
+            }
+        }
+    }
+
+    private val writerStatsForThisDb: WriterContentionStats
+        get() = writerStatsFor(databasePath)
 
     private val writerTransactionSemaphore: Semaphore
         get() = writerTransactionSemaphoreFor(databasePath)
@@ -50,18 +134,89 @@ class Database(private val name: String, private val context: Context) {
 
     internal fun currentWriterHolder(): String? = writerHolders[databasePath]
 
+    // MOBILE-6492: test-only view of the writer semaphore's permit count, so the
+    // permit-inflation regression test can assert the invariant (exactly one permit
+    // when idle) without widening access to the private database path.
+    internal fun availableWriterPermitsForTest(): Int =
+        writerTransactionSemaphore.availablePermits()
+
     // MOBILE-6492 (Tier 2): exposed for DatabaseBridge's JNI accessors, so the native
     // sync-apply path (JSIAndroidBridgeModule.cpp's ApplyCallback) can acquire/release
     // the same semaphore transaction() uses, around its own acquireSqliteConnection()/
     // applySyncPayload()/releaseSQLiteConnection() sequence — mirroring iOS's
     // JSISwiftWrapperModule.mm wait()/signal() around getRawConnection/applySyncPayload.
-    // Blocking — callers must invoke off the JS thread.
-    fun acquireWriterTransactionSemaphore() {
-        writerTransactionSemaphore.acquire()
+    //
+    // Reentrant, and blocks for at most `writerSemaphoreTimeoutMs`. Returns true if the
+    // caller now owns a frame and MUST pair it with releaseWriterTransactionSemaphore()
+    // — whether that frame took the permit outright or re-entered one this thread
+    // already holds. Returns false only on timeout, in which case the caller MUST NOT
+    // release: an unmatched release *raises* a binary Semaphore's permit count and
+    // silently voids mutual exclusion for the rest of the process's life.
+    fun acquireWriterTransactionSemaphore(holderName: String? = null): Boolean {
+        val depths = writerDepths.get()!!
+        val depth = depths[databasePath] ?: 0
+        if (depth > 0) {
+            // Nested frame on the thread that already owns the permit — must not touch
+            // the semaphore at all. See the writerDepths note above.
+            depths[databasePath] = depth + 1
+            return true
+        }
+        // Capture the holder BEFORE waiting: once we time out, whoever held the permit
+        // may already have released and been replaced, so reading it afterwards can
+        // name the wrong owner (or nobody).
+        val contendedBy = currentWriterHolder()
+        val startNs = System.nanoTime()
+        val acquired =
+            writerTransactionSemaphore.tryAcquire(writerSemaphoreTimeoutMs, TimeUnit.MILLISECONDS)
+        val waitedMs = (System.nanoTime() - startNs) / 1_000_000
+        val stats = writerStatsForThisDb
+
+        if (!acquired) {
+            stats.timeouts.incrementAndGet()
+            stats.lastTimeoutHolder = contendedBy ?: "unknown"
+            return false
+        }
+        if (waitedMs >= CONTENDED_WAIT_THRESHOLD_MS) {
+            stats.recordWait(waitedMs)
+        }
+
+        depths[databasePath] = 1
+        if (holderName != null) {
+            setWriterHolder(holderName)
+        }
+        return true
+    }
+
+    // MOBILE-6492: snapshot of the writer-contention counters for this database file.
+    // Cheap, allocation-light, and safe to call from any thread.
+    internal fun writerContentionSnapshot(): Map<String, Any> {
+        val stats = writerStatsForThisDb
+        return mapOf(
+            "contendedAcquires" to stats.contendedAcquires.get(),
+            "timeouts" to stats.timeouts.get(),
+            "maxWaitMs" to stats.maxWaitMs.get(),
+            "timeoutBoundMs" to writerSemaphoreTimeoutMs,
+            "lastTimeoutHolder" to (stats.lastTimeoutHolder ?: ""),
+            "currentHolder" to (currentWriterHolder() ?: "")
+        )
     }
 
     fun releaseWriterTransactionSemaphore() {
-        writerTransactionSemaphore.release()
+        val depths = writerDepths.get()!!
+        when (val depth = depths[databasePath] ?: 0) {
+            0 -> Log.w(
+                "watermelondb",
+                "releaseWriterTransactionSemaphore called without a held permit; " +
+                    "ignoring (releasing would inflate the permit count and void " +
+                    "writer mutual exclusion for this process)"
+            )
+            1 -> {
+                depths.remove(databasePath)
+                clearWriterHolder()
+                writerTransactionSemaphore.release()
+            }
+            else -> depths[databasePath] = depth - 1
+        }
     }
 
     private val writerDb: SQLiteDatabase by lazy {
@@ -296,8 +451,22 @@ class Database(private val name: String, private val context: Context) {
         // method's own beginTransaction()/endTransaction() bookkeeping entirely.
         // Mirrors iOS's Database.swift#inTransaction (writerTransactionSemaphore.wait()
         // before beginTransaction(), signal() in the equivalent of `defer`).
-        writerTransactionSemaphore.acquire()
-        setWriterHolder("js-action")
+        //
+        // Bounded, unlike iOS's unconditional wait(): on timeout we proceed WITHOUT the
+        // permit and let `PRAGMA busy_timeout` (Tier 1) arbitrate at the SQLite layer.
+        // That deliberately degrades to the pre-Tier-2 behaviour — a possible
+        // SQLiteDatabaseLockedException — rather than stalling this writer forever
+        // behind a holder that may never release. Serialization is an optimization
+        // here; never hanging is a correctness requirement.
+        val acquired = acquireWriterTransactionSemaphore("js-action")
+        if (!acquired) {
+            Log.w(
+                "watermelondb",
+                "writer semaphore timed out after ${writerSemaphoreTimeoutMs}ms " +
+                    "(holder=${currentWriterHolder() ?: "unknown"}); proceeding " +
+                    "unserialized — busy_timeout will arbitrate"
+            )
+        }
         try {
             writerDb.beginTransaction()
             incrementTransactionDepth()
@@ -318,8 +487,13 @@ class Database(private val name: String, private val context: Context) {
                 decrementTransactionDepth()
             }
         } finally {
-            clearWriterHolder()
-            writerTransactionSemaphore.release()
+            // Only unwind a frame we actually entered. Releasing after a timed-out
+            // acquire would inflate the permit count; and release() itself decides
+            // whether this is the outermost frame, so the holder name survives for the
+            // duration of a nested transaction.
+            if (acquired) {
+                releaseWriterTransactionSemaphore()
+            }
         }
     }
 
