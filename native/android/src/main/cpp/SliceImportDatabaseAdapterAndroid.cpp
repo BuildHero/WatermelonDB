@@ -65,6 +65,7 @@ public:
         : bridgeGlobal_(nullptr)
         , connectionTag_(connectionTag)
         , transactionStarted_(false)
+        , semaphoreHeld_(false)
         , db_(nullptr) {
         JNIEnv* env = watermelondb::getEnv();
         if (env && bridge) {
@@ -93,7 +94,17 @@ public:
                 ok = false;
                 return;
             }
+            // MOBILE-6492 (Tier 2): acquire before touching SQLite, matching iOS's
+            // SliceImportDatabaseAdapter.mm::beginTransaction (wait() before BEGIN
+            // IMMEDIATE) — serializes slice-import writes against JS-driven
+            // Database.kt#transaction() and the native sync-apply path on the same file.
+            // Track only what was actually granted. Setting this unconditionally would
+            // let a timed-out or JNI-failed acquire be "released" later, raising the
+            // binary semaphore's permit count and silently voiding mutual exclusion.
+            // Proceed either way — busy_timeout above arbitrates at the SQLite layer.
+            semaphoreHeld_ = acquireWriterSemaphore();
             if (!ensureConnection(errorMessage)) {
+                releaseWriterSemaphoreIfHeld();
                 ok = false;
                 return;
             }
@@ -106,6 +117,7 @@ public:
             execSQL(db_, "PRAGMA wal_autocheckpoint=10000;", ignored);
             if (!execSQL(db_, "BEGIN IMMEDIATE;", errorMessage)) {
                 releaseConnection();
+                releaseWriterSemaphoreIfHeld();
                 ok = false;
                 return;
             }
@@ -113,6 +125,7 @@ public:
             ownerThread_ = std::this_thread::get_id();
             ok = true;
         }, &errorMessage)) {
+            releaseWriterSemaphoreIfHeld();
             return false;
         }
         return ok;
@@ -147,8 +160,13 @@ public:
             releaseConnection();
             ok = true;
         }, &errorMessage)) {
+            releaseWriterSemaphoreIfHeld();
             return false;
         }
+        // Release after commit (or the internal rollback-on-commit-failure path
+        // above) has fully released the connection — mirrors iOS releasing the
+        // semaphore once its equivalent commit sequence completes.
+        releaseWriterSemaphoreIfHeld();
         return ok;
     }
 
@@ -160,6 +178,7 @@ public:
             rollbackTransactionOnDB();
             releaseConnection();
         }, nullptr);
+        releaseWriterSemaphoreIfHeld();
     }
 
     bool insertRows(const std::string &tableName,
@@ -236,9 +255,72 @@ private:
     jobject bridgeGlobal_;
     jint connectionTag_;
     bool transactionStarted_;
+    bool semaphoreHeld_;
     sqlite3* db_;
     std::thread::id ownerThread_;
     watermelondb::SqliteInsertHelper insertHelper_;
+
+    // MOBILE-6492 (Tier 2): same per-connection-tag writer semaphore
+    // JSIAndroidBridgeModule.cpp's ApplyCallback and Database.kt#transaction() use —
+    // completes the three-writer-path parity with iOS (inTransaction /
+    // SliceImportDatabaseAdapter::beginTransaction / native-sync-apply).
+    // Returns true only if the permit was actually taken. The caller must record this
+    // into semaphoreHeld_ and release iff it is true — see the note at the call site.
+    bool acquireWriterSemaphore() {
+        JNIEnv* env = watermelondb::getEnv();
+        if (!env || !bridgeGlobal_) {
+            return false;
+        }
+        jclass cls = env->GetObjectClass(bridgeGlobal_);
+        if (!cls) {
+            env->ExceptionClear();
+            return false;
+        }
+        jmethodID acquireSem = env->GetMethodID(cls, "acquireWriterTransactionSemaphore", "(ILjava/lang/String;)Z");
+        bool acquired = false;
+        if (acquireSem) {
+            jstring jHolderName = env->NewStringUTF("slice-import");
+            acquired = env->CallBooleanMethod(
+                bridgeGlobal_, acquireSem, connectionTag_, jHolderName) == JNI_TRUE;
+            env->DeleteLocalRef(jHolderName);
+        } else {
+            env->ExceptionClear();
+        }
+        env->DeleteLocalRef(cls);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            // Pending throw — the Kotlin side did not complete, so its return value is
+            // not trustworthy. Treat as not acquired and never release.
+            acquired = false;
+        }
+        return acquired;
+    }
+
+    void releaseWriterSemaphoreIfHeld() {
+        if (!semaphoreHeld_) {
+            return;
+        }
+        semaphoreHeld_ = false;
+        JNIEnv* env = watermelondb::getEnv();
+        if (!env || !bridgeGlobal_) {
+            return;
+        }
+        jclass cls = env->GetObjectClass(bridgeGlobal_);
+        if (!cls) {
+            env->ExceptionClear();
+            return;
+        }
+        jmethodID releaseSem = env->GetMethodID(cls, "releaseWriterTransactionSemaphore", "(I)V");
+        if (releaseSem) {
+            env->CallVoidMethod(bridgeGlobal_, releaseSem, connectionTag_);
+        } else {
+            env->ExceptionClear();
+        }
+        env->DeleteLocalRef(cls);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
 
     bool ensureConnection(std::string &errorMessage) {
         if (db_) {
