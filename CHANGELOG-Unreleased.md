@@ -4,6 +4,9 @@
 
 ### BREAKING CHANGES
 
+- `SyncManager.configure()`'s `authTokenProvider`/`pushChangesProvider` options, `SyncManager.setAuthTokenProvider()`/`setPushChangesProvider()`, and the low-level `nativeSync` wrapper no longer accept a synchronous (non-Promise-returning) callback. This matches the native TurboModule spec (`NativeWatermelonDBModule`), whose `setAuthTokenProvider`/`setPushChangesProvider` methods require Promise-returning callbacks under RN 0.86's Codegen (a union return type like `Promise<string> | string` isn't representable in a Codegen method signature). The public TS types previously allowed a sync callback the native contract never safely supported; callers passing a synchronous provider must wrap the return value in `Promise.resolve(...)`.
+- `NativeWatermelonDBModule`'s `query`/`execSqlQuery`/`execSqlQueryOnWriter` spec methods now use `Array<Object>` instead of `Record<string, any>[]` for their Codegen-facing types (Codegen doesn't parse `Record<...>`). This only affects the native TurboModule spec used for codegen; the JS-facing dispatcher (`makeDispatcher/index.native.ts`) keeps its own richer `Record<string, any>[]` type for actual TS consumers, so this is not user-visible.
+
 ### New features
 
 - `database.enableNativeCDC()` now automatically calls `database.notify()` when native code writes to the database. This ensures observers refresh after native sync operations write directly to SQLite. When native CDC is enabled, `batch()` skips its internal `notify()` call to avoid duplicate notifications. Added `database.disableNativeCDC()` for cleanup.

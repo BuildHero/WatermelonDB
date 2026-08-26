@@ -13,8 +13,8 @@ interface NativeSyncModule extends TurboModule {
   removeSyncListener(listenerId: number): void
   setAuthToken(token: string): void
   clearAuthToken(): void
-  setAuthTokenProvider(provider: () => Promise<string> | string): void
-  setPushChangesProvider(provider: () => Promise<void> | void): void
+  setAuthTokenProvider(provider: () => Promise<string>): void
+  setPushChangesProvider(provider: () => Promise<void>): void
   initSyncSocket(socketUrl: string): void
   syncSocketAuthenticate(token: string): void
   syncSocketDisconnect(): void
@@ -98,12 +98,12 @@ export function clearAuthToken(): void {
   module.clearAuthToken()
 }
 
-export function setAuthTokenProvider(provider: () => Promise<string> | string): void {
+export function setAuthTokenProvider(provider: () => Promise<string>): void {
   const module = getNativeModule()
   module.setAuthTokenProvider(provider)
 }
 
-export function setPushChangesProvider(provider: () => Promise<void> | void): void {
+export function setPushChangesProvider(provider: () => Promise<void>): void {
   const module = getNativeModule()
   module.setPushChangesProvider(provider)
 }
