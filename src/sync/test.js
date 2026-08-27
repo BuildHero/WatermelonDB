@@ -610,6 +610,53 @@ describe('applyRemoteChanges', () => {
     await testApplyRemoteChanges(database, { invalid_project: { created: [{ id: 'foo' }] } })
     await testApplyRemoteChanges(database, { __proto__: { created: [{ id: 'foo' }] } }) // oof, naughty
   })
+  it('chunks id lookups so a changeset page over 5000 ids does not build one unbounded IN() query', async () => {
+    // Regression test: fetchRecordsForChanges used to run a single
+    // `collection.query(Q.where('id', Q.oneOf(ids))).fetch()` over the *entire* changeset page,
+    // with no chunking. Because the sqlite encoder inlines id literals into the SQL text, a
+    // large enough `ids` array can exceed sqlite's SQL text limit (SQLITE_TOOBIG). It must
+    // chunk the same way the write side (unsafeBatchesWithRecordsToApply) already does.
+    // (This is not the cause of the "sqlite error 7" bug - see the note in applyRemote.ts.)
+    const CHUNK_SIZE = 5000
+    const totalRecords = CHUNK_SIZE + 1 // forces at least 2 chunks
+    const ids = times(i => `task${i}`, totalRecords)
+
+    const { database: db, tasks } = makeDatabase()
+
+    await db.action(async () => {
+      await db.batch(...ids.map(id => prepareCreateFromRaw(tasks, { id })))
+    })
+
+    const querySpy = jest.spyOn(tasks, 'query')
+
+    await testApplyRemoteChanges(db, {
+      mock_tasks: {
+        updated: ids.map(id => ({ id, name: 'remote' })),
+      },
+    })
+
+    // Every call made against the `id IN (...)` lookup must stay at or under the chunk size,
+    // and the lookup must be split across more than one call for a changeset this large.
+    const idLookupCalls = querySpy.mock.calls
+      .map(([clause]) => clause)
+      .filter(clause => clause && clause.left === 'id' && clause.comparison?.operator === 'oneOf')
+
+    expect(idLookupCalls.length).toBeGreaterThan(1)
+    idLookupCalls.forEach(clause => {
+      expect(clause.comparison.right.values.length).toBeLessThanOrEqual(CHUNK_SIZE)
+    })
+
+    const lookedUpIds = idLookupCalls.reduce((acc, clause) => acc.concat(clause.comparison.right.values), [])
+    expect(lookedUpIds.sort()).toEqual(ids.slice().sort())
+
+    querySpy.mockRestore()
+
+    // And the records were actually all found & updated across chunk boundaries - not just
+    // the ones that happened to land in the first chunk.
+    const updatedTasks = await tasks.query().fetch()
+    expect(updatedTasks.length).toBe(totalRecords)
+    updatedTasks.forEach(task => expect(task._raw.name).toBe('remote'))
+  })
 })
 
 const observeDatabase = database => {

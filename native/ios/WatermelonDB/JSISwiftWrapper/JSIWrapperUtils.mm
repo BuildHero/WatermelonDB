@@ -34,16 +34,39 @@ static bool isReadOnlyQuery(const std::string &query) {
     return prefix.rfind("select", 0) == 0 || prefix.rfind("with", 0) == 0 || prefix.rfind("explain", 0) == 0;
 }
 
+// A nil module or a nil raw connection has to be reported as what it is. Handing the
+// resulting NULL `sqlite3*` to getStmt() is what produced
+// "sqlite error 7 (out of memory)" against a perfectly healthy database, because
+// sqlite reports a null handle as SQLITE_NOMEM.
+static void requireDatabaseBridge(jsi::Runtime &rt, DatabaseBridge *databaseBridge) {
+    if (databaseBridge == nil) {
+        throw jsi::JSError(rt, "WatermelonDB: DatabaseBridge native module is not available");
+    }
+}
+
+static sqlite3 *requireConnection(jsi::Runtime &rt, void *rawConnection, const char *which) {
+    if (rawConnection == nullptr) {
+        throw jsi::JSError(rt, std::string("WatermelonDB: no ") + which +
+                           " SQLite connection for this tag - it is absent, or was not set up "
+                           "synchronously (the JSI path requires a synchronous adapter)");
+    }
+    return static_cast<sqlite3 *>(rawConnection);
+}
+
 jsi::Value execSqlQuery(DatabaseBridge *databaseBridge, jsi::Runtime &rt, const jsi::Value &tag, const jsi::String &sql, const jsi::Array &args) {
    auto tagNumber = [[NSNumber alloc] initWithDouble:tag.asNumber()];
 
+    requireDatabaseBridge(rt, databaseBridge);
+
     const auto query = sql.utf8(rt);
-    auto db = isReadOnlyQuery(query)
+    const bool readOnly = isReadOnlyQuery(query);
+    auto rawDb = readOnly
         ? [databaseBridge getRawReadConnectionWithConnectionTag:tagNumber]
         : [databaseBridge getRawConnectionWithConnectionTag:tagNumber];
+    sqlite3 *db = requireConnection(rt, rawDb, readOnly ? "reader" : "writer");
 
-
-    auto stmt = getStmt(rt, static_cast<sqlite3*>(db), query, args);
+    StmtGuard stmtGuard(getStmt(rt, db, query, args));
+    sqlite3_stmt *stmt = stmtGuard.get();
 
     std::vector<jsi::Value> records = {};
 
@@ -57,19 +80,21 @@ jsi::Value execSqlQuery(DatabaseBridge *databaseBridge, jsi::Runtime &rt, const 
         records.push_back(std::move(record));
     }
 
-    finalizeStmt(stmt);
-
+    // stmtGuard finalizes, including on the throw paths above.
     return arrayFromStd(rt, records);
 }
 
 jsi::Value execSqlQueryOnWriter(DatabaseBridge *databaseBridge, jsi::Runtime &rt, const jsi::Value &tag, const jsi::String &sql, const jsi::Array &args) {
     auto tagNumber = [[NSNumber alloc] initWithDouble:tag.asNumber()];
 
+    requireDatabaseBridge(rt, databaseBridge);
+
     const auto query = sql.utf8(rt);
     // Always use the writer connection
-    auto db = [databaseBridge getRawConnectionWithConnectionTag:tagNumber];
+    sqlite3 *db = requireConnection(rt, [databaseBridge getRawConnectionWithConnectionTag:tagNumber], "writer");
 
-    auto stmt = getStmt(rt, static_cast<sqlite3*>(db), query, args);
+    StmtGuard stmtGuard(getStmt(rt, db, query, args));
+    sqlite3_stmt *stmt = stmtGuard.get();
 
     std::vector<jsi::Value> records = {};
 
@@ -83,18 +108,20 @@ jsi::Value execSqlQueryOnWriter(DatabaseBridge *databaseBridge, jsi::Runtime &rt
         records.push_back(std::move(record));
     }
 
-    finalizeStmt(stmt);
-
+    // stmtGuard finalizes, including on the throw paths above.
     return arrayFromStd(rt, records);
 }
 
 jsi::Value query(DatabaseBridge *databaseBridge, jsi::Runtime &rt, const jsi::Value &tag, const jsi::String &table, const jsi::String &query) {
+    requireDatabaseBridge(rt, databaseBridge);
+
     auto tagNumber = [[NSNumber alloc] initWithDouble:tag.asNumber()];
     auto tableStr = [NSString stringWithUTF8String:table.utf8(rt).c_str()];
 
-    auto db = [databaseBridge getRawReadConnectionWithConnectionTag:tagNumber];
+    sqlite3 *db = requireConnection(rt, [databaseBridge getRawReadConnectionWithConnectionTag:tagNumber], "reader");
 
-    auto stmt = getStmt(rt, static_cast<sqlite3*>(db), query.utf8(rt), jsi::Array(rt, 0));
+    StmtGuard stmtGuard(getStmt(rt, db, query.utf8(rt), jsi::Array(rt, 0)));
+    sqlite3_stmt *stmt = stmtGuard.get();
 
     std::vector<jsi::Value> records = {};
 
@@ -125,8 +152,7 @@ jsi::Value query(DatabaseBridge *databaseBridge, jsi::Runtime &rt, const jsi::Va
         }
     }
 
-    finalizeStmt(stmt);
-
+    // stmtGuard finalizes, including on the throw paths above.
     return arrayFromStd(rt, records);
 }
 

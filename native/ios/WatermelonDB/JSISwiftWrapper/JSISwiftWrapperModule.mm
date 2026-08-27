@@ -48,6 +48,26 @@ static void releaseSliceImporter(SliceImporter *importer) {
     }
 }
 
+// Resolve the DatabaseBridge instance without going through the legacy bridge.
+//
+// `[RCTBridge currentBridge]` is only ever populated by RCTCxxBridge, which
+// bridgeless RN never instantiates. Worse, when RN is built with
+// `RCT_REMOVE_LEGACY_ARCH=1` (the default from RN 0.86) `+currentBridge` compiles
+// to a literal `return nil` stub, so the lookup cannot succeed on a modern build
+// at all. The resulting nil module made every raw-connection accessor return nil,
+// and the NULL `sqlite3*` surfaced as the misleading
+// "Failed to prepare query statement - sqlite error 7 (out of memory)".
+//
+// DatabaseBridge now registers itself at init; prefer that. The bridge lookup is
+// retained purely as a fallback for older RN versions.
+static DatabaseBridge *resolveDatabaseBridge() {
+    DatabaseBridge *db = [DatabaseBridge shared];
+    if (db != nil) {
+        return db;
+    }
+    return [[RCTBridge currentBridge] moduleForClass:DatabaseBridge.class];
+}
+
 JSISwiftWrapperModule::JSISwiftWrapperModule(std::shared_ptr<CallInvoker> jsInvoker)
 : NativeWatermelonDBModuleCxxSpec(std::move(jsInvoker)) {
     syncEventState_ = std::make_shared<SyncEventState>();
@@ -58,8 +78,7 @@ JSISwiftWrapperModule::JSISwiftWrapperModule(std::shared_ptr<CallInvoker> jsInvo
     });
     syncEngine_->setApplyCallback([this](const std::string &payload, std::string &errorMessage, watermelondb::SyncChangeset &changeset) {
         @autoreleasepool {
-            RCTBridge *bridge = [RCTBridge currentBridge];
-            DatabaseBridge *db = [bridge moduleForClass: DatabaseBridge.class];
+            DatabaseBridge *db = resolveDatabaseBridge();
             if (!db) {
                 errorMessage = "DatabaseBridge not available";
                 return false;
@@ -184,8 +203,7 @@ JSISwiftWrapperModule::~JSISwiftWrapperModule() {
 }
 
 jsi::Array JSISwiftWrapperModule::query(jsi::Runtime &rt, double tag, jsi::String table, jsi::String query) {
-    RCTBridge *bridge = [RCTBridge currentBridge];
-    DatabaseBridge *db = [bridge moduleForClass: DatabaseBridge.class];
+    DatabaseBridge *db = resolveDatabaseBridge();
     
     const std::lock_guard<std::mutex> lock(mutex_);
     
@@ -198,8 +216,7 @@ jsi::Array JSISwiftWrapperModule::query(jsi::Runtime &rt, double tag, jsi::Strin
 }
 
 jsi::Array JSISwiftWrapperModule::execSqlQuery(jsi::Runtime &rt, double tag, jsi::String sql, jsi::Array args) {
-    RCTBridge *bridge = [RCTBridge currentBridge];
-    DatabaseBridge *db = [bridge moduleForClass: DatabaseBridge.class];
+    DatabaseBridge *db = resolveDatabaseBridge();
 
     const std::lock_guard<std::mutex> lock(mutex_);
 
@@ -212,8 +229,7 @@ jsi::Array JSISwiftWrapperModule::execSqlQuery(jsi::Runtime &rt, double tag, jsi
 }
 
 jsi::Array JSISwiftWrapperModule::execSqlQueryOnWriter(jsi::Runtime &rt, double tag, jsi::String sql, jsi::Array args) {
-    RCTBridge *bridge = [RCTBridge currentBridge];
-    DatabaseBridge *db = [bridge moduleForClass: DatabaseBridge.class];
+    DatabaseBridge *db = resolveDatabaseBridge();
 
     const std::lock_guard<std::mutex> lock(mutex_);
 
@@ -233,8 +249,7 @@ jsi::Value JSISwiftWrapperModule::importRemoteSlice(
     const double tagCopy = tag;
     const std::string sliceUrlUtf8 = sliceUrl.utf8(rt);
     
-    RCTBridge *bridge = [RCTBridge currentBridge];
-    DatabaseBridge *db = [bridge moduleForClass: DatabaseBridge.class];
+    DatabaseBridge *db = resolveDatabaseBridge();
     
     auto jsInvoker = jsInvoker_;
     
