@@ -42,6 +42,15 @@ public:
 
     sqlite3_stmt *get() const { return stmt_; }
 
+    // Transfers ownership to the caller: the guard no longer finalizes on
+    // destruction. Used by getStmt() to hand back a fully-prepared statement
+    // on the success path while still finalizing on every throwing path.
+    sqlite3_stmt *release() {
+        sqlite3_stmt *stmt = stmt_;
+        stmt_ = nullptr;
+        return stmt;
+    }
+
 private:
     sqlite3_stmt *stmt_;
 };

@@ -1,5 +1,5 @@
 import clone from 'lodash.clonedeep'
-import { change, times, map, length } from 'rambdax'
+import { change, times, map, length, splitEvery } from 'rambdax'
 import { skip as skip$ } from 'rxjs/operators'
 import { noop } from '../utils/fp'
 import { randomId } from '../utils/common'
@@ -7,6 +7,8 @@ import { mockDatabase, testSchema } from '../__tests__/testModels'
 import { expectToRejectWithMessage } from '../__tests__/utils'
 import { sanitizedRaw } from '../RawRecord'
 import { schemaMigrations, createTable, addColumns } from '../Schema/migrations'
+import { columnName } from '../Schema'
+import * as Q from '../QueryDescription'
 
 import { synchronize, hasUnsyncedChanges } from './index'
 import {
@@ -635,19 +637,16 @@ describe('applyRemoteChanges', () => {
       },
     })
 
-    // Every call made against the `id IN (...)` lookup must stay at or under the chunk size,
-    // and the lookup must be split across more than one call for a changeset this large.
-    const idLookupCalls = querySpy.mock.calls
-      .map(([clause]) => clause)
-      .filter(clause => clause && clause.left === 'id' && clause.comparison?.operator === 'oneOf')
-
-    expect(idLookupCalls.length).toBeGreaterThan(1)
-    idLookupCalls.forEach(clause => {
-      expect(clause.comparison.right.values.length).toBeLessThanOrEqual(CHUNK_SIZE)
+    // Assert against the same `Q.where(columnName('id'), Q.oneOf(...))` shape
+    // fetchRecordsForChanges itself builds (via the public Q API, not the
+    // internal AST fields), one call per expected chunk in order - so this
+    // test doesn't need to know anything about QueryDescription's internals.
+    const expectedChunks = splitEvery(CHUNK_SIZE)(ids)
+    expect(expectedChunks.length).toBeGreaterThan(1)
+    expect(querySpy).toHaveBeenCalledTimes(expectedChunks.length)
+    expectedChunks.forEach((idsChunk, index) => {
+      expect(querySpy.mock.calls[index][0]).toEqual(Q.where(columnName('id'), Q.oneOf(idsChunk)))
     })
-
-    const lookedUpIds = idLookupCalls.reduce((acc, clause) => acc.concat(clause.comparison.right.values), [])
-    expect(lookedUpIds.sort()).toEqual(ids.slice().sort())
 
     querySpy.mockRestore()
 

@@ -46,18 +46,23 @@ sqlite3_stmt* getStmt(jsi::Runtime &rt, sqlite3* db, std::string sql, const jsi:
     }
 
     assert(statement != nullptr);
-    
-    
+
+    // Guard the statement from here on: every throwing path below - including a
+    // JSI call like arguments.length()/getValueAtIndex()/getString() itself
+    // throwing (e.g. OOM) - now finalizes via the destructor instead of relying
+    // on an explicit sqlite3_finalize() at each call site. release() hands back
+    // the raw pointer only on the success path at the bottom.
+    StmtGuard guard(statement);
+
     int argsCount = sqlite3_bind_parameter_count(statement);
-    
+
     if (argsCount != arguments.length(rt)) {
-        sqlite3_finalize(statement); // finalize, not reset: these paths throw
         throw jsi::JSError(rt, "Number of args passed to query doesn't match number of arg placeholders");
     }
-    
+
     for (int i = 0; i < argsCount; i++) {
         jsi::Value value = arguments.getValueAtIndex(rt, i);
-        
+
         int bindResult;
         if (value.isNull() || value.isUndefined()) {
             bindResult = sqlite3_bind_null(statement, i + 1);
@@ -69,20 +74,17 @@ sqlite3_stmt* getStmt(jsi::Runtime &rt, sqlite3* db, std::string sql, const jsi:
         } else if (value.isBool()) {
             bindResult = sqlite3_bind_int(statement, i + 1, value.getBool());
         } else if (value.isObject()) {
-            sqlite3_finalize(statement); // finalize, not reset: these paths throw
             throw jsi::JSError(rt, "Invalid argument type (object) for query");
         } else {
-            sqlite3_finalize(statement); // finalize, not reset: these paths throw
             throw jsi::JSError(rt, "Invalid argument type (unknown) for query");
         }
-        
+
         if (bindResult != SQLITE_OK) {
-            sqlite3_finalize(statement); // finalize, not reset: these paths throw
             throw dbError(rt, db, "Failed to bind an argument for query");
         }
     }
-    
-    return statement;
+
+    return guard.release();
 }
 
 void finalizeStmt(sqlite3_stmt* stmt) {
