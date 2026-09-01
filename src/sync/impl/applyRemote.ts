@@ -13,6 +13,20 @@ import type {
 } from '../index'
 import { prepareCreateFromRaw, prepareUpdateFromRaw, ensureActionsEnabled } from './helpers'
 
+// Max number of ids/records handled per SQL statement (`... IN (...)` on the read side,
+// batch insert on the write side). The sqlite encoder inlines id literals into the SQL text
+// instead of binding them, so an unbounded changeset page builds one very large statement and
+// can exceed sqlite's SQL text limit (SQLITE_MAX_SQL_LENGTH, 1MB by default, reported as
+// SQLITE_TOOBIG = 18). The write side (unsafeBatchesWithRecordsToApply) already chunked at
+// 5000; this brings the read side (fetchRecordsForChanges) to parity.
+//
+// NOTE: this is hardening, NOT the fix for the "sqlite error 7 (out of memory)" sync failures
+// seen on the RN 0.86 / Expo SDK 57 upgrade. Those came from a NULL `sqlite3` handle (a nil
+// DatabaseBridge under bridgeless RN), which sqlite reports as SQLITE_NOMEM no matter the
+// statement size - they reproduced on a trivial zero-argument SELECT. The real fix is the
+// native change in this same commit.
+const MAX_IDS_PER_QUERY = 5000
+
 const idsForChanges = (
   {
     created,
@@ -34,7 +48,13 @@ const fetchRecordsForChanges = <T extends Model>(collection: Collection<T>, chan
   const ids = idsForChanges(changes)
 
   if (ids.length) {
-    return collection.query(Q.where(columnName('id'), Q.oneOf(ids))).fetch()
+    // Chunk the `id IN (...)` lookup so a large changeset page can't build an unbounded
+    // SQL IN clause (see MAX_IDS_PER_QUERY above).
+    return Promise.all(
+      splitEvery(MAX_IDS_PER_QUERY)(ids).map((idsChunk: RecordId[]) =>
+        collection.query(Q.where(columnName('id'), Q.oneOf(idsChunk))).fetch(),
+      ),
+    ).then(flatten)
   }
 
   return Promise.resolve([])
@@ -223,7 +243,7 @@ const unsafeBatchesWithRecordsToApply = (
       log,
       conflictResolver,
     ),
-    splitEvery(5000),
+    splitEvery(MAX_IDS_PER_QUERY),
     // @ts-ignore
     map(recordBatch => db.batch(...recordBatch)),
   ),

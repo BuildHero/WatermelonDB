@@ -45,8 +45,8 @@ export type SyncConfig = {
   maxAuthRetries?: number
   retryInitialMs?: number
   retryMaxMs?: number
-  authTokenProvider?: () => Promise<string> | string
-  pushChangesProvider?: () => Promise<void> | void
+  authTokenProvider?: () => Promise<string>
+  pushChangesProvider?: () => Promise<void>
   backgroundSyncTaskId?: string | null
   backgroundSyncMinIntervalMinutes?: number
   backgroundSyncRequiresNetwork?: boolean
@@ -61,7 +61,7 @@ export class SyncManager {
   private static socketioUrl: string | null = null
   private static adapter: any | null = null
   private static database: Database | null = null
-  private static authTokenProvider: (() => Promise<string> | string) | null = null
+  private static authTokenProvider: (() => Promise<string>) | null = null
   private static jsListeners = new Set<(event: SyncEvent) => void>()
 
   static configure(config: SyncConfig): void {
@@ -234,13 +234,13 @@ export class SyncManager {
     nativeClearAuthToken()
   }
 
-  static setAuthTokenProvider(provider: () => Promise<string> | string): void {
+  static setAuthTokenProvider(provider: () => Promise<string>): void {
     SyncManager.assertConfigured('setAuthTokenProvider')
     SyncManager.authTokenProvider = provider
     nativeSetAuthTokenProvider(provider)
   }
 
-  static setPushChangesProvider(provider: () => Promise<void> | void): void {
+  static setPushChangesProvider(provider: () => Promise<void>): void {
     SyncManager.assertConfigured('setPushChangesProvider')
     nativeSetPushChangesProvider(provider)
   }

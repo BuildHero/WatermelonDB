@@ -1,9 +1,9 @@
 import { TurboModule, TurboModuleRegistry } from 'react-native'
 
 export interface Spec extends TurboModule {
-  query(tag: number, table: string, query: string): Record<string, any>[]
-  execSqlQuery(tag: number, sql: string, args: Record<string, any>[]): Record<string, any>[]
-  execSqlQueryOnWriter(tag: number, sql: string, args: Record<string, any>[]): Record<string, any>[]
+  query(tag: number, table: string, query: string): Array<Object>
+  execSqlQuery(tag: number, sql: string, args: Array<Object>): Array<Object>
+  execSqlQueryOnWriter(tag: number, sql: string, args: Array<Object>): Array<Object>
   importRemoteSlice(
     tag: number,
     sliceUrl: string
@@ -18,8 +18,8 @@ export interface Spec extends TurboModule {
   removeSyncListener(listenerId: number): void
   setAuthToken(token: string): void
   clearAuthToken(): void
-  setAuthTokenProvider(provider: () => Promise<string> | string): void
-  setPushChangesProvider(provider: () => Promise<void> | void): void
+  setAuthTokenProvider(provider: () => Promise<string>): void
+  setPushChangesProvider(provider: () => Promise<void>): void
   initSyncSocket(socketUrl: string): void
   syncSocketAuthenticate(token: string): void
   syncSocketDisconnect(): void

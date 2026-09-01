@@ -10,6 +10,14 @@
 namespace watermelondb {
 
 jsi::JSError dbError(jsi::Runtime &rt, sqlite3* db, std::string description) {
+    // sqlite maps a NULL connection to SQLITE_NOMEM / "out of memory" in BOTH
+    // sqlite3_errmsg and sqlite3_extended_errcode. Reading the code off the handle
+    // therefore reports a wiring bug as an allocation failure, which is how a nil
+    // DatabaseBridge spent a long time masquerading as "sqlite error 7 (out of
+    // memory)" on a perfectly healthy database. Say what actually happened.
+    if (db == nullptr) {
+        return jsi::JSError(rt, description + " - no SQLite connection (null database handle)");
+    }
     // TODO: In serialized threading mode, those may be incorrect - probably smarter to pass result codes around?
     auto sqliteMessage = std::string(sqlite3_errmsg(db));
     auto code = sqlite3_extended_errcode(db);
@@ -18,28 +26,43 @@ jsi::JSError dbError(jsi::Runtime &rt, sqlite3* db, std::string description) {
 }
 
 sqlite3_stmt* getStmt(jsi::Runtime &rt, sqlite3* db, std::string sql, const jsi::Array &arguments) {
-    sqlite3_stmt *statement;
-    
-    int resultPrepare = sqlite3_prepare_v2(db, sql.c_str(), -1, &statement, nullptr);
-    
-    if (resultPrepare != SQLITE_OK) {
-        sqlite3_finalize(statement);
+    if (db == nullptr) {
         throw dbError(rt, db, "Failed to prepare query statement");
     }
-    
+
+    // Must be initialized: sqlite3_prepare_v2 is not guaranteed to write *ppStmt on
+    // every early-out, and the failure path below finalizes it.
+    sqlite3_stmt *statement = nullptr;
+
+    int resultPrepare = sqlite3_prepare_v2(db, sql.c_str(), -1, &statement, nullptr);
+
+    if (resultPrepare != SQLITE_OK) {
+        sqlite3_finalize(statement); // no-op on nullptr
+        // Include the actual prepare result. dbError() re-derives its code from the
+        // handle, which can disagree with the call's own return value (a NULL handle
+        // returns SQLITE_MISUSE here but reports SQLITE_NOMEM there).
+        throw dbError(rt, db,
+                      "Failed to prepare query statement (prepare rc " + std::to_string(resultPrepare) + ")");
+    }
+
     assert(statement != nullptr);
-    
-    
+
+    // Guard the statement from here on: every throwing path below - including a
+    // JSI call like arguments.length()/getValueAtIndex()/getString() itself
+    // throwing (e.g. OOM) - now finalizes via the destructor instead of relying
+    // on an explicit sqlite3_finalize() at each call site. release() hands back
+    // the raw pointer only on the success path at the bottom.
+    StmtGuard guard(statement);
+
     int argsCount = sqlite3_bind_parameter_count(statement);
-    
+
     if (argsCount != arguments.length(rt)) {
-        sqlite3_reset(statement);
         throw jsi::JSError(rt, "Number of args passed to query doesn't match number of arg placeholders");
     }
-    
+
     for (int i = 0; i < argsCount; i++) {
         jsi::Value value = arguments.getValueAtIndex(rt, i);
-        
+
         int bindResult;
         if (value.isNull() || value.isUndefined()) {
             bindResult = sqlite3_bind_null(statement, i + 1);
@@ -51,22 +74,17 @@ sqlite3_stmt* getStmt(jsi::Runtime &rt, sqlite3* db, std::string sql, const jsi:
         } else if (value.isBool()) {
             bindResult = sqlite3_bind_int(statement, i + 1, value.getBool());
         } else if (value.isObject()) {
-            sqlite3_reset(statement);
             throw jsi::JSError(rt, "Invalid argument type (object) for query");
         } else {
-            sqlite3_reset(statement);
             throw jsi::JSError(rt, "Invalid argument type (unknown) for query");
         }
-        
+
         if (bindResult != SQLITE_OK) {
-            sqlite3_reset(statement);
             throw dbError(rt, db, "Failed to bind an argument for query");
         }
     }
-    
-    // TODO: We may move this initialization earlier to avoid having to care about sqlite3_reset, but I think we'll
-    // have to implement a move constructor for it to be correct
-    return statement;
+
+    return guard.release();
 }
 
 void finalizeStmt(sqlite3_stmt* stmt) {

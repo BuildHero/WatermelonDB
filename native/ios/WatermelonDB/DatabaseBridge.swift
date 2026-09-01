@@ -9,6 +9,36 @@ final public class DatabaseBridge: RCTEventEmitter {
 
     public typealias ConnectionTag = NSNumber
 
+    // MARK: - Bridgeless-safe instance registry
+    //
+    // The C++ TurboModule (JSISwiftWrapperModule) used to reach this module via
+    // `[[RCTBridge currentBridge] moduleForClass:]`. That lookup returns nil under
+    // bridgeless RN, and unconditionally so once RN is built with
+    // `RCT_REMOVE_LEGACY_ARCH=1` — the default since RN 0.86, where `+currentBridge`
+    // compiles to a literal `return nil` stub. Every JSI query then received a NULL
+    // `sqlite3*`, which `dbError` reported as "sqlite error 7 (out of memory)"
+    // because sqlite maps a null handle to SQLITE_NOMEM. Registering the live
+    // instance here gives the C++ side a bridge-independent way to find it.
+    //
+    // Held weakly: RN owns the module's lifetime, and a strong reference here would
+    // outlive teardown and hand out a dead bridge after a reload.
+    private static let sharedInstanceLock = NSLock()
+    private static weak var sharedInstanceStorage: DatabaseBridge?
+
+    @objc
+    public static var shared: DatabaseBridge? {
+        sharedInstanceLock.lock()
+        defer { sharedInstanceLock.unlock() }
+        return sharedInstanceStorage
+    }
+
+    public override init() {
+        super.init()
+        DatabaseBridge.sharedInstanceLock.lock()
+        DatabaseBridge.sharedInstanceStorage = self
+        DatabaseBridge.sharedInstanceLock.unlock()
+    }
+
 
     @objc
     public override class func requiresMainQueueSetup() -> Bool {
