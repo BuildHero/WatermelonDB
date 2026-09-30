@@ -360,56 +360,62 @@ namespace watermelondb {
         }
 
         sqlite3* db = connection->db;
-
-        auto stmt = getStmt(rt, db, query.utf8(rt), jsi::Array(rt, 0));
-
+        sqlite3_stmt* stmt = nullptr;
         std::vector<jsi::Value> records = {};
 
-        while (true) {
-            if (getNextRowOrTrue(rt, stmt)) {
-                break;
-            }
+        try {
+            stmt = getStmt(rt, db, query.utf8(rt), jsi::Array(rt, 0));
 
-            // Validate first column is 'id' before proceeding
-            const char* firstColumnName = sqlite3_column_name(stmt, 0);
-            if (!firstColumnName || std::string(firstColumnName) != "id") {
-                finalizeStmt(stmt);
-                env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
-                throw jsi::JSError(rt, "Query result does not have 'id' as first column");
-            }
+            while (true) {
+                if (getNextRowOrTrue(rt, stmt)) {
+                    break;
+                }
 
-            const char *id = (const char *)sqlite3_column_text(stmt, 0);
+                // Validate first column is 'id' before proceeding
+                const char* firstColumnName = sqlite3_column_name(stmt, 0);
+                if (!firstColumnName || std::string(firstColumnName) != "id") {
+                    throw jsi::JSError(rt, "Query result does not have 'id' as first column");
+                }
 
-            if (!id) {
-                throw jsi::JSError(rt, "Failed to get ID of a record");
-            }
+                const char *id = (const char *)sqlite3_column_text(stmt, 0);
 
-            jstring jId = env->NewStringUTF(id);
-            jstring jTable = env->NewStringUTF(tableStr.c_str());
+                if (!id) {
+                    throw jsi::JSError(rt, "Failed to get ID of a record");
+                }
 
-            jmethodID isCachedMethod = env->GetMethodID(
-                    myNativeModuleClass.get(),
-                    "isCached",
-                    "(ILjava/lang/String;Ljava/lang/String;)Z");
+                jstring jId = env->NewStringUTF(id);
+                jstring jTable = env->NewStringUTF(tableStr.c_str());
 
-            bool isCached = env->CallBooleanMethod(bridge, isCachedMethod, jTag, jTable, jId);
-
-            if (isCached) {
-                jsi::String jsiId = jsi::String::createFromAscii(rt, id);
-                records.push_back(std::move(jsiId));
-            } else {
-                jmethodID markAsCachedMethod = env->GetMethodID(
+                jmethodID isCachedMethod = env->GetMethodID(
                         myNativeModuleClass.get(),
-                        "markAsCached",
-                        "(ILjava/lang/String;Ljava/lang/String;)V");
+                        "isCached",
+                        "(ILjava/lang/String;Ljava/lang/String;)Z");
 
-                env->CallVoidMethod(bridge, markAsCachedMethod, jTag, jTable, jId);
-                jsi::Object record = resultDictionary(rt, stmt);
-                records.push_back(std::move(record));
+                bool isCached = env->CallBooleanMethod(bridge, isCachedMethod, jTag, jTable, jId);
+
+                if (isCached) {
+                    jsi::String jsiId = jsi::String::createFromAscii(rt, id);
+                    records.push_back(std::move(jsiId));
+                } else {
+                    jmethodID markAsCachedMethod = env->GetMethodID(
+                            myNativeModuleClass.get(),
+                            "markAsCached",
+                            "(ILjava/lang/String;Ljava/lang/String;)V");
+
+                    env->CallVoidMethod(bridge, markAsCachedMethod, jTag, jTable, jId);
+                    jsi::Object record = resultDictionary(rt, stmt);
+                    records.push_back(std::move(record));
+                }
+
+                env->DeleteLocalRef(jId);
+                env->DeleteLocalRef(jTable);
             }
-
-            env->DeleteLocalRef(jId);
-            env->DeleteLocalRef(jTable);
+        } catch (...) {
+            if (stmt) {
+                finalizeStmt(stmt);
+            }
+            env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
+            throw;
         }
 
         finalizeStmt(stmt);
