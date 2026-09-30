@@ -196,7 +196,8 @@ namespace watermelondb {
 
         jsi::Value result;
         try {
-            auto stmt = getStmt(rt, reinterpret_cast<sqlite3*>(db), sql.utf8(rt), arguments);
+            StmtGuard stmtGuard(getStmt(rt, reinterpret_cast<sqlite3*>(db), sql.utf8(rt), arguments));
+            sqlite3_stmt* stmt = stmtGuard.get();
 
             std::vector<jsi::Value> records = {};
 
@@ -210,7 +211,6 @@ namespace watermelondb {
                 records.push_back(std::move(record));
             }
 
-            finalizeStmt(stmt);
             result = arrayFromStd(rt, records);
         } catch (...) {
             env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
@@ -277,7 +277,8 @@ namespace watermelondb {
 
         jsi::Value result;
         try {
-            auto stmt = getStmt(rt, reinterpret_cast<sqlite3*>(db), sql.utf8(rt), arguments);
+            StmtGuard stmtGuard(getStmt(rt, reinterpret_cast<sqlite3*>(db), sql.utf8(rt), arguments));
+            sqlite3_stmt* stmt = stmtGuard.get();
 
             std::vector<jsi::Value> records = {};
 
@@ -291,7 +292,6 @@ namespace watermelondb {
                 records.push_back(std::move(record));
             }
 
-            finalizeStmt(stmt);
             result = arrayFromStd(rt, records);
         } catch (...) {
             env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
@@ -360,11 +360,11 @@ namespace watermelondb {
         }
 
         sqlite3* db = connection->db;
-        sqlite3_stmt* stmt = nullptr;
         std::vector<jsi::Value> records = {};
 
         try {
-            stmt = getStmt(rt, db, query.utf8(rt), jsi::Array(rt, 0));
+            StmtGuard stmtGuard(getStmt(rt, db, query.utf8(rt), jsi::Array(rt, 0)));
+            sqlite3_stmt* stmt = stmtGuard.get();
 
             while (true) {
                 if (getNextRowOrTrue(rt, stmt)) {
@@ -411,14 +411,10 @@ namespace watermelondb {
                 env->DeleteLocalRef(jTable);
             }
         } catch (...) {
-            if (stmt) {
-                finalizeStmt(stmt);
-            }
             env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
             throw;
         }
 
-        finalizeStmt(stmt);
         env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
 
         return arrayFromStd(rt, records);
