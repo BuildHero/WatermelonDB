@@ -14,6 +14,11 @@ import java.io.File
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 
+// SQLite's upstream default and the Android filesystem block size; new DBs here were coming out at 1 KB.
+private const val TARGET_PAGE_SIZE = 4096L
+// VACUUM rewrites (and temporarily doubles) the file on open, so cap that one-time cost.
+private const val PAGE_SIZE_UPGRADE_MAX_BYTES = 64L * 1024 * 1024
+
 class Database(private val name: String, private val context: Context) {
 
     private val databasePath: String = resolveDatabasePath()
@@ -22,6 +27,7 @@ class Database(private val name: String, private val context: Context) {
     private val writerDb: SQLiteDatabase by lazy {
         openWithRetry {
             SQLiteDatabase.openOrCreateDatabase(databasePath, null).also {
+                upgradePageSizeIfSmall(it)
                 runPragma(it, "PRAGMA journal_mode=WAL")
                 runPragma(it, "PRAGMA synchronous=NORMAL")  // FULL is too slow, NORMAL is safe with WAL
                 runPragma(it, "PRAGMA temp_store=MEMORY")   // Faster temp operations
@@ -50,6 +56,24 @@ class Database(private val name: String, private val context: Context) {
 
     private fun runPragma(db: SQLiteDatabase, sql: String) {
         db.rawQuery(sql, null).use { /* pragma executed */ }
+    }
+
+    private fun pragmaLong(db: SQLiteDatabase, pragma: String): Long? =
+        db.rawQuery(pragma, null).use { if (it.moveToFirst()) it.getLong(0) else null }
+
+    // 1 KB pages make the snapshot bulk copy ~20x slower. VACUUM rewrites the whole file,
+    // so only upgrade while the DB is small (fresh install / cleared data).
+    private fun upgradePageSizeIfSmall(db: SQLiteDatabase) {
+        if (isInMemoryPath(databasePath)) return
+        try {
+            val pageSize = pragmaLong(db, "PRAGMA page_size") ?: return
+            val pageCount = pragmaLong(db, "PRAGMA page_count") ?: return
+            if (pageSize >= TARGET_PAGE_SIZE || pageSize * pageCount > PAGE_SIZE_UPGRADE_MAX_BYTES) return
+            db.execSQL("PRAGMA page_size=$TARGET_PAGE_SIZE")
+            db.execSQL("VACUUM")
+        } catch (e: Exception) {
+            Log.w("WatermelonDB", "page size upgrade skipped: ${e.message}")
+        }
     }
 
     /**
