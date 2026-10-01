@@ -14,7 +14,9 @@ import java.io.File
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 
+// SQLite's upstream default and the Android filesystem block size; new DBs here were coming out at 1 KB.
 private const val TARGET_PAGE_SIZE = 4096L
+// VACUUM rewrites (and temporarily doubles) the file on open, so cap that one-time cost.
 private const val PAGE_SIZE_UPGRADE_MAX_BYTES = 64L * 1024 * 1024
 
 class Database(private val name: String, private val context: Context) {
