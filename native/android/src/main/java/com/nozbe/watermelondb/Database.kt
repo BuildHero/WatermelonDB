@@ -16,8 +16,8 @@ import java.lang.reflect.Method
 
 // SQLite's upstream default and the Android filesystem block size; new DBs here were coming out at 1 KB.
 private const val TARGET_PAGE_SIZE = 4096L
-// VACUUM rewrites (and temporarily doubles) the file on open, so cap that one-time cost.
-private const val PAGE_SIZE_UPGRADE_MAX_BYTES = 64L * 1024 * 1024
+// Only near-empty DBs: VACUUM on a populated one blocks the open for seconds and restarts if the app is killed.
+private const val PAGE_SIZE_UPGRADE_MAX_BYTES = 1L * 1024 * 1024
 
 class Database(private val name: String, private val context: Context) {
 
@@ -62,7 +62,7 @@ class Database(private val name: String, private val context: Context) {
         db.rawQuery(pragma, null).use { if (it.moveToFirst()) it.getLong(0) else null }
 
     // 1 KB pages make the snapshot bulk copy ~20x slower. VACUUM rewrites the whole file,
-    // so only upgrade while the DB is small (fresh install / cleared data).
+    // so only upgrade a fresh install / cleared-data DB, where it costs milliseconds.
     private fun upgradePageSizeIfSmall(db: SQLiteDatabase) {
         if (isInMemoryPath(databasePath)) return
         try {
