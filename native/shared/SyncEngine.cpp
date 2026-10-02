@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <sstream>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #if __has_include(<simdjson.h>)
@@ -390,7 +391,7 @@ void SyncEngine::setAuthToken(const std::string& token) {
 
         if (!syncInFlight_ && stateJson_ == "{\"state\":\"auth_required\"}") {
             shouldRestart = true;
-            completion = std::move(completionCallback_);
+            completion = std::exchange(completionCallback_, nullptr);
         }
     }
     if (shouldRestart) {
@@ -522,10 +523,8 @@ void SyncEngine::cancelSync() {
         currentPullUrl_.clear();
         pendingReason_.clear();
         currentReason_.clear();
-        completion = std::move(completionCallback_);
-        completionCallback_ = nullptr;
-        pendingCompletion = std::move(pendingCompletionCallback_);
-        pendingCompletionCallback_ = nullptr;
+        completion = std::exchange(completionCallback_, nullptr);
+        pendingCompletion = std::exchange(pendingCompletionCallback_, nullptr);
         stateJson_ = "{\"state\":\"idle\"}";
         emitLocked("{\"type\":\"sync_cancelled\"}");
     }
@@ -597,9 +596,8 @@ void SyncEngine::dispatchRequest(int64_t syncId, bool isRetry) {
             retryScheduled_ = false;
             currentRequestId_.clear();
             currentPullUrl_.clear();
-            completion = std::move(completionCallback_);
-            pendingCompletion = std::move(pendingCompletionCallback_);
-            pendingCompletionCallback_ = nullptr;
+            completion = std::exchange(completionCallback_, nullptr);
+            pendingCompletion = std::exchange(pendingCompletionCallback_, nullptr);
             pendingReason_.clear();
             missingPullEndpointUrl = true;
         }
@@ -616,9 +614,8 @@ void SyncEngine::dispatchRequest(int64_t syncId, bool isRetry) {
                 retryCount_ = 0;
                 currentRequestId_.clear();
                 currentPullUrl_.clear();
-                completion = std::move(completionCallback_);
-                pendingCompletion = std::move(pendingCompletionCallback_);
-                pendingCompletionCallback_ = nullptr;
+                completion = std::exchange(completionCallback_, nullptr);
+                pendingCompletion = std::exchange(pendingCompletionCallback_, nullptr);
                 pendingReason_.clear();
                 completionError = "Max auth retries exceeded";
                 missingPullEndpointUrl = true; // Reuse this flag to trigger early return
@@ -712,9 +709,8 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
             retryCount_ = 0;
             currentRequestId_.clear();
             currentPullUrl_.clear();
-            completion = std::move(completionCallback_);
-            pendingCompletion = std::move(pendingCompletionCallback_);
-            pendingCompletionCallback_ = nullptr;
+            completion = std::exchange(completionCallback_, nullptr);
+            pendingCompletion = std::exchange(pendingCompletionCallback_, nullptr);
             pendingReason_.clear();
             completionError = response.errorMessage;
             shouldReturn = true;
@@ -741,9 +737,8 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
                 retryCount_ = 0;
                 currentRequestId_.clear();
                 currentPullUrl_.clear();
-                completion = std::move(completionCallback_);
-                pendingCompletion = std::move(pendingCompletionCallback_);
-                pendingCompletionCallback_ = nullptr;
+                completion = std::exchange(completionCallback_, nullptr);
+                pendingCompletion = std::exchange(pendingCompletionCallback_, nullptr);
                 pendingReason_.clear();
                 completionError = "Max auth retries exceeded";
                 shouldReturn = true;
@@ -775,9 +770,8 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
             retryCount_ = 0;
             currentRequestId_.clear();
             currentPullUrl_.clear();
-            completion = std::move(completionCallback_);
-            pendingCompletion = std::move(pendingCompletionCallback_);
-            pendingCompletionCallback_ = nullptr;
+            completion = std::exchange(completionCallback_, nullptr);
+            pendingCompletion = std::exchange(pendingCompletionCallback_, nullptr);
             pendingReason_.clear();
             completionError = std::string("HTTP ") + std::to_string(response.statusCode);
             shouldReturn = true;
@@ -855,9 +849,8 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
                 retryCount_ = 0;
                 currentRequestId_.clear();
                 currentPullUrl_.clear();
-                completionToCall = std::move(completionCallback_);
-                pendingToCall = std::move(pendingCompletionCallback_);
-                pendingCompletionCallback_ = nullptr;
+                completionToCall = std::exchange(completionCallback_, nullptr);
+                pendingToCall = std::exchange(pendingCompletionCallback_, nullptr);
                 pendingReason_.clear();
             }
             if (completionToCall) {
@@ -938,9 +931,8 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
                     self->retryCount_ = 0;
                     self->currentRequestId_.clear();
                     self->currentPullUrl_.clear();
-                    completionToCall = std::move(self->completionCallback_);
-                    pendingCompletion = std::move(self->pendingCompletionCallback_);
-                    self->pendingCompletionCallback_ = nullptr;
+                    completionToCall = std::exchange(self->completionCallback_, nullptr);
+                    pendingCompletion = std::exchange(self->pendingCompletionCallback_, nullptr);
                     self->pendingReason_.clear();
                     shouldReturn = true;
                 }
@@ -955,9 +947,8 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
                     self->currentPullUrl_.clear();
                     pendingReason = std::move(self->pendingReason_);
                     self->pendingReason_.clear();
-                    completionToCall = std::move(self->completionCallback_);
-                    pendingCompletion = std::move(self->pendingCompletionCallback_);
-                    self->pendingCompletionCallback_ = nullptr;
+                    completionToCall = std::exchange(self->completionCallback_, nullptr);
+                    pendingCompletion = std::exchange(self->pendingCompletionCallback_, nullptr);
                 }
             }
 
@@ -1007,9 +998,8 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
         currentPullUrl_.clear();
         pendingReason = std::move(pendingReason_);
         pendingReason_.clear();
-        completionFinal = std::move(completionCallback_);
-        pendingCompletionFinal = std::move(pendingCompletionCallback_);
-        pendingCompletionCallback_ = nullptr;
+        completionFinal = std::exchange(completionCallback_, nullptr);
+        pendingCompletionFinal = std::exchange(pendingCompletionCallback_, nullptr);
     }
     if (completionFinal) {
         completionFinal(true, "");
