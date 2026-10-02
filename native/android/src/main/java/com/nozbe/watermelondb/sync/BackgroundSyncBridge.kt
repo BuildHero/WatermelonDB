@@ -48,7 +48,7 @@ object BackgroundSyncBridge {
                             Log.i(TAG, "App entering foreground — cancelling background sync")
                             try {
                                 nativeCancelBackgroundSync(syncEnginePtr)
-                            } catch (e: Exception) {
+                            } catch (e: Throwable) {
                                 Log.w(TAG, "Failed to cancel background sync on foreground", e)
                             }
                         }

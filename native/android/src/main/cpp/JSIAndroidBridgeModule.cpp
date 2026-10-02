@@ -7,6 +7,7 @@
 
 #include <jni.h>
 #include <fbjni/fbjni.h>
+#include <atomic>
 #include <exception>
 #include <memory>
 #include <utility>
@@ -124,12 +125,19 @@ Java_com_nozbe_watermelondb_sync_BackgroundSyncBridge_nativePerformBackgroundSyn
     env->GetJavaVM(&jvm);
     jobject globalCallback = env->NewGlobalRef(callback);
 
+    // One-shot: globalCallback is deleted on the first call, so a second call would
+    // dereference a freed (possibly reused) global ref (MOBILE-4902).
+    auto fired = std::make_shared<std::atomic<bool>>(false);
+
     // Start sync (pull + push). The JS runtime is alive during background tasks,
     // so the existing pushChangesProvider callback works normally. If the OS
     // expires the task, cancelSync() invalidates in-flight operations and
     // remaining mutations flush on next foreground sync.
     engine->startWithCompletion("background_task",
-        [jvm, globalCallback](bool success, const std::string& errorMessage) {
+        [jvm, globalCallback, fired](bool success, const std::string& errorMessage) {
+            if (fired->exchange(true)) {
+                return;
+            }
             JNIEnv* cbEnv = nullptr;
             bool attached = false;
             if (jvm->GetEnv(reinterpret_cast<void**>(&cbEnv), JNI_VERSION_1_6) != JNI_OK) {
@@ -145,6 +153,11 @@ Java_com_nozbe_watermelondb_sync_BackgroundSyncBridge_nativePerformBackgroundSyn
                     if (error) {
                         cbEnv->DeleteLocalRef(error);
                     }
+                }
+                // Don't leak a pending exception into the caller (main thread on cancelSync).
+                if (cbEnv->ExceptionCheck()) {
+                    cbEnv->ExceptionDescribe();
+                    cbEnv->ExceptionClear();
                 }
                 cbEnv->DeleteLocalRef(cbClass);
                 cbEnv->DeleteGlobalRef(globalCallback);
