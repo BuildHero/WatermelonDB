@@ -78,6 +78,20 @@ namespace watermelondb {
         }
     }
 
+    // Call only from a catch block. Names the error behind a throw that released the connection,
+    // since JS often swallows it and the trigger of the reader-connection leak is still unconfirmed.
+    static void logStatementFailure(const char *fn, const std::string &sql) {
+        std::string reason = "unknown exception";
+        try {
+            throw;
+        } catch (const std::exception &e) {
+            reason = e.what();
+        } catch (...) {
+        }
+        __android_log_print(ANDROID_LOG_WARN, LOG_TAG, "%s threw: %.300s | sql: %.200s",
+                            fn, reason.c_str(), sql.c_str());
+    }
+
     JNIEnv* getEnv() {
         if (gJvm) {
             JNIEnv* env = nullptr;
@@ -196,7 +210,8 @@ namespace watermelondb {
 
         jsi::Value result;
         try {
-            auto stmt = getStmt(rt, reinterpret_cast<sqlite3*>(db), sql.utf8(rt), arguments);
+            StmtGuard stmtGuard(getStmt(rt, reinterpret_cast<sqlite3*>(db), sql.utf8(rt), arguments));
+            sqlite3_stmt* stmt = stmtGuard.get();
 
             std::vector<jsi::Value> records = {};
 
@@ -210,9 +225,9 @@ namespace watermelondb {
                 records.push_back(std::move(record));
             }
 
-            finalizeStmt(stmt);
             result = arrayFromStd(rt, records);
         } catch (...) {
+            logStatementFailure(__func__, sql.utf8(rt));
             env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
             throw;
         }
@@ -277,7 +292,8 @@ namespace watermelondb {
 
         jsi::Value result;
         try {
-            auto stmt = getStmt(rt, reinterpret_cast<sqlite3*>(db), sql.utf8(rt), arguments);
+            StmtGuard stmtGuard(getStmt(rt, reinterpret_cast<sqlite3*>(db), sql.utf8(rt), arguments));
+            sqlite3_stmt* stmt = stmtGuard.get();
 
             std::vector<jsi::Value> records = {};
 
@@ -291,9 +307,9 @@ namespace watermelondb {
                 records.push_back(std::move(record));
             }
 
-            finalizeStmt(stmt);
             result = arrayFromStd(rt, records);
         } catch (...) {
+            logStatementFailure(__func__, sql.utf8(rt));
             env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
             throw;
         }
@@ -360,59 +376,62 @@ namespace watermelondb {
         }
 
         sqlite3* db = connection->db;
-
-        auto stmt = getStmt(rt, db, query.utf8(rt), jsi::Array(rt, 0));
-
         std::vector<jsi::Value> records = {};
 
-        while (true) {
-            if (getNextRowOrTrue(rt, stmt)) {
-                break;
-            }
+        try {
+            StmtGuard stmtGuard(getStmt(rt, db, query.utf8(rt), jsi::Array(rt, 0)));
+            sqlite3_stmt* stmt = stmtGuard.get();
 
-            // Validate first column is 'id' before proceeding
-            const char* firstColumnName = sqlite3_column_name(stmt, 0);
-            if (!firstColumnName || std::string(firstColumnName) != "id") {
-                finalizeStmt(stmt);
-                env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
-                throw jsi::JSError(rt, "Query result does not have 'id' as first column");
-            }
+            while (true) {
+                if (getNextRowOrTrue(rt, stmt)) {
+                    break;
+                }
 
-            const char *id = (const char *)sqlite3_column_text(stmt, 0);
+                // Validate first column is 'id' before proceeding
+                const char* firstColumnName = sqlite3_column_name(stmt, 0);
+                if (!firstColumnName || std::string(firstColumnName) != "id") {
+                    throw jsi::JSError(rt, "Query result does not have 'id' as first column");
+                }
 
-            if (!id) {
-                throw jsi::JSError(rt, "Failed to get ID of a record");
-            }
+                const char *id = (const char *)sqlite3_column_text(stmt, 0);
 
-            jstring jId = env->NewStringUTF(id);
-            jstring jTable = env->NewStringUTF(tableStr.c_str());
+                if (!id) {
+                    throw jsi::JSError(rt, "Failed to get ID of a record");
+                }
 
-            jmethodID isCachedMethod = env->GetMethodID(
-                    myNativeModuleClass.get(),
-                    "isCached",
-                    "(ILjava/lang/String;Ljava/lang/String;)Z");
+                jstring jId = env->NewStringUTF(id);
+                jstring jTable = env->NewStringUTF(tableStr.c_str());
 
-            bool isCached = env->CallBooleanMethod(bridge, isCachedMethod, jTag, jTable, jId);
-
-            if (isCached) {
-                jsi::String jsiId = jsi::String::createFromAscii(rt, id);
-                records.push_back(std::move(jsiId));
-            } else {
-                jmethodID markAsCachedMethod = env->GetMethodID(
+                jmethodID isCachedMethod = env->GetMethodID(
                         myNativeModuleClass.get(),
-                        "markAsCached",
-                        "(ILjava/lang/String;Ljava/lang/String;)V");
+                        "isCached",
+                        "(ILjava/lang/String;Ljava/lang/String;)Z");
 
-                env->CallVoidMethod(bridge, markAsCachedMethod, jTag, jTable, jId);
-                jsi::Object record = resultDictionary(rt, stmt);
-                records.push_back(std::move(record));
+                bool isCached = env->CallBooleanMethod(bridge, isCachedMethod, jTag, jTable, jId);
+
+                if (isCached) {
+                    jsi::String jsiId = jsi::String::createFromAscii(rt, id);
+                    records.push_back(std::move(jsiId));
+                } else {
+                    jmethodID markAsCachedMethod = env->GetMethodID(
+                            myNativeModuleClass.get(),
+                            "markAsCached",
+                            "(ILjava/lang/String;Ljava/lang/String;)V");
+
+                    env->CallVoidMethod(bridge, markAsCachedMethod, jTag, jTable, jId);
+                    jsi::Object record = resultDictionary(rt, stmt);
+                    records.push_back(std::move(record));
+                }
+
+                env->DeleteLocalRef(jId);
+                env->DeleteLocalRef(jTable);
             }
-
-            env->DeleteLocalRef(jId);
-            env->DeleteLocalRef(jTable);
+        } catch (...) {
+            logStatementFailure(__func__, queryStr);
+            env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
+            throw;
         }
 
-        finalizeStmt(stmt);
         env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
 
         return arrayFromStd(rt, records);

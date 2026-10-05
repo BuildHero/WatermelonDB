@@ -143,7 +143,8 @@ bool getNextRowOrTrue(jsi::Runtime &rt, sqlite3_stmt *stmt) {
     if (result == SQLITE_DONE) {
         return true;
     } else if (result != SQLITE_ROW) {
-        throw jsi::JSError(rt, "Failed to get a row for query");
+        throw dbError(rt, sqlite3_db_handle(stmt),
+                      "Failed to get a row for query (step rc " + std::to_string(result) + ")");
     }
 
     return false;
