@@ -1,6 +1,7 @@
 #include "../SyncEngine.h"
 #include "../SyncPlatform.h"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <functional>
@@ -1331,6 +1332,124 @@ void test_shutdown_calls_completion() {
 
 } // namespace
 
+// MOBILE-4902: shaped like the Android JNI completion ([JavaVM*, jobject]) so it lands in
+// libc++'s std::function small buffer, where a move clones and leaves the source non-empty.
+struct CompletionProbe {
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::vector<std::string> errors;
+
+    void record(const std::string& error) {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            errors.push_back(error);
+        }
+        cv.notify_all();
+    }
+
+    size_t calls() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return errors.size();
+    }
+
+    bool waitForCalls(size_t count, int timeoutMs = 500) {
+        std::unique_lock<std::mutex> lock(mutex);
+        return cv.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&]() { return errors.size() >= count; });
+    }
+};
+
+watermelondb::SyncEngine::CompletionCallback makeJniShapedCompletion(CompletionProbe* probe) {
+    static int handle = 0;
+    const void* globalRef = &handle;
+    auto completion = [probe, globalRef](bool, const std::string& error) {
+        (void)globalRef;
+        probe->record(error);
+    };
+    static_assert(sizeof(completion) == 2 * sizeof(void*), "must match the JNI lambda's capture size");
+    return completion;
+}
+
+std::shared_ptr<watermelondb::SyncEngine> makeSucceedingEngine(EventRecorder& recorder) {
+    auto engine = std::make_shared<watermelondb::SyncEngine>();
+    engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset&) { return true; });
+    engine->setPushChangesCallback([](std::function<void(bool, const std::string&)> completion) {
+        completion(true, "");
+    });
+    watermelondb::platform::setHttpHandler([](const watermelondb::platform::HttpRequest&,
+                                              std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        watermelondb::platform::HttpResponse response;
+        response.statusCode = 200;
+        response.body = "{}";
+        done(response);
+    });
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
+    return engine;
+}
+
+void test_cancel_after_completed_background_sync_does_not_reinvoke_completion() {
+    std::cout << "[TEST] cancel after a completed background sync does not re-invoke its completion\n";
+
+    EventRecorder recorder;
+    auto engine = makeSucceedingEngine(recorder);
+    CompletionProbe probe;
+
+    engine->startWithCompletion("background_task", makeJniShapedCompletion(&probe));
+    expectTrue(probe.waitForCalls(1), "background completion should fire once on success");
+    expectTrue(recorder.waitForContains("\"state\":\"done\""), "expected done state");
+
+    engine->cancelSync();
+
+    expectTrue(probe.calls() == 1, "cancelSync must not re-invoke an already-fired completion");
+    expectTrue(!recorder.waitForContains("sync_cancelled", 100), "nothing in flight, so no sync_cancelled");
+}
+
+void test_cancel_after_auth_refreshed_background_sync_does_not_reinvoke_completion() {
+    std::cout << "[TEST] cancel after an auth-refreshed background sync does not re-invoke its completion\n";
+
+    EventRecorder recorder;
+    auto engine = makeSucceedingEngine(recorder);
+    std::atomic<int> requestCount{0};
+    watermelondb::platform::setHttpHandler([&requestCount](const watermelondb::platform::HttpRequest&,
+                                                           std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        watermelondb::platform::HttpResponse response;
+        if (requestCount++ == 0) {
+            response.statusCode = 401;
+        } else {
+            response.statusCode = 200;
+            response.body = "{}";
+        }
+        done(response);
+    });
+    CompletionProbe probe;
+
+    engine->startWithCompletion("background_task", makeJniShapedCompletion(&probe));
+    expectTrue(recorder.waitForContains("\"type\":\"auth_required\""), "expected auth_required event");
+    engine->setAuthToken("new-token");
+    expectTrue(probe.waitForCalls(1), "background completion should fire once after auth refresh");
+
+    engine->cancelSync();
+
+    expectTrue(probe.calls() == 1, "cancelSync must not re-invoke the completion carried through auth refresh");
+}
+
+void test_next_sync_does_not_reinvoke_completed_background_completion() {
+    std::cout << "[TEST] the next foreground sync does not re-invoke a completed background completion\n";
+
+    EventRecorder recorder;
+    auto engine = makeSucceedingEngine(recorder);
+    CompletionProbe probe;
+
+    engine->startWithCompletion("background_task", makeJniShapedCompletion(&probe));
+    expectTrue(probe.waitForCalls(1), "background completion should fire once on success");
+
+    engine->start("foreground");
+    expectTrue(recorder.waitForContains("\"reason\":\"foreground\""), "expected foreground sync to start");
+    probe.waitForCalls(2, 200);
+
+    expectTrue(probe.calls() == 1, "a later sync must not re-invoke the background completion");
+}
+
 int main() {
     test_success_flow();
     test_auth_required();
@@ -1362,6 +1481,9 @@ int main() {
     test_cancel_during_http_allows_new_sync();
     test_rapid_cancel_and_restart();
     test_shutdown_calls_completion();
+    test_cancel_after_completed_background_sync_does_not_reinvoke_completion();
+    test_cancel_after_auth_refreshed_background_sync_does_not_reinvoke_completion();
+    test_next_sync_does_not_reinvoke_completed_background_completion();
 
     if (gFailures > 0) {
         std::cerr << gFailures << " test(s) failed\n";
