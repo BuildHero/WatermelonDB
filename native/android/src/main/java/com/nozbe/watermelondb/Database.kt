@@ -76,6 +76,30 @@ class Database(private val name: String, private val context: Context) {
         }
     }
 
+    // A reset empties the file in place, so an existing install never passes the size cap above.
+    // With no tables left, VACUUM costs about what it does on a fresh install.
+    private fun upgradePageSizeIfEmpty(db: SQLiteDatabase) {
+        if (isInMemoryPath(databasePath) || db.inTransaction()) return
+        try {
+            val pageSize = pragmaLong(db, "PRAGMA page_size") ?: return
+            if (pageSize >= TARGET_PAGE_SIZE) return
+            if ((pragmaLong(db, "SELECT count(*) FROM sqlite_master") ?: return) > 0L) return
+            val startedAt = System.currentTimeMillis()
+            db.execSQL("PRAGMA page_size=$TARGET_PAGE_SIZE")
+            db.execSQL("VACUUM")
+            val elapsedMs = System.currentTimeMillis() - startedAt
+            val newPageSize = pragmaLong(db, "PRAGMA page_size")
+            // VACUUM can't change the page size of a WAL database and doesn't error, so check it took.
+            if (newPageSize != null && newPageSize >= TARGET_PAGE_SIZE) {
+                Log.i("WatermelonDB", "page size upgraded on reset: $pageSize -> $newPageSize in $elapsedMs ms")
+            } else {
+                Log.w("WatermelonDB", "page size upgrade on reset had no effect: still $newPageSize after $elapsedMs ms")
+            }
+        } catch (e: Exception) {
+            Log.w("WatermelonDB", "page size upgrade on reset skipped: ${e.message}")
+        }
+    }
+
     /**
      * Retry a database open + PRAGMA block on SQLiteDatabaseLockedException.
      *
@@ -241,7 +265,7 @@ class Database(private val name: String, private val context: Context) {
 
 //    fun unsafeResetDatabase() = context.deleteDatabase("$name.db")
 
-    fun unsafeDestroyEverything() =
+    fun unsafeDestroyEverything() {
         transaction {
             getAllTables().forEach { execute(Queries.dropTable(it)) }
             execute("pragma writable_schema=1")
@@ -249,6 +273,9 @@ class Database(private val name: String, private val context: Context) {
             execute("pragma user_version=0")
             execute("pragma writable_schema=0")
         }
+        // VACUUM can't run inside the transaction above.
+        upgradePageSizeIfEmpty(writerDb)
+    }
 
     private fun getAllTables(): ArrayList<String> {
         val allTables: ArrayList<String> = arrayListOf()
