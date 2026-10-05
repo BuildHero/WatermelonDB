@@ -78,6 +78,20 @@ namespace watermelondb {
         }
     }
 
+    // Call only from a catch block. Names the error behind a throw that released the connection,
+    // since JS often swallows it and the trigger of the reader-connection leak is still unconfirmed.
+    static void logStatementFailure(const char *fn, const std::string &sql) {
+        std::string reason = "unknown exception";
+        try {
+            throw;
+        } catch (const std::exception &e) {
+            reason = e.what();
+        } catch (...) {
+        }
+        __android_log_print(ANDROID_LOG_WARN, LOG_TAG, "%s threw: %.300s | sql: %.200s",
+                            fn, reason.c_str(), sql.c_str());
+    }
+
     JNIEnv* getEnv() {
         if (gJvm) {
             JNIEnv* env = nullptr;
@@ -213,6 +227,7 @@ namespace watermelondb {
 
             result = arrayFromStd(rt, records);
         } catch (...) {
+            logStatementFailure(__func__, sql.utf8(rt));
             env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
             throw;
         }
@@ -294,6 +309,7 @@ namespace watermelondb {
 
             result = arrayFromStd(rt, records);
         } catch (...) {
+            logStatementFailure(__func__, sql.utf8(rt));
             env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
             throw;
         }
@@ -411,6 +427,7 @@ namespace watermelondb {
                 env->DeleteLocalRef(jTable);
             }
         } catch (...) {
+            logStatementFailure(__func__, queryStr);
             env->CallVoidMethod(bridge, releaseConnectionMethod, jTag);
             throw;
         }
