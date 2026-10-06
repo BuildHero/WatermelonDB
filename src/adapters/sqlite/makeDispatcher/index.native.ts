@@ -153,6 +153,13 @@ export const makeDispatcher = (
           return
         }
 
+        // Keeps a synchronous connection's snapshot copy off the JS thread; binaries without the method block as before.
+        if (methodName === 'copyTables' && type === 'synchronous' && DatabaseBridge.copyTablesOffThread) {
+          const [tables, srcDB] = otherArgs
+          fromPromise(DatabaseBridge.copyTablesOffThread(tag, tables, srcDB), callback)
+          return
+        }
+
         // @ts-ignore
         const returnValue = DatabaseBridge[name](tag, ...otherArgs)
 

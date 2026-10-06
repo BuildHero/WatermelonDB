@@ -261,7 +261,81 @@ public class Database {
     func getRawPointer() -> OpaquePointer {
         return OpaquePointer(writer.sqliteHandle)
     }
-    
+
+    /// `DatabaseDriver.copyTables` for callers off `methodQueue`. Holds the writer semaphore from ATTACH to DETACH and
+    /// touches only the raw writer handle, never the FMDB objects or `transactionDepth`, so reads stay on the reader.
+    func copyTablesOnRawWriter(_ tables: [String], srcDB: String) throws {
+        writerTransactionSemaphore.wait()
+        setWriterHolder("copy-tables")
+        defer {
+            clearWriterHolder()
+            writerTransactionSemaphore.signal()
+        }
+
+        let db = getRawPointer()
+
+        try rawExec(db, "ATTACH DATABASE '\(srcDB)' as 'other'")
+        defer {
+            do {
+                try rawExec(db, "DETACH DATABASE 'other'")
+            } catch {
+                consoleLog("Warning: Failed to detach source database: \(error)")
+            }
+        }
+
+        try rawExec(db, "DELETE FROM local_storage WHERE key = '__watermelon_last_pulled_schema_version'")
+
+        try rawExec(db, "BEGIN IMMEDIATE")
+        do {
+            for table in tables {
+                let commonColumns = try rawColumnNames(db, table, schema: "main")
+                    .intersection(rawColumnNames(db, table, schema: "other"))
+                guard !commonColumns.isEmpty else { continue }
+
+                let columnsString = commonColumns.map { "\"\($0)\"" }.joined(separator: ", ")
+                try rawExec(db, "INSERT OR IGNORE INTO \(table) (\(columnsString)) SELECT \(columnsString) FROM other.\(table)")
+            }
+            try rawExec(db, "COMMIT")
+        } catch {
+            // SQLite may already have rolled back on its own (e.g. SQLITE_FULL), so a failed ROLLBACK is expected.
+            try? rawExec(db, "ROLLBACK")
+            throw error
+        }
+    }
+
+    private func rawExec(_ db: OpaquePointer, _ sql: String) throws {
+        var errorMessage: UnsafeMutablePointer<CChar>?
+        let code = sqlite3_exec(db, sql, nil, nil, &errorMessage)
+        guard code == SQLITE_OK else {
+            let message = errorMessage.map { String(cString: $0) } ?? String(cString: sqlite3_errmsg(db))
+            sqlite3_free(errorMessage)
+            throw NSError(domain: "WatermelonDB", code: Int(code), userInfo: [NSLocalizedDescriptionKey: message])
+        }
+    }
+
+    private func rawColumnNames(_ db: OpaquePointer, _ table: String, schema: String) throws -> Set<String> {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA \(schema).table_info(\(table))", -1, &statement, nil) == SQLITE_OK else {
+            throw NSError(domain: "WatermelonDB", code: Int(sqlite3_errcode(db)),
+                          userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(db))])
+        }
+        defer { sqlite3_finalize(statement) }
+
+        var columns = Set<String>()
+        var code = sqlite3_step(statement)
+        while code == SQLITE_ROW {
+            if let name = sqlite3_column_text(statement, 1) {
+                columns.insert(String(cString: name))
+            }
+            code = sqlite3_step(statement)
+        }
+        guard code == SQLITE_DONE else {
+            throw NSError(domain: "WatermelonDB", code: Int(code),
+                          userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(db))])
+        }
+        return columns
+    }
+
     func getRawReadPointer() -> OpaquePointer {
         return OpaquePointer(reader.sqliteHandle)
     }

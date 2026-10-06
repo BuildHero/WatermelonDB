@@ -65,6 +65,13 @@ WMELON_BRIDGE_METHOD(copyTables,
   srcDB:(NSString *)srcDB
 )
 
+RCT_EXTERN_METHOD(copyTablesOffThread:(nonnull NSNumber *)connectionTag
+  tables:(NSArray *)tables
+  srcDB:(NSString *)srcDB
+  resolve:(RCTPromiseResolveBlock)resolve
+  reject:(RCTPromiseRejectBlock)reject
+)
+
 WMELON_BRIDGE_METHOD(batchJSON,
   operations:(NSString *)serializedOperations
 )

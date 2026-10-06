@@ -174,6 +174,8 @@ export type NativeBridgeType = {
   setLocalSynchronous?: (arg1: ConnectionTag, arg2: string, arg3: string) => SyncReturn<void>
   removeLocalSynchronous?: (arg1: ConnectionTag, arg2: string) => SyncReturn<void>
   execSqlQueryOnWriterSynchronous?: (arg1: ConnectionTag, arg2: SQL, arg3: SQLiteArg[]) => SyncReturn<DirtyQueryResult>
+  // iOS only: promise-based copy for synchronous connections, run off the JS thread
+  copyTablesOffThread?: (arg1: ConnectionTag, arg2: TableName<any>[], arg3: string) => Promise<void>
   // Special methods
   copyTables?: (arg1: TableName<any>[], arg2?: any) => Promise<void>
 }

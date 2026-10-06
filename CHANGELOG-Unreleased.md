@@ -13,6 +13,8 @@
 
 ### Performance
 
+- iOS: `database.copyTables()` on a synchronous adapter no longer blocks the JS thread. The copy now runs on its own serial queue (`copyTablesOffThread`), holding the writer semaphore from ATTACH to DETACH, and resolves a promise when it commits. The SQL and the single transaction are unchanged. JS on a binary without the new method falls back to the blocking `copyTablesSynchronous`. Android was already asynchronous.
+
 ### Changes
 
 ### Fixes
