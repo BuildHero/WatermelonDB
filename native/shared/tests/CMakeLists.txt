@@ -98,6 +98,11 @@ if (ZSTD_LIBRARY)
   target_link_libraries(slice_import_engine_tests PRIVATE ${ZSTD_LIBRARY})
 endif()
 
+add_executable(slice_local_file_tests
+  SliceLocalFileTests.cpp
+)
+target_include_directories(slice_local_file_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR}/..)
+
 add_executable(sqlite_insert_helper_tests
   SqliteInsertHelperTests.cpp
   ../SqliteInsertHelper.cpp

@@ -10,6 +10,7 @@
 ### New features
 
 - `database.enableNativeCDC()` now automatically calls `database.notify()` when native code writes to the database. This ensures observers refresh after native sync operations write directly to SQLite. When native CDC is enabled, `batch()` skips its internal `notify()` call to avoid duplicate notifications. Added `database.disableNativeCDC()` for cleanup.
+- Slice import: `importRemoteSlice` now accepts a `file://` URL on iOS and Android and streams the local file in 256 KB chunks on the import work queue (`native/shared/SliceLocalFile.h`). A caller can download a slice first and import it afterwards, so the import's write transaction no longer spans the network transfer. Older binaries reject `file://` on Android, so callers must gate this on the native version.
 
 ### Performance
 

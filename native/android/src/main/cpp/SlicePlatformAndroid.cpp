@@ -1,6 +1,7 @@
 #include "SlicePlatform.h"
 #include "JSIAndroidUtils.h"
 #include "SlicePlatformAndroidQueue.h"
+#include "SliceLocalFile.h"
 
 #include <android/log.h>
 #include <jni.h>
@@ -308,6 +309,16 @@ std::shared_ptr<DownloadHandle> downloadFile(
     std::function<void(const uint8_t* data, size_t length)> onData,
     std::function<void(const std::string& errorMessage)> onComplete
 ) {
+    // Pre-downloaded COLD slices are imported from disk; OkHttp would reject a file:// URL.
+    if (isLocalFileUrl(url)) {
+        return streamLocalFile(
+            url,
+            [](std::function<void()> task) { android::runOnWorkQueue(task); },
+            std::move(onData),
+            std::move(onComplete)
+        );
+    }
+
     JNIEnv* env = getEnv();
     if (!env) {
         onComplete("JNI env not available");

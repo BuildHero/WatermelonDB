@@ -91,6 +91,7 @@ run_test "sync_apply_engine_tests" native/shared/tests/build/sync_apply_engine_t
 run_test "slice_decoder_tests" native/shared/tests/build/slice_decoder_tests
 run_test "slice_import_engine_tests" native/shared/tests/build/slice_import_engine_tests
 run_test "sqlite_insert_helper_tests" native/shared/tests/build/sqlite_insert_helper_tests
+run_test "slice_local_file_tests" native/shared/tests/build/slice_local_file_tests
 if [ -f native/shared/tests/build/database_utils_tests ]; then
   run_test "database_utils_tests" native/shared/tests/build/database_utils_tests
 else

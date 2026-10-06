@@ -1,4 +1,5 @@
 #include "SlicePlatform.h"
+#include "SliceLocalFile.h"
 
 #import <Foundation/Foundation.h>
 #import <os/log.h>
@@ -277,6 +278,20 @@ std::shared_ptr<DownloadHandle> downloadFile(
     std::function<void(const uint8_t* data, size_t length)> onData,
     std::function<void(const std::string& errorMessage)> onComplete
 ) {
+    // Pre-downloaded COLD slices are imported from disk so the writer lock never waits on the network.
+    if (isLocalFileUrl(url)) {
+        return streamLocalFile(
+            url,
+            [](std::function<void()> task) {
+                dispatch_async(workQueue, ^{
+                    task();
+                });
+            },
+            std::move(onData),
+            std::move(onComplete)
+        );
+    }
+
     // Create URL
     NSURL *nsURL = [NSURL URLWithString:[NSString stringWithUTF8String:url.c_str()]];
     if (!nsURL) {
