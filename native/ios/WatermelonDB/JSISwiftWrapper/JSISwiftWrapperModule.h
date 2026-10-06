@@ -48,7 +48,7 @@ public:
 private:
     struct SyncEventState {
         std::mutex mutex;
-        std::unordered_map<int64_t, jsi::Function> listeners;
+        std::unordered_map<int64_t, std::shared_ptr<jsi::Function>> listeners;
         jsi::Runtime* runtime = nullptr;
         std::shared_ptr<CallInvoker> jsInvoker;
         bool alive = true;

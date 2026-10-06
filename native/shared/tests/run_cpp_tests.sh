@@ -96,4 +96,9 @@ if [ -f native/shared/tests/build/database_utils_tests ]; then
 else
   echo "[cpp tests] database_utils_tests skipped (Hermes/JSI not found)"
 fi
+if [ -f native/shared/tests/build/sync_listener_dispatch_tests ]; then
+  run_test "sync_listener_dispatch_tests" native/shared/tests/build/sync_listener_dispatch_tests
+else
+  echo "[cpp tests] sync_listener_dispatch_tests skipped (Hermes/JSI not found)"
+fi
 

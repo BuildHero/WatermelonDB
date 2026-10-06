@@ -14,6 +14,7 @@
 #import "ZstdFileUtil.h"
 #import "BackgroundSyncBridge.h"
 #include "SyncApplyEngine.h"
+#include "SyncListenerDispatch.h"
 
 #include <exception>
 
@@ -386,7 +387,7 @@ double JSISwiftWrapperModule::addSyncListener(jsi::Runtime &rt, jsi::Function li
     const std::lock_guard<std::mutex> lock(state->mutex);
     state->runtime = &rt;
     const int64_t id = nextSyncListenerId_++;
-    state->listeners.emplace(id, std::move(listener));
+    state->listeners.emplace(id, std::make_shared<jsi::Function>(std::move(listener)));
     return static_cast<double>(id);
 }
 
@@ -558,14 +559,7 @@ void JSISwiftWrapperModule::emitSyncEventLocked(const std::string &eventJson) {
     }
     auto jsInvoker = state->jsInvoker;
     jsInvoker->invokeAsync([state, eventJson]() {
-        const std::lock_guard<std::mutex> lock(state->mutex);
-        if (!state->alive || !state->runtime || state->listeners.empty()) {
-            return;
-        }
-        jsi::Runtime &rt = *state->runtime;
-        for (auto &entry : state->listeners) {
-            entry.second.call(rt, jsi::String::createFromUtf8(rt, eventJson));
-        }
+        watermelondb::dispatchSyncEvent(*state, eventJson);
     });
 }
 

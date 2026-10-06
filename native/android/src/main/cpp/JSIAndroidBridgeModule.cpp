@@ -4,6 +4,7 @@
 #include "SliceImportDatabaseAdapterAndroid.h"
 #include "../../../../shared/SyncApplyEngine.h"
 #include "../../../../shared/JsonUtils.h"
+#include "../../../../shared/SyncListenerDispatch.h"
 
 #include <jni.h>
 #include <fbjni/fbjni.h>
@@ -606,7 +607,7 @@ double JSIAndroidBridgeModule::addSyncListener(jsi::Runtime &rt, jsi::Function l
     const std::lock_guard<std::mutex> lock(state->mutex);
     state->runtime = &rt;
     const int64_t id = nextSyncListenerId_++;
-    state->listeners.emplace(id, std::move(listener));
+    state->listeners.emplace(id, std::make_shared<jsi::Function>(std::move(listener)));
     return static_cast<double>(id);
 }
 
@@ -967,14 +968,7 @@ void JSIAndroidBridgeModule::emitSyncEventLocked(const std::string &eventJson) {
     }
     auto jsInvoker = state->jsInvoker;
     jsInvoker->invokeAsync([state, eventJson]() {
-        const std::lock_guard<std::mutex> lock(state->mutex);
-        if (!state->alive || !state->runtime || state->listeners.empty()) {
-            return;
-        }
-        jsi::Runtime &rt = *state->runtime;
-        for (auto &entry : state->listeners) {
-            entry.second.call(rt, jsi::String::createFromUtf8(rt, eventJson));
-        }
+        watermelondb::dispatchSyncEvent(*state, eventJson);
     });
 }
 
