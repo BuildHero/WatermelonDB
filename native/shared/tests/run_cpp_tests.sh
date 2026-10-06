@@ -78,11 +78,11 @@ run_test() {
     return 0
   fi
   echo "[cpp tests] running ${name}"
-  if "$path"; then
-    return 0
+  local status=0
+  "$path" || status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "[cpp tests] ${name} failed with ${status}"
   fi
-  local status=$?
-  echo "[cpp tests] ${name} failed with ${status}"
   return $status
 }
 
