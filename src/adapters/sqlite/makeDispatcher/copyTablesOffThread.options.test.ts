@@ -114,6 +114,34 @@ describe('configureCopyTables', () => {
     })
   })
 
+  it.each([
+    [
+      'a cancel before the copy started',
+      'Off-thread copy cancelled: the database was opened again',
+      true,
+    ],
+    [
+      'a cancel that interrupted a running INSERT',
+      'Error Domain=WatermelonDB Code=9 "interrupted" UserInfo={NSLocalizedDescription=interrupted}',
+      true,
+    ],
+    [
+      'a disk-full failure',
+      'Error Domain=WatermelonDB Code=13 "database or disk is full" UserInfo={NSLocalizedDescription=database or disk is full}',
+      false,
+    ],
+    ['a code that only starts with 9', 'Error Domain=WatermelonDB Code=90 "unknown"', false],
+  ])('flags %s as cancelled: %s', async (_name, message, cancelled) => {
+    const onEvent = jest.fn()
+    configureCopyTables({ onEvent })
+    bridge.copyTablesOffThread = jest.fn(() => Promise.reject(new Error(message)))
+
+    makeDispatcher('synchronous', 7, 'db').copyTables(['tasks'], '/tmp/src.db', jest.fn())
+    await flush()
+
+    expect(onEvent).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'error', cancelled }))
+  })
+
   it('reports the blocking copy too', () => {
     const onEvent = jest.fn()
     configureCopyTables({ offThread: false, onEvent })

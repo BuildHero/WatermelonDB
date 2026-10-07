@@ -49,5 +49,6 @@ export function emitCopyTablesEvent(event: CopyTablesEvent): void {
   }
 }
 
+// A cancel mid-INSERT surfaces as SQLite's own SQLITE_INTERRUPT (code 9, "interrupted") rather than our message.
 export const isCopyCancelledError = (error: any): boolean =>
-  /cancelled/i.test(String(error?.message ?? error))
+  /cancelled|interrupted|\bCode=9\b/i.test(String(error?.message ?? error))

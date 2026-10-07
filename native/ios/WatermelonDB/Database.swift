@@ -69,9 +69,12 @@ public class Database {
     /// How long a reopen waits for a cancelled copy that holds the writer to roll back before opening anyway.
     static var reopenCopyWaitTimeout: TimeInterval = 5
 
-    /// How long `open()` keeps retrying "database is locked" (another writer on this file, e.g. a slice import
-    /// from a runtime that was just reloaded) before giving up. Each attempt also waits out the 5 s busy timeout.
-    static var openBusyRetryDeadline: TimeInterval = 30
+    /// SQLite busy timeout on both connections; one blocked statement waits at most this long.
+    static let busyTimeout: TimeInterval = 5
+
+    /// How long `open()` keeps starting new attempts while "database is locked" (another writer on this file, e.g. a
+    /// slice import from a runtime that was just reloaded). It gives up within this plus one `busyTimeout`.
+    static var openBusyRetryDeadline: TimeInterval = 15
 
     final class OffThreadCopy {
         fileprivate var cancelled = false
@@ -117,8 +120,38 @@ public class Database {
     }
 
     private func isBusyError(_ message: String) -> Bool {
+        return Database.isBusyMessage(message)
+    }
+
+    private static func isBusyMessage(_ message: String) -> Bool {
         let lower = message.lowercased()
         return lower.contains("locked") || lower.contains("busy")
+    }
+
+    /// Retries `attempt` while it fails with "database is locked", starting no new attempt once `retryDeadline` has
+    /// passed. An attempt can itself block for up to `busyTimeout`, so this returns or throws within
+    /// `retryDeadline + busyTimeout`.
+    static func retryWhileBusy(for retryDeadline: TimeInterval,
+                               now: () -> Date = Date.init,
+                               sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+                               onRetry: (Error, TimeInterval) -> Void = { _, _ in },
+                               _ attempt: () throws -> Void) throws {
+        let deadline = now().addingTimeInterval(retryDeadline)
+        var backoff: TimeInterval = 0.05
+        while true {
+            do {
+                try attempt()
+                return
+            } catch {
+                let remaining = deadline.timeIntervalSince(now())
+                guard isBusyMessage(error.localizedDescription), remaining > 0 else { throw error }
+                let pause = min(backoff, remaining)
+                onRetry(error, pause)
+                sleep(pause)
+                backoff = min(backoff * 2, 1)
+                guard now() < deadline else { throw error }
+            }
+        }
     }
 
     init(path: String) {
@@ -227,26 +260,20 @@ public class Database {
             }
         }
         
-        let deadline = Date().addingTimeInterval(Database.openBusyRetryDeadline)
-        var backoff: TimeInterval = 0.05
-        while true {
-            do {
+        // Another connection (e.g. a reloaded runtime's slice import) may still hold the file. Crashing here would
+        // kill the app mid-reload; waiting usually outlives a native writer that is about to finish.
+        do {
+            try Database.retryWhileBusy(for: Database.openBusyRetryDeadline, onRetry: { error, pause in
+                Database.logCopyEvent("Opening \(path) hit \(error.localizedDescription); retrying in \(pause)s")
+            }) {
                 try setWalMode(on: writer)
                 if reader !== writer {
                     try setWalMode(on: reader)
                     try setQueryOnly(on: reader)
                 }
-                break
-            } catch {
-                guard isBusyError(error.localizedDescription), Date() < deadline else {
-                    fatalError("Failed to configure database connections \(error)")
-                }
-                // Another connection (e.g. a reloaded runtime's slice import) still holds the file. Crashing here
-                // would kill the app mid-reload; waiting usually outlives a native writer that is about to finish.
-                Database.logCopyEvent("Opening \(path) hit \(error.localizedDescription); retrying in \(backoff)s")
-                Thread.sleep(forTimeInterval: backoff)
-                backoff = min(backoff * 2, 1)
             }
+        } catch {
+            fatalError("Failed to configure database connections \(error)")
         }
         
         consoleLog("Opened database at: \(path)")
@@ -422,12 +449,17 @@ public class Database {
     /// Waits for the writer semaphore in short slices so a cancel reaches a copy that is still queued behind
     /// another writer; such a copy then exits without ever touching the file.
     private func acquireWriterUnlessCancelled(_ copy: OffThreadCopy) throws {
+        var queued = false
         while true {
             if isCancelled(copy) {
                 throw Database.copyCancelledError("the database was opened again before the copy started")
             }
             if writerTransactionSemaphore.wait(timeout: .now() + .milliseconds(50)) == .success {
                 break
+            }
+            if !queued {
+                queued = true
+                Database.testStep("queuedForWriter")
             }
         }
         Database.offThreadCopies.lock()
@@ -703,7 +735,7 @@ public class Database {
     private func setWalMode(on db: FMDatabase) throws {
         // Must be first — if another connection holds a lock, all subsequent
         // PRAGMAs (including journal_mode) would throw immediately.
-        try db.executeQuery("pragma busy_timeout=5000", values: []).close()
+        try db.executeQuery("pragma busy_timeout=\(Int(Database.busyTimeout * 1000))", values: []).close()
 
         let result = try db.executeQuery("pragma journal_mode=wal", values: [])
         result.close()

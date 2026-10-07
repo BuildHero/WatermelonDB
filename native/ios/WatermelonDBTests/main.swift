@@ -36,6 +36,11 @@
 //             with no running copy don't wait.
 //   Test 13 — `open()` retries "database is locked" from another writer
 //             instead of `fatalError`.
+//   Test 14-15 — that retry starts no attempt after its deadline, so it gives up
+//             within the deadline plus one busy timeout (simulated clock, then a
+//             real lock).
+//   Test 16 — a copy registered before the bridge's async hop is cancelled by a
+//             reopen through its ticket, and a finished one leaves no entry.
 //
 // Pass test ids (`6 7`) to run a subset.
 //
@@ -525,9 +530,15 @@ private func test7_reopenDoesNotWaitForAQueuedCopy() {
     let (target, path) = makeReopenTarget()
     let src = makeSnapshotSource()
 
+    let queued = DispatchSemaphore(value: 0)
+    Database._test_onCopyStep = { step in
+        if step == "queuedForWriter" { queued.signal() }
+    }
+    defer { Database._test_onCopyStep = nil }
+
     target.writerTransactionSemaphore.wait() // another writer (e.g. a slice import) holds the semaphore, no SQL
     let run = runCopy(target, ["tasks"], src)
-    Thread.sleep(forTimeInterval: 0.2) // the copy is now parked on the semaphore
+    check(queued.wait(timeout: .now() + 5) == .success, "the copy registered and is parked on the semaphore")
 
     let openStart = Date()
     let reopened = Database(path: path)
@@ -536,7 +547,9 @@ private func test7_reopenDoesNotWaitForAQueuedCopy() {
 
     target.writerTransactionSemaphore.signal()
     check(run.done.wait(timeout: .now() + 5) == .success, "the queued copy exited")
-    check((run.error as NSError?)?.code == Int(SQLITE_INTERRUPT), "the queued copy was cancelled (error: \(String(describing: run.error)))")
+    let message = (run.error as NSError?)?.localizedDescription ?? ""
+    check((run.error as NSError?)?.code == Int(SQLITE_INTERRUPT) && message.contains("before the copy started"),
+          "the queued copy was cancelled while waiting, not refused at registration (error: \(message))")
     check(scalar(reopened, "SELECT count(*) FROM tasks") == "1", "the queued copy never wrote a row")
 }
 
@@ -694,6 +707,101 @@ private func test13_openWaitsOutABusyWriter() {
     check(scalar(reopened, "SELECT count(*) FROM tasks") == "2", "the opened connection reads the holder's committed row")
 }
 
+private let busyError = NSError(domain: "FMDatabase", code: 5, userInfo: [NSLocalizedDescriptionKey: "database is locked"])
+
+private func test14_openRetryEndsWithinDeadlinePlusOneBusyTimeout() {
+    print("Test 14: open()'s BUSY retry starts no attempt after its deadline (simulated clock, deadlines 0-40s)")
+    var worstOvershoot = -Double.infinity
+    var worstDeadline = 0.0
+    var bad = 0
+    for step in 0...800 {
+        let deadline = Double(step) * 0.05
+        var clock: TimeInterval = 0
+        var threw = false
+        do {
+            try Database.retryWhileBusy(for: deadline,
+                                        now: { Date(timeIntervalSinceReferenceDate: clock) },
+                                        sleep: { clock += $0 }) {
+                clock += Database.busyTimeout // every attempt blocks for the whole busy timeout, then fails
+                throw busyError
+            }
+        } catch {
+            threw = true
+        }
+        if !threw || clock < deadline || clock > deadline + Database.busyTimeout + 1e-9 { bad += 1 }
+        if clock - deadline > worstOvershoot {
+            worstOvershoot = clock - deadline
+            worstDeadline = deadline
+        }
+    }
+    check(bad == 0, "gave up between the deadline and deadline + busy timeout for every deadline " +
+          "(worst: \(String(format: "%.2f", worstOvershoot))s past a \(String(format: "%.2f", worstDeadline))s deadline)")
+}
+
+private func test15_openRetryGivesUpOnARealLock() {
+    print("Test 15: against a file held EXCLUSIVE, the retry gives up within deadline + one busy timeout")
+    let (target, path) = makeReopenTarget()
+    target.close()
+    var holder: OpaquePointer?
+    sqlite3_open(path, &holder)
+    sqlite3_exec(holder, "BEGIN EXCLUSIVE", nil, nil, nil)
+    sqlite3_exec(holder, "INSERT INTO tasks VALUES ('held', 'x')", nil, nil, nil)
+    defer {
+        sqlite3_exec(holder, "ROLLBACK", nil, nil, nil)
+        sqlite3_close(holder)
+    }
+
+    let probe = FMDatabase(path: path)
+    probe.open()
+    defer { probe.close() }
+    let deadline: TimeInterval = 1
+    let start = Date()
+    var finalError: Error?
+    do {
+        try Database.retryWhileBusy(for: deadline) {
+            try probe.executeQuery("pragma busy_timeout=\(Int(Database.busyTimeout * 1000))", values: []).close()
+            try probe.executeQuery("pragma journal_mode=wal", values: []).close()
+        }
+    } catch {
+        finalError = error
+    }
+    let seconds = Date().timeIntervalSince(start)
+    check(finalError != nil, "gave up with the BUSY error (\(String(describing: finalError)))")
+    check(seconds >= deadline && seconds <= deadline + Database.busyTimeout + 0.5,
+          "gave up after \(String(format: "%.2f", seconds))s (deadline \(deadline)s + busy timeout \(Database.busyTimeout)s)")
+}
+
+private func test16_registeredCopyIsCancelledByAReopen() {
+    print("Test 16: a copy registered before the async hop (the bridge path) is cancelled by a reopen before it starts")
+    let (target, path) = makeReopenTarget()
+    let src = makeSnapshotSource()
+    let registered = try! target.registerOffThreadCopy()
+
+    let openStart = Date()
+    let reopened = Database(path: path)
+    let openSeconds = Date().timeIntervalSince(openStart)
+    check(openSeconds < 0.5, "reopen did not wait for a registered copy that has not started (\(String(format: "%.2f", openSeconds))s)")
+
+    var copyError: Error?
+    do {
+        try target.copyTablesOnRawWriter(["tasks"], srcDB: src, registered: registered)
+    } catch {
+        copyError = error
+    }
+    let message = (copyError as NSError?)?.localizedDescription ?? ""
+    check((copyError as NSError?)?.code == Int(SQLITE_INTERRUPT) && message.contains("before the copy started"),
+          "the registered copy was cancelled through its ticket (error: \(message))")
+    check(scalar(reopened, "SELECT count(*) FROM tasks") == "1", "the cancelled copy wrote nothing")
+
+    let (finishing, finishingPath) = makeReopenTarget()
+    let ticket = try! finishing.registerOffThreadCopy()
+    try! finishing.copyTablesOnRawWriter(["tasks"], srcDB: src, registered: ticket)
+    let afterStart = Date()
+    let afterFinished = Database(path: finishingPath)
+    check(Date().timeIntervalSince(afterStart) < 0.5, "a finished registered copy leaves no registry entry behind")
+    check(scalar(afterFinished, "SELECT count(*) FROM tasks") == "3", "the registered copy committed")
+}
+
 private let allTests: [(String, () -> Void)] = [
     ("1", test1_standaloneBlocksWhileTransactionHeld),
     ("2a", test2a_standaloneSurvivesConcurrentRollback),
@@ -713,6 +821,9 @@ private let allTests: [(String, () -> Void)] = [
     ("11", test11_cancelBetweenTablesAndBeforeCommit),
     ("12", test12_reopenWithoutARunningCopy),
     ("13", test13_openWaitsOutABusyWriter),
+    ("14", test14_openRetryEndsWithinDeadlinePlusOneBusyTimeout),
+    ("15", test15_openRetryGivesUpOnARealLock),
+    ("16", test16_registeredCopyIsCancelledByAReopen),
 ]
 
 // Pass test ids (e.g. `6 7`) to run a subset; no arguments runs everything.
