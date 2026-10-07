@@ -28,6 +28,16 @@
 //   Test 5  — a JS reload opens the file again while the old runtime's off-thread
 //             copy runs: the new open cancels the copy (rolled back) instead of
 //             dying on "database is locked" in `open()`.
+//   Test 6-12 — review findings: a cancelled copy keeps the schema-version key;
+//             a reopen skips copies still queued on the semaphore and waits at
+//             most `reopenCopyWaitTimeout` for one holding the writer; every copy
+//             on the path is cancelled; a superseded connection can't start a
+//             copy; cancels between tables and before COMMIT roll back; reopens
+//             with no running copy don't wait.
+//   Test 13 — `open()` retries "database is locked" from another writer
+//             instead of `fatalError`.
+//
+// Pass test ids (`6 7`) to run a subset.
 //
 // Exit code 0 = all pass; non-zero = failure (CI-usable).
 
@@ -48,9 +58,21 @@ private func check(_ condition: Bool, _ message: String) {
     }
 }
 
+private var tempPaths: [String] = []
+
 private func tempDBPath() -> String {
     let name = "wmdb-5606-\(UUID().uuidString).db"
-    return (NSTemporaryDirectory() as NSString).appendingPathComponent(name)
+    let path = (NSTemporaryDirectory() as NSString).appendingPathComponent(name)
+    tempPaths.append(path)
+    return path
+}
+
+private func removeTempDBs() {
+    for path in tempPaths {
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            try? FileManager.default.removeItem(atPath: path + suffix)
+        }
+    }
 }
 
 private func makeDB() -> Database {
@@ -395,6 +417,13 @@ private func test5_reopenDuringCopyCancelsIt() {
 
     var copyError: Error?
     let copyDone = DispatchSemaphore(value: 0)
+    let insertRunning = DispatchSemaphore(value: 0)
+    var ticks = 0
+    Database._test_onProgressTick = {
+        ticks += 1
+        if ticks == 200 { insertRunning.signal() }
+    }
+    defer { Database._test_onProgressTick = nil }
     DispatchQueue.global().async {
         do {
             try target.copyTablesOnRawWriter(["tasks"], srcDB: srcPath)
@@ -403,30 +432,295 @@ private func test5_reopenDuringCopyCancelsIt() {
         }
         copyDone.signal()
     }
-    Thread.sleep(forTimeInterval: 1.0)
+    check(insertRunning.wait(timeout: .now() + 30) == .success, "the copy's INSERT is running (200 progress ticks)")
 
     let openStart = Date()
     let reopened = Database(path: targetPath)
     let openSeconds = Date().timeIntervalSince(openStart)
     copyDone.wait()
 
-    check(copyError != nil, "the in-flight copy was cancelled (error: \(String(describing: copyError)))")
+    check((copyError as NSError?)?.code == Int(SQLITE_INTERRUPT),
+          "the in-flight copy was cancelled with SQLITE_INTERRUPT (error: \(String(describing: copyError)))")
     check(openSeconds < 3, "the new connection opened in \(String(format: "%.2f", openSeconds))s, without waiting out the copy")
     check(scalar(reopened, "SELECT count(*) FROM tasks") == "1", "the cancelled copy rolled back: only the local row remains")
     check((try? reopened.executeStatements("INSERT INTO tasks VALUES ('after', 'reopen')")) != nil,
           "the new connection can write once the copy is gone")
 }
 
-test1_standaloneBlocksWhileTransactionHeld()
-test2a_standaloneSurvivesConcurrentRollback()
-test2b_bareExecuteLostOnConcurrentRollback()
-test3a_copyMatchesDriverCopyTables()
-test3b_copyWaitsForWriterSemaphore()
-test3c_failedCopyRollsBackAndReleases()
-test4a_databaseOpensInRollbackMode()
-test4b_readerBlocksBehindSpilledWrite()
-test4c_fmdbReadReturnsNoRowsWhenBusy()
-test5_reopenDuringCopyCancelsIt()
+
+// ---------------------------------------------------------------------------
+// Test 6-12 — review findings on the off-thread copy (MOBILE-7780).
+// ---------------------------------------------------------------------------
+private func makeBigSource(rows: Int) -> String {
+    let path = tempDBPath()
+    let src = Database(path: path)
+    try! src.executeStatements("""
+        CREATE TABLE local_storage (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO local_storage VALUES ('__watermelon_last_pulled_schema_version', '99');
+        CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT);
+        WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < \(rows))
+        INSERT INTO tasks SELECT hex(randomblob(16)), hex(randomblob(40)) FROM c;
+        """)
+    src.close()
+    return path
+}
+
+private func makeReopenTarget() -> (Database, String) {
+    let path = tempDBPath()
+    let db = Database(path: path)
+    try! db.executeStatements("""
+        CREATE TABLE local_storage (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO local_storage VALUES ('__watermelon_last_pulled_schema_version', '7'), ('keep', 'me');
+        CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT);
+        INSERT INTO tasks VALUES ('local', 'kept');
+        """)
+    _ = rawScalar(db.getRawPointer(), "pragma cache_size=50")
+    return (db, path)
+}
+
+private final class CopyRun {
+    var error: Error?
+    let done = DispatchSemaphore(value: 0)
+}
+
+private func runCopy(_ db: Database, _ tables: [String], _ src: String) -> CopyRun {
+    let run = CopyRun()
+    DispatchQueue.global().async {
+        do {
+            try db.copyTablesOnRawWriter(tables, srcDB: src)
+        } catch {
+            run.error = error
+        }
+        run.done.signal()
+    }
+    return run
+}
+
+private func test6_cancelledCopyKeepsSchemaVersionKey() {
+    print("Test 6: a cancelled copy leaves the schema-version key and every row as they were")
+    let (target, path) = makeReopenTarget()
+    let src = makeBigSource(rows: 3_000_000)
+    let insertRunning = DispatchSemaphore(value: 0)
+    var ticks = 0
+    Database._test_onProgressTick = {
+        ticks += 1
+        if ticks == 200 { insertRunning.signal() }
+    }
+    defer { Database._test_onProgressTick = nil }
+
+    let run = runCopy(target, ["local_storage", "tasks"], src)
+    _ = insertRunning.wait(timeout: .now() + 1) // falls back to ~1s into the copy on a build without the tick hook
+    let reopened = Database(path: path)
+    run.done.wait()
+
+    check(run.error != nil, "the copy was cancelled")
+    check(scalar(reopened, "SELECT value FROM local_storage WHERE key = '__watermelon_last_pulled_schema_version'") == "7",
+          "schema-version key is still '7' (the DELETE rolled back with the copy)")
+    check(scalar(reopened, "SELECT value FROM local_storage WHERE key = 'keep'") == "me", "other local_storage rows untouched")
+    check(scalar(reopened, "SELECT count(*) FROM tasks") == "1", "no copied rows remain")
+}
+
+private func test7_reopenDoesNotWaitForAQueuedCopy() {
+    print("Test 7: a reopen does not wait for a copy still queued on the writer semaphore, and that copy never runs")
+    let (target, path) = makeReopenTarget()
+    let src = makeSnapshotSource()
+
+    target.writerTransactionSemaphore.wait() // another writer (e.g. a slice import) holds the semaphore, no SQL
+    let run = runCopy(target, ["tasks"], src)
+    Thread.sleep(forTimeInterval: 0.2) // the copy is now parked on the semaphore
+
+    let openStart = Date()
+    let reopened = Database(path: path)
+    let openSeconds = Date().timeIntervalSince(openStart)
+    check(openSeconds < 0.5, "reopen returned in \(String(format: "%.2f", openSeconds))s without waiting for the queued copy")
+
+    target.writerTransactionSemaphore.signal()
+    check(run.done.wait(timeout: .now() + 5) == .success, "the queued copy exited")
+    check((run.error as NSError?)?.code == Int(SQLITE_INTERRUPT), "the queued copy was cancelled (error: \(String(describing: run.error)))")
+    check(scalar(reopened, "SELECT count(*) FROM tasks") == "1", "the queued copy never wrote a row")
+}
+
+private func test8_reopenWaitIsBounded() {
+    print("Test 8: a reopen waits at most reopenCopyWaitTimeout for a copy that does not respond to the cancel")
+    let (target, path) = makeReopenTarget()
+    let src = makeSnapshotSource()
+    let previousTimeout = Database.reopenCopyWaitTimeout
+    Database.reopenCopyWaitTimeout = 0.5
+    let inStep = DispatchSemaphore(value: 0)
+    Database._test_onCopyStep = { step in
+        if step == "beforeTable:tasks" {
+            inStep.signal()
+            Thread.sleep(forTimeInterval: 2.0) // stuck holding the writer, not checking the cancel flag
+        }
+    }
+    defer {
+        Database._test_onCopyStep = nil
+        Database.reopenCopyWaitTimeout = previousTimeout
+    }
+
+    let run = runCopy(target, ["tasks"], src)
+    inStep.wait()
+    let waitStart = Date()
+    Database._test_cancelAndWaitForCopies(path: path)
+    let waited = Date().timeIntervalSince(waitStart)
+    run.done.wait()
+
+    check(waited >= 0.4 && waited < 1.5, "reopen gave up waiting after \(String(format: "%.2f", waited))s (timeout 0.5s, copy stuck 2s)")
+    check(run.error != nil, "the stuck copy still saw the cancel once it resumed")
+}
+
+private func test9_reopenCancelsEveryCopyOnThePath() {
+    print("Test 9: with two copies on one connection, a reopen cancels the one still running after the other finished")
+    let (target, path) = makeReopenTarget()
+    let small = makeBigSource(rows: 300_000) // long enough that the second copy registers while it runs
+    let big = makeBigSource(rows: 3_000_000)
+
+    let bigRunning = DispatchSemaphore(value: 0)
+    var ticks = 0
+    Database._test_onProgressTick = {
+        ticks += 1
+        if ticks == 2000 { bigRunning.signal() }
+    }
+    defer { Database._test_onProgressTick = nil }
+
+    let smallRun = runCopy(target, ["tasks"], small)
+    Thread.sleep(forTimeInterval: 0.01)
+    let bigRun = runCopy(target, ["tasks"], big)
+    smallRun.done.wait()
+    _ = bigRunning.wait(timeout: .now() + 1) // falls back to ~1s on a build without the tick hook
+
+    let openStart = Date()
+    let reopened = Database(path: path)
+    let openSeconds = Date().timeIntervalSince(openStart)
+    bigRun.done.wait()
+
+    check(smallRun.error == nil, "the first copy finished normally")
+    check((bigRun.error as NSError?)?.code == Int(SQLITE_INTERRUPT), "the still-running copy was cancelled (error: \(String(describing: bigRun.error)))")
+    check(openSeconds < 3, "reopen took \(String(format: "%.2f", openSeconds))s")
+    _ = reopened
+}
+
+private func test10_supersededConnectionCannotStartACopy() {
+    print("Test 10: once the file is reopened, a copy started on the old connection is refused; the new one can copy")
+    let (old, path) = makeReopenTarget()
+    let src = makeSnapshotSource()
+    let reopened = Database(path: path)
+
+    var oldError: Error?
+    do {
+        try old.copyTablesOnRawWriter(["tasks"], srcDB: src)
+    } catch {
+        oldError = error
+    }
+    check(oldError != nil, "the old connection's copy was refused (error: \(String(describing: oldError)))")
+    check(scalar(reopened, "SELECT count(*) FROM tasks") == "1", "the refused copy wrote nothing")
+
+    var newError: Error?
+    do {
+        try reopened.copyTablesOnRawWriter(["tasks"], srcDB: src)
+    } catch {
+        newError = error
+    }
+    check(newError == nil, "the new connection's copy ran (error: \(String(describing: newError)))")
+    check(scalar(reopened, "SELECT count(*) FROM tasks") == "3", "the new connection's copy committed")
+}
+
+private func test11_cancelBetweenTablesAndBeforeCommit() {
+    for step in ["beforeTable:projects", "beforeCommit"] {
+        print("Test 11 (\(step)): a cancel at this point rolls the whole copy back with SQLITE_INTERRUPT")
+        let (target, path) = makeReopenTarget()
+        try! target.executeStatements("CREATE TABLE projects (id TEXT PRIMARY KEY, title TEXT)")
+        let src = makeSnapshotSource()
+        Database._test_onCopyStep = { current in
+            if current == step { Database._test_requestCancel(path: path) }
+        }
+        defer { Database._test_onCopyStep = nil }
+
+        var copyError: Error?
+        do {
+            try target.copyTablesOnRawWriter(["tasks", "projects"], srcDB: src)
+        } catch {
+            copyError = error
+        }
+        check((copyError as NSError?)?.code == Int(SQLITE_INTERRUPT), "copy cancelled (error: \(String(describing: copyError)))")
+        check(scalar(target, "SELECT count(*) FROM tasks") == "1", "tasks rolled back")
+        check(scalar(target, "SELECT value FROM local_storage WHERE key = '__watermelon_last_pulled_schema_version'") == "7",
+              "schema-version key kept")
+        check(!isOtherAttached(target), "source detached")
+    }
+}
+
+private func test12_reopenWithoutARunningCopy() {
+    print("Test 12: reopening after a finished copy, with no copy, or on another path does not wait or cancel")
+    let (target, path) = makeReopenTarget()
+    let src = makeSnapshotSource()
+    try! target.copyTablesOnRawWriter(["tasks"], srcDB: src)
+    var start = Date()
+    let afterFinished = Database(path: path)
+    check(Date().timeIntervalSince(start) < 0.5, "reopen after a finished copy is immediate")
+    check(scalar(afterFinished, "SELECT count(*) FROM tasks") == "3", "the finished copy's rows persisted")
+
+    let (_, otherPath) = makeReopenTarget()
+    start = Date()
+    _ = Database(path: otherPath)
+    check(Date().timeIntervalSince(start) < 0.5, "reopen with no copy is immediate")
+
+    let (running, _) = makeReopenTarget()
+    let big = makeBigSource(rows: 1_000_000)
+    let run = runCopy(running, ["tasks"], big)
+    Thread.sleep(forTimeInterval: 0.2)
+    _ = Database(path: tempDBPath()) // a different file
+    run.done.wait()
+    check(run.error == nil, "a copy on another path was not cancelled (error: \(String(describing: run.error)))")
+}
+
+private func test13_openWaitsOutABusyWriter() {
+    print("Test 13: opening while another connection holds the file locked past the busy timeout retries instead of crashing")
+    let (target, path) = makeReopenTarget()
+    target.close()
+    var holder: OpaquePointer?
+    sqlite3_open(path, &holder)
+    sqlite3_exec(holder, "BEGIN EXCLUSIVE", nil, nil, nil)
+    sqlite3_exec(holder, "INSERT INTO tasks VALUES ('held', 'x')", nil, nil, nil)
+    DispatchQueue.global().asyncAfter(deadline: .now() + 6.5) {
+        sqlite3_exec(holder, "COMMIT", nil, nil, nil)
+        sqlite3_close(holder)
+    }
+
+    let start = Date()
+    let reopened = Database(path: path)
+    let seconds = Date().timeIntervalSince(start)
+    check(seconds >= 6, "open waited for the lock holder (\(String(format: "%.2f", seconds))s, busy timeout 5s)")
+    check(scalar(reopened, "SELECT count(*) FROM tasks") == "2", "the opened connection reads the holder's committed row")
+}
+
+private let allTests: [(String, () -> Void)] = [
+    ("1", test1_standaloneBlocksWhileTransactionHeld),
+    ("2a", test2a_standaloneSurvivesConcurrentRollback),
+    ("2b", test2b_bareExecuteLostOnConcurrentRollback),
+    ("3a", test3a_copyMatchesDriverCopyTables),
+    ("3b", test3b_copyWaitsForWriterSemaphore),
+    ("3c", test3c_failedCopyRollsBackAndReleases),
+    ("4a", test4a_databaseOpensInRollbackMode),
+    ("4b", test4b_readerBlocksBehindSpilledWrite),
+    ("4c", test4c_fmdbReadReturnsNoRowsWhenBusy),
+    ("5", test5_reopenDuringCopyCancelsIt),
+    ("6", test6_cancelledCopyKeepsSchemaVersionKey),
+    ("7", test7_reopenDoesNotWaitForAQueuedCopy),
+    ("8", test8_reopenWaitIsBounded),
+    ("9", test9_reopenCancelsEveryCopyOnThePath),
+    ("10", test10_supersededConnectionCannotStartACopy),
+    ("11", test11_cancelBetweenTablesAndBeforeCommit),
+    ("12", test12_reopenWithoutARunningCopy),
+    ("13", test13_openWaitsOutABusyWriter),
+]
+
+// Pass test ids (e.g. `6 7`) to run a subset; no arguments runs everything.
+let selected = Set(CommandLine.arguments.dropFirst())
+for (id, test) in allTests where selected.isEmpty || selected.contains(id) {
+    test()
+}
+removeTempDBs()
 
 if failures == 0 {
     print("\nALL PASS")

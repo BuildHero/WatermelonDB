@@ -485,9 +485,18 @@ extension DatabaseBridge {
             return
         }
 
+        // Registered here, before the hop, so a reload that reopens the file before the copy starts still cancels it.
+        let copy: Database.OffThreadCopy
+        do {
+            copy = try driver.database.registerOffThreadCopy()
+        } catch {
+            sendReject(reject, error)
+            return
+        }
+
         DatabaseBridge.copyTablesQueue.async {
             do {
-                try driver.database.copyTablesOnRawWriter(tables, srcDB: srcDB)
+                try driver.database.copyTablesOnRawWriter(tables, srcDB: srcDB, registered: copy)
                 resolve(nil)
             } catch {
                 self.sendReject(reject, error)

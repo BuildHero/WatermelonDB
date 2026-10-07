@@ -30,6 +30,7 @@ done
 echo "== compiling Swift (real Database) + linking =="
 swiftc -o "$BUILD/wmdb5606tests" \
   -sdk "$SDK" \
+  -D WMDB_HOST_TESTS \
   -import-objc-header "$TESTS/BridgingHeader.h" \
   -Xcc -I"$FMDB" -Xcc -IWatermelonDB \
   WatermelonDB/std_ext.swift \
@@ -39,4 +40,4 @@ swiftc -o "$BUILD/wmdb5606tests" \
   -framework Foundation -lsqlite3
 
 echo "== running =="
-"$BUILD/wmdb5606tests"
+"$BUILD/wmdb5606tests" "$@"
