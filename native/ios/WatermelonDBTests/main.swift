@@ -25,6 +25,9 @@
 //             the JS dispatcher holds other calls until the off-thread copy ends.
 //             4c: an FMDB read (`queryRaw`, behind find/getLocal) that hits that
 //             SQLITE_BUSY returns NO rows instead of throwing.
+//   Test 5  — a JS reload opens the file again while the old runtime's off-thread
+//             copy runs: the new open cancels the copy (rolled back) instead of
+//             dying on "database is locked" in `open()`.
 //
 // Exit code 0 = all pass; non-zero = failure (CI-usable).
 
@@ -366,6 +369,54 @@ private func test4c_fmdbReadReturnsNoRowsWhenBusy() {
     check(count(db, whereV: "committed") == 1, "the committed row is there once the write ends")
 }
 
+// ---------------------------------------------------------------------------
+// Test 5 — a JS reload opens the file again while the old runtime's copy runs.
+// ---------------------------------------------------------------------------
+private func test5_reopenDuringCopyCancelsIt() {
+    print("Test 5: opening the same file while an off-thread copy runs cancels the copy instead of failing to open")
+    let srcPath = tempDBPath()
+    let src = Database(path: srcPath)
+    try! src.executeStatements("""
+        CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT);
+        WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 3000000)
+        INSERT INTO tasks SELECT hex(randomblob(16)), hex(randomblob(40)) FROM c;
+        """)
+    src.close()
+
+    let targetPath = tempDBPath()
+    let target = Database(path: targetPath)
+    try! target.executeStatements("""
+        CREATE TABLE local_storage (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE tasks (id TEXT PRIMARY KEY, name TEXT);
+        INSERT INTO tasks VALUES ('local', 'kept');
+        """)
+    // A small cache makes the copy spill early, as the device copy does on a real snapshot.
+    _ = rawScalar(target.getRawPointer(), "pragma cache_size=50")
+
+    var copyError: Error?
+    let copyDone = DispatchSemaphore(value: 0)
+    DispatchQueue.global().async {
+        do {
+            try target.copyTablesOnRawWriter(["tasks"], srcDB: srcPath)
+        } catch {
+            copyError = error
+        }
+        copyDone.signal()
+    }
+    Thread.sleep(forTimeInterval: 1.0)
+
+    let openStart = Date()
+    let reopened = Database(path: targetPath)
+    let openSeconds = Date().timeIntervalSince(openStart)
+    copyDone.wait()
+
+    check(copyError != nil, "the in-flight copy was cancelled (error: \(String(describing: copyError)))")
+    check(openSeconds < 3, "the new connection opened in \(String(format: "%.2f", openSeconds))s, without waiting out the copy")
+    check(scalar(reopened, "SELECT count(*) FROM tasks") == "1", "the cancelled copy rolled back: only the local row remains")
+    check((try? reopened.executeStatements("INSERT INTO tasks VALUES ('after', 'reopen')")) != nil,
+          "the new connection can write once the copy is gone")
+}
+
 test1_standaloneBlocksWhileTransactionHeld()
 test2a_standaloneSurvivesConcurrentRollback()
 test2b_bareExecuteLostOnConcurrentRollback()
@@ -375,6 +426,7 @@ test3c_failedCopyRollsBackAndReleases()
 test4a_databaseOpensInRollbackMode()
 test4b_readerBlocksBehindSpilledWrite()
 test4c_fmdbReadReturnsNoRowsWhenBusy()
+test5_reopenDuringCopyCancelsIt()
 
 if failures == 0 {
     print("\nALL PASS")

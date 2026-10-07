@@ -58,6 +58,18 @@ public class Database {
     /// and SliceImport. Acquired before BEGIN, released after COMMIT/ROLLBACK.
     public let writerTransactionSemaphore = DispatchSemaphore(value: 1)
 
+    // In-flight off-thread copies by file path. A JS reload opens the file again while the old runtime's copy
+    // still holds the writer, and `open()` then dies on "database is locked", so the new open cancels it first.
+    private static let offThreadCopies = NSCondition()
+    private static var offThreadCopyByPath: [String: Database] = [:]
+    private let copyCancelLock = NSLock()
+    private var _copyCancelRequested = false
+    fileprivate var copyCancelRequested: Bool {
+        copyCancelLock.lock()
+        defer { copyCancelLock.unlock() }
+        return _copyCancelRequested
+    }
+
     // MARK: - Writer-lock holder tracking (diagnostics)
     // Tracks who currently holds the writer (or has it BEGIN IMMEDIATE'd) so
     // that BUSY errors on the non-transactional writer path can attribute the
@@ -109,7 +121,22 @@ public class Database {
         } else {
             reader = FMDatabase(path: path)
         }
+        Database.cancelOffThreadCopy(path: path)
         open()
+    }
+
+    /// Cancels an off-thread copy still running on another `Database` for this file and waits for it to roll back.
+    private static func cancelOffThreadCopy(path: String) {
+        offThreadCopies.lock()
+        defer { offThreadCopies.unlock() }
+        guard let copying = offThreadCopyByPath[path] else { return }
+        consoleLog("Cancelling the off-thread copy still running on \(path)")
+        copying.copyCancelLock.lock()
+        copying._copyCancelRequested = true
+        copying.copyCancelLock.unlock()
+        while offThreadCopyByPath[path] != nil {
+            offThreadCopies.wait()
+        }
     }
 
     deinit {
@@ -265,6 +292,16 @@ public class Database {
     /// `DatabaseDriver.copyTables` for callers off `methodQueue`. Holds the writer semaphore from ATTACH to DETACH and
     /// touches only the raw writer handle, never the FMDB objects or `transactionDepth`, so reads stay on the reader.
     func copyTablesOnRawWriter(_ tables: [String], srcDB: String) throws {
+        Database.offThreadCopies.lock()
+        Database.offThreadCopyByPath[path] = self
+        Database.offThreadCopies.unlock()
+        defer {
+            Database.offThreadCopies.lock()
+            Database.offThreadCopyByPath[path] = nil
+            Database.offThreadCopies.broadcast()
+            Database.offThreadCopies.unlock()
+        }
+
         writerTransactionSemaphore.wait()
         setWriterHolder("copy-tables")
         defer {
@@ -274,6 +311,7 @@ public class Database {
 
         let db = getRawPointer()
 
+        try throwIfCopyCancelled()
         try rawExec(db, "ATTACH DATABASE '\(srcDB)' as 'other'")
         defer {
             do {
@@ -287,20 +325,41 @@ public class Database {
 
         try rawExec(db, "BEGIN IMMEDIATE")
         do {
-            for table in tables {
-                let commonColumns = try rawColumnNames(db, table, schema: "main")
-                    .intersection(rawColumnNames(db, table, schema: "other"))
-                guard !commonColumns.isEmpty else { continue }
+            try whileCopyCancellable(db) {
+                for table in tables {
+                    try throwIfCopyCancelled()
+                    let commonColumns = try rawColumnNames(db, table, schema: "main")
+                        .intersection(rawColumnNames(db, table, schema: "other"))
+                    guard !commonColumns.isEmpty else { continue }
 
-                let columnsString = commonColumns.map { "\"\($0)\"" }.joined(separator: ", ")
-                try rawExec(db, "INSERT OR IGNORE INTO \(table) (\(columnsString)) SELECT \(columnsString) FROM other.\(table)")
+                    let columnsString = commonColumns.map { "\"\($0)\"" }.joined(separator: ", ")
+                    try rawExec(db, "INSERT OR IGNORE INTO \(table) (\(columnsString)) SELECT \(columnsString) FROM other.\(table)")
+                }
             }
+            try throwIfCopyCancelled()
             try rawExec(db, "COMMIT")
         } catch {
             // SQLite may already have rolled back on its own (e.g. SQLITE_FULL), so a failed ROLLBACK is expected.
             try? rawExec(db, "ROLLBACK")
             throw error
         }
+    }
+
+    private func throwIfCopyCancelled() throws {
+        guard copyCancelRequested else { return }
+        throw NSError(domain: "WatermelonDB", code: Int(SQLITE_INTERRUPT),
+                      userInfo: [NSLocalizedDescriptionKey: "Off-thread copy cancelled: the database was opened again"])
+    }
+
+    /// Runs `body` with a progress handler that aborts the running statement (SQLITE_INTERRUPT) once a cancel is
+    /// requested. Removed before COMMIT/ROLLBACK/DETACH so those always run to completion.
+    private func whileCopyCancellable(_ db: OpaquePointer, _ body: () throws -> Void) throws {
+        sqlite3_progress_handler(db, 1000, { context in
+            guard let context = context else { return 0 }
+            return Unmanaged<Database>.fromOpaque(context).takeUnretainedValue().copyCancelRequested ? 1 : 0
+        }, Unmanaged.passUnretained(self).toOpaque())
+        defer { sqlite3_progress_handler(db, 0, nil, nil) }
+        try body()
     }
 
     private func rawExec(_ db: OpaquePointer, _ sql: String) throws {
