@@ -21,9 +21,10 @@ cmake --build build
 ./build/slice_import_engine_tests
 ./build/sqlite_insert_helper_tests
 ./build/database_utils_tests
+./build/sync_listener_dispatch_tests
 ```
 
 Notes:
 - `SIMDJSON_INCLUDE_DIR` should point at the directory containing `simdjson.h`.
-- `database_utils_tests` requires Hermes + JSI headers/libs. It is skipped if not found.
+- `database_utils_tests` and `sync_listener_dispatch_tests` require Hermes + JSI headers/libs. They are skipped if not found.
 - `yarn test:cpp` will attempt to prepare/build Hermes if missing (requires network + Xcode tools).

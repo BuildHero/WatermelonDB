@@ -126,6 +126,12 @@ if (HERMES_HEADER_OK AND EXISTS "${JSI_INCLUDE_DIR}/jsi/jsi.h" AND HERMES_LIB)
   )
   target_include_directories(database_utils_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR}/.. ${JSI_INCLUDE_DIR} ${HERMES_INCLUDE_DIR})
   target_link_libraries(database_utils_tests PRIVATE SQLite::SQLite3 ${HERMES_LIB})
+
+  add_executable(sync_listener_dispatch_tests
+    SyncListenerDispatchTests.cpp
+  )
+  target_include_directories(sync_listener_dispatch_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR}/.. ${JSI_INCLUDE_DIR} ${HERMES_INCLUDE_DIR})
+  target_link_libraries(sync_listener_dispatch_tests PRIVATE ${HERMES_LIB})
 else()
-  message(STATUS "Hermes/JSI not found; database_utils_tests will be skipped")
+  message(STATUS "Hermes/JSI not found; database_utils_tests and sync_listener_dispatch_tests will be skipped")
 endif()
