@@ -18,10 +18,13 @@
 //   Test 3a-c — `copyTablesOnRawWriter` (MOBILE-7780, off-JS-thread snapshot
 //             copy): same result as `DatabaseDriver.copyTables`, waits for the
 //             writer semaphore, and rolls back + detaches + releases on failure.
-//   Test 4a-c — (BUG, characterization) `setWalMode` never steps
+//   Test 4a-c — (characterization) `setWalMode` never steps
 //             `pragma journal_mode=wal`, so the database stays in rollback mode
-//             and a reader blocks behind any write that spills the page cache,
-//             including `copyTablesOnRawWriter`. Flip these when WAL is fixed.
+//             and a reader gets SQLITE_BUSY behind any write that spills the page
+//             cache, including `copyTablesOnRawWriter`. WAL stays off on purpose;
+//             the JS dispatcher holds other calls until the off-thread copy ends.
+//             4c: an FMDB read (`queryRaw`, behind find/getLocal) that hits that
+//             SQLITE_BUSY returns NO rows instead of throwing.
 //
 // Exit code 0 = all pass; non-zero = failure (CI-usable).
 
@@ -298,7 +301,7 @@ private func test3c_failedCopyRollsBackAndReleases() {
 
 print("MOBILE-5606 writer-serialization tests")
 // ---------------------------------------------------------------------------
-// Test 4 — (BUG) the database is in rollback mode, so readers block on writers.
+// Test 4 — the database is in rollback mode, so readers block on writers.
 // ---------------------------------------------------------------------------
 private func rawScalar(_ handle: OpaquePointer, _ sql: String) -> (rc: Int32, value: String?) {
     var stmt: OpaquePointer?
@@ -327,23 +330,40 @@ private func readWhileSpilledWriteIsOpen(_ db: Database) -> Int32 {
 }
 
 private func test4a_databaseOpensInRollbackMode() {
-    print("Test 4a (BUG): Database(path:) leaves the file in rollback mode, not WAL")
+    print("Test 4a: Database(path:) leaves the file in rollback mode, not WAL")
     let db = makeDB()
     check(rawScalar(db.getRawPointer(), "pragma journal_mode").value == "delete",
           "journal_mode is 'delete' after open: executeQuery prepares 'pragma journal_mode=wal' but never steps it")
 }
 
 private func test4b_readerBlocksBehindSpilledWrite() {
-    print("Test 4b (BUG): in rollback mode a reader gets SQLITE_BUSY behind a write that spilled the cache")
+    print("Test 4b: in rollback mode a reader gets SQLITE_BUSY behind a write that spilled the cache")
     let db = makeDB()
     check(readWhileSpilledWriteIsOpen(db) == SQLITE_BUSY, "reader read failed with SQLITE_BUSY (database is locked)")
 }
 
-private func test4c_walModeLetsReaderRead() {
-    print("Test 4c: once the file is really in WAL mode, the same reader read succeeds")
+private func test4c_fmdbReadReturnsNoRowsWhenBusy() {
+    print("Test 4c: an FMDB reader read that hits SQLITE_BUSY returns no rows instead of throwing")
     let db = makeDB()
-    check(rawScalar(db.getRawPointer(), "pragma journal_mode=wal").value == "wal", "stepping the pragma switches to WAL")
-    check(readWhileSpilledWriteIsOpen(db) == SQLITE_ROW, "reader read returned a row while the spilled write was open")
+    try! db.executeStatements("INSERT INTO t (v) VALUES ('committed')")
+    let writer = db.getRawPointer()
+    sqlite3_busy_timeout(db.getRawReadPointer(), 200)
+    _ = rawScalar(db.getRawReadPointer(), "SELECT count(*) FROM t")
+    _ = rawScalar(writer, "pragma cache_size=5")
+    _ = rawScalar(writer, "pragma cache_spill=5")
+    sqlite3_exec(writer, "BEGIN IMMEDIATE", nil, nil, nil)
+    sqlite3_exec(writer, "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 5000) INSERT INTO t (v) SELECT hex(randomblob(100)) FROM c", nil, nil, nil)
+    var rows = 0
+    var threw = false
+    do {
+        let iter = try db.queryRaw("SELECT v FROM t WHERE v = 'committed'")
+        while iter.next() != nil { rows += 1 }
+    } catch {
+        threw = true
+    }
+    sqlite3_exec(writer, "ROLLBACK", nil, nil, nil)
+    check(!threw && rows == 0, "queryRaw returned 0 rows and no error while the committed row exists (rows=\(rows), threw=\(threw))")
+    check(count(db, whereV: "committed") == 1, "the committed row is there once the write ends")
 }
 
 test1_standaloneBlocksWhileTransactionHeld()
@@ -354,7 +374,7 @@ test3b_copyWaitsForWriterSemaphore()
 test3c_failedCopyRollsBackAndReleases()
 test4a_databaseOpensInRollbackMode()
 test4b_readerBlocksBehindSpilledWrite()
-test4c_walModeLetsReaderRead()
+test4c_fmdbReadReturnsNoRowsWhenBusy()
 
 if failures == 0 {
     print("\nALL PASS")
