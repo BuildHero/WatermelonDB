@@ -18,6 +18,12 @@ import type {
 
 import { syncReturnToResult } from '../common'
 
+import {
+  emitCopyTablesEvent,
+  isCopyCancelledError,
+  isCopyTablesOffThreadEnabled,
+} from './copyTablesOptions'
+
 // Local type definition for the Turbo Module
 type NativeWatermelonDBModuleSpec = {
   query(tag: number, table: string, query: string): Record<string, any>[]
@@ -167,21 +173,55 @@ export const makeDispatcher = (
       }
 
       // Keeps a synchronous connection's snapshot copy off the JS thread; binaries without the method block as before.
-      if (
-        methodName === 'copyTables' &&
-        type === 'synchronous' &&
-        DatabaseBridge.copyTablesOffThread
-      ) {
+      if (methodName === 'copyTables' && type === 'synchronous') {
         const [tables, srcDB] = otherArgs
-        copyInFlight = true
-        fromPromise(DatabaseBridge.copyTablesOffThread(tag, tables, srcDB), (result) => {
+        const offThread = isCopyTablesOffThreadEnabled() && !!DatabaseBridge.copyTablesOffThread
+        const mode = offThread ? 'offThread' : 'blocking'
+        const tableCount = Array.isArray(tables) ? tables.length : 0
+        const startedAt = Date.now()
+        const report = (result: any) => {
+          const durationMs = Date.now() - startedAt
+          emitCopyTablesEvent(
+            result.error
+              ? {
+                  type: 'error',
+                  mode,
+                  tables: tableCount,
+                  durationMs,
+                  cancelled: isCopyCancelledError(result.error),
+                  error: result.error,
+                }
+              : { type: 'end', mode, tables: tableCount, durationMs },
+          )
+        }
+        emitCopyTablesEvent({ type: 'start', mode, tables: tableCount })
+
+        if (!offThread) {
+          const blockingCopy = (DatabaseBridge as any).copyTablesSynchronous
+          const result = syncReturnToResult(blockingCopy(tag, tables, srcDB))
+          report(result)
+          callback(result)
+          return
+        }
+
+        const settle = (result: any) => {
           copyInFlight = false
+          report(result)
           try {
             callback(result)
           } finally {
             runWaitingCalls()
           }
-        })
+        }
+        copyInFlight = true
+        let copyPromise
+        try {
+          copyPromise = DatabaseBridge.copyTablesOffThread!(tag, tables, srcDB)
+        } catch (error: any) {
+          settle({ error })
+          return
+        }
+        fromPromise(copyPromise, settle)
         return
       }
 

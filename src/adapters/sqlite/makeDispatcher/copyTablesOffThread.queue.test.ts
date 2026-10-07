@@ -202,4 +202,51 @@ describe('makeDispatcher while an off-thread copyTables is in flight', () => {
 
     expect(findCallback).toHaveBeenCalledWith({ value: 'record' })
   })
+
+  it('runs a second copyTables only after the first one settles', async () => {
+    const first = deferred()
+    const second = deferred()
+    bridge.copyTablesOffThread = jest
+      .fn()
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise)
+    const dispatcher = makeDispatcher('synchronous', 7, 'db')
+    const firstCallback = jest.fn(() => order.push('first-callback'))
+    const secondCallback = jest.fn(() => order.push('second-callback'))
+    const findCallback = jest.fn(() => order.push('find-callback'))
+
+    dispatcher.copyTables(['tasks'], '/tmp/a.db', firstCallback)
+    dispatcher.copyTables(['projects'], '/tmp/b.db', secondCallback)
+    dispatcher.find('tasks', 'id1', findCallback)
+
+    expect(bridge.copyTablesOffThread).toHaveBeenCalledTimes(1)
+
+    first.resolve(null)
+    await flush()
+
+    expect(bridge.copyTablesOffThread).toHaveBeenCalledTimes(2)
+    expect(bridge.copyTablesOffThread).toHaveBeenLastCalledWith(7, ['projects'], '/tmp/b.db')
+    expect(findCallback).not.toHaveBeenCalled()
+
+    second.resolve(null)
+    await flush()
+
+    expect(order).toEqual(['first-callback', 'second-callback', 'find', 'find-callback'])
+  })
+
+  it('reports a synchronous bridge throw and does not leave later calls stuck', () => {
+    const error = new Error('bridge exploded')
+    bridge.copyTablesOffThread = jest.fn(() => {
+      throw error
+    })
+    const dispatcher = makeDispatcher('synchronous', 7, 'db')
+    const copyCallback = jest.fn()
+    const findCallback = jest.fn()
+
+    expect(() => dispatcher.copyTables(['tasks'], '/tmp/src.db', copyCallback)).not.toThrow()
+    dispatcher.find('tasks', 'id1', findCallback)
+
+    expect(copyCallback).toHaveBeenCalledWith({ error })
+    expect(findCallback).toHaveBeenCalledWith({ value: 'record' })
+  })
 })

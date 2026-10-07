@@ -9,11 +9,13 @@
 
 ### New features
 
+- `configureCopyTables({ offThread, onEvent })` (exported from `adapters/sqlite`). `offThread: false` forces the blocking `copyTablesSynchronous` on synchronous connections, read at call time, so an app can turn the iOS off-thread copy off remotely. `onEvent` receives `start` / `end` / `error` events (mode, table count, duration, `cancelled`) for the app's logger.
 - `database.enableNativeCDC()` now automatically calls `database.notify()` when native code writes to the database. This ensures observers refresh after native sync operations write directly to SQLite. When native CDC is enabled, `batch()` skips its internal `notify()` call to avoid duplicate notifications. Added `database.disableNativeCDC()` for cleanup.
 
 ### Performance
 
 - iOS: `database.copyTables()` on a synchronous adapter no longer blocks the JS thread. The copy now runs on its own serial queue (`copyTablesOffThread`), holding the writer semaphore from ATTACH to DETACH, and resolves a promise when it commits. The SQL and the single transaction are unchanged. JS on a binary without the new method falls back to the blocking `copyTablesSynchronous`. Android was already asynchronous. While the off-thread copy runs, the dispatcher holds every other call on that connection and runs them in order once the copy settles, because the file is in rollback mode and a read during the copy would block JS for the 5 s busy timeout and then fail (JSI) or come back empty (FMDB).
+- iOS: the off-thread copy is cancellable and bounded. Reopening the database file (a JS reload) cancels every copy on that file. A copy still queued behind another writer exits without touching the file. One that holds the writer is interrupted and rolled back, and the reopen waits at most `Database.reopenCopyWaitTimeout` (5 s) for it. The schema-version key delete now runs inside the copy transaction, so a cancelled or failed copy keeps it. A copy started on a connection that a newer open has superseded is refused. `Database` opening also retries "database is locked" (another native writer on the file) for up to 30 s before failing.
 
 ### Changes
 
