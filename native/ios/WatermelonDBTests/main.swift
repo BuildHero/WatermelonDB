@@ -18,10 +18,15 @@
 //   Test 3a-c — `copyTablesOnRawWriter` (MOBILE-7780, off-JS-thread snapshot
 //             copy): same result as `DatabaseDriver.copyTables`, waits for the
 //             writer semaphore, and rolls back + detaches + releases on failure.
+//   Test 4a-c — (BUG, characterization) `setWalMode` never steps
+//             `pragma journal_mode=wal`, so the database stays in rollback mode
+//             and a reader blocks behind any write that spills the page cache,
+//             including `copyTablesOnRawWriter`. Flip these when WAL is fixed.
 //
 // Exit code 0 = all pass; non-zero = failure (CI-usable).
 
 import Foundation
+import SQLite3
 
 // std_ext's `consoleLog` routes through this hook; silence it for the test.
 _watermelonDBLoggingHook = { _ in }
@@ -292,12 +297,64 @@ private func test3c_failedCopyRollsBackAndReleases() {
 }
 
 print("MOBILE-5606 writer-serialization tests")
+// ---------------------------------------------------------------------------
+// Test 4 — (BUG) the database is in rollback mode, so readers block on writers.
+// ---------------------------------------------------------------------------
+private func rawScalar(_ handle: OpaquePointer, _ sql: String) -> (rc: Int32, value: String?) {
+    var stmt: OpaquePointer?
+    var rc = sqlite3_prepare_v2(handle, sql, -1, &stmt, nil)
+    defer { sqlite3_finalize(stmt) }
+    guard rc == SQLITE_OK else { return (rc, nil) }
+    rc = sqlite3_step(stmt)
+    let value = rc == SQLITE_ROW ? sqlite3_column_text(stmt, 0).map { String(cString: $0) } : nil
+    return (rc, value)
+}
+
+/// Opens a write transaction on the raw writer that spills the page cache (as the snapshot copy does),
+/// then reads on the reader connection with a short busy timeout. Returns the reader's step result code.
+private func readWhileSpilledWriteIsOpen(_ db: Database) -> Int32 {
+    let writer = db.getRawPointer()
+    let reader = db.getRawReadPointer()
+    sqlite3_busy_timeout(reader, 200)
+    _ = rawScalar(reader, "SELECT count(*) FROM t") // load the schema on the reader, as a running app has
+    _ = rawScalar(writer, "pragma cache_size=5")
+    _ = rawScalar(writer, "pragma cache_spill=5")
+    sqlite3_exec(writer, "BEGIN IMMEDIATE", nil, nil, nil)
+    sqlite3_exec(writer, "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 5000) INSERT INTO t (v) SELECT hex(randomblob(100)) FROM c", nil, nil, nil)
+    let read = rawScalar(reader, "SELECT count(*) FROM t")
+    sqlite3_exec(writer, "ROLLBACK", nil, nil, nil)
+    return read.rc
+}
+
+private func test4a_databaseOpensInRollbackMode() {
+    print("Test 4a (BUG): Database(path:) leaves the file in rollback mode, not WAL")
+    let db = makeDB()
+    check(rawScalar(db.getRawPointer(), "pragma journal_mode").value == "delete",
+          "journal_mode is 'delete' after open: executeQuery prepares 'pragma journal_mode=wal' but never steps it")
+}
+
+private func test4b_readerBlocksBehindSpilledWrite() {
+    print("Test 4b (BUG): in rollback mode a reader gets SQLITE_BUSY behind a write that spilled the cache")
+    let db = makeDB()
+    check(readWhileSpilledWriteIsOpen(db) == SQLITE_BUSY, "reader read failed with SQLITE_BUSY (database is locked)")
+}
+
+private func test4c_walModeLetsReaderRead() {
+    print("Test 4c: once the file is really in WAL mode, the same reader read succeeds")
+    let db = makeDB()
+    check(rawScalar(db.getRawPointer(), "pragma journal_mode=wal").value == "wal", "stepping the pragma switches to WAL")
+    check(readWhileSpilledWriteIsOpen(db) == SQLITE_ROW, "reader read returned a row while the spilled write was open")
+}
+
 test1_standaloneBlocksWhileTransactionHeld()
 test2a_standaloneSurvivesConcurrentRollback()
 test2b_bareExecuteLostOnConcurrentRollback()
 test3a_copyMatchesDriverCopyTables()
 test3b_copyWaitsForWriterSemaphore()
 test3c_failedCopyRollsBackAndReleases()
+test4a_databaseOpensInRollbackMode()
+test4b_readerBlocksBehindSpilledWrite()
+test4c_walModeLetsReaderRead()
 
 if failures == 0 {
     print("\nALL PASS")
