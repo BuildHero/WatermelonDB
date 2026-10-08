@@ -18,6 +18,12 @@ import type {
 
 import { syncReturnToResult } from '../common'
 
+import {
+  emitCopyTablesEvent,
+  isCopyCancelledError,
+  isCopyTablesOffThreadEnabled,
+} from './copyTablesOptions'
+
 // Local type definition for the Turbo Module
 type NativeWatermelonDBModuleSpec = {
   query(tag: number, table: string, query: string): Record<string, any>[]
@@ -94,6 +100,21 @@ export const makeDispatcher = (
   dbName: string,
   useHybridJSI?: boolean,
 ): NativeDispatcher => {
+  // The file is in rollback (not WAL) mode, so the off-thread copy's write transaction locks readers out:
+  // a read blocks JS for the 5 s busy timeout, then throws (JSI) or comes back empty (FMDB). Calls wait instead.
+  let copyInFlight = false
+  const waitingForCopy: Array<() => void> = []
+  const runWaitingCalls = () => {
+    while (!copyInFlight && waitingForCopy.length) {
+      try {
+        waitingForCopy.shift()!()
+      } catch (error) {
+        // The original caller is gone, and a throwing callback must not strand the calls behind it.
+        logger.error('[WatermelonDB][SQLite] callback deferred behind copyTables threw', error)
+      }
+    }
+  }
+
   const methods = dispatcherMethods.map((methodName) => {
     // batchJSON is missing on Android, and not available when using Hybrid JSI
     // @ts-ignore
@@ -103,64 +124,125 @@ export const makeDispatcher = (
 
     const name = type === 'synchronous' ? `${methodName}Synchronous` : methodName
 
+    const dispatch = (...args: any[]): void => {
+      const callback = args[args.length - 1]
+      const otherArgs = args.slice(0, -1)
+
+      // Use Turbo Module if available for supported methods
+      if (NativeWatermelonDBModule && supportedTurboModuleMethods.has(methodName)) {
+        try {
+          let returnValue: any
+          if (methodName === 'query') {
+            // For query method: query(tag, table, query)
+            const [table, query] = otherArgs
+            returnValue = NativeWatermelonDBModule.query(tag, table, query)
+          } else if (methodName === 'execSqlQuery') {
+            // For execSqlQuery method: execSqlQuery(tag, sql, args)
+            const [sql, args] = otherArgs
+            returnValue = NativeWatermelonDBModule.execSqlQuery(tag, sql, args)
+          } else if (methodName === 'execSqlQueryOnWriter') {
+            // For execSqlQueryOnWriter method: always uses writer connection
+            const [sql, args] = otherArgs
+            returnValue = NativeWatermelonDBModule.execSqlQueryOnWriter(tag, sql, args)
+          }
+          callback({
+            value: returnValue,
+          })
+        } catch (error: any) {
+          callback({ error })
+        }
+        return
+      }
+
+      if (useHybridJSI && supportedHybridJSIMethods.has(methodName)) {
+        try {
+          // @ts-ignore
+          const returnValue = global.WatermelonDB[methodName](tag, ...otherArgs)
+
+          callback(
+            syncReturnToResult({
+              status: 'success',
+              result: returnValue,
+            }),
+          )
+        } catch (error: any) {
+          callback({ error })
+        }
+
+        return
+      }
+
+      // Keeps a synchronous connection's snapshot copy off the JS thread; binaries without the method block as before.
+      if (methodName === 'copyTables' && type === 'synchronous') {
+        const [tables, srcDB] = otherArgs
+        const offThread = isCopyTablesOffThreadEnabled() && !!DatabaseBridge.copyTablesOffThread
+        const mode = offThread ? 'offThread' : 'blocking'
+        const tableCount = Array.isArray(tables) ? tables.length : 0
+        const startedAt = Date.now()
+        const report = (result: any) => {
+          const durationMs = Date.now() - startedAt
+          emitCopyTablesEvent(
+            result.error
+              ? {
+                  type: 'error',
+                  mode,
+                  tables: tableCount,
+                  durationMs,
+                  cancelled: isCopyCancelledError(result.error),
+                  error: result.error,
+                }
+              : { type: 'end', mode, tables: tableCount, durationMs },
+          )
+        }
+        emitCopyTablesEvent({ type: 'start', mode, tables: tableCount })
+
+        if (!offThread) {
+          const blockingCopy = (DatabaseBridge as any).copyTablesSynchronous
+          const result = syncReturnToResult(blockingCopy(tag, tables, srcDB))
+          report(result)
+          callback(result)
+          return
+        }
+
+        const settle = (result: any) => {
+          copyInFlight = false
+          report(result)
+          try {
+            callback(result)
+          } finally {
+            runWaitingCalls()
+          }
+        }
+        copyInFlight = true
+        let copyPromise
+        try {
+          copyPromise = DatabaseBridge.copyTablesOffThread!(tag, tables, srcDB)
+        } catch (error: any) {
+          settle({ error })
+          return
+        }
+        fromPromise(copyPromise, settle)
+        return
+      }
+
+      // @ts-ignore
+      const returnValue = DatabaseBridge[name](tag, ...otherArgs)
+
+      if (type === 'synchronous') {
+        callback(syncReturnToResult(returnValue as any))
+      } else {
+        fromPromise(returnValue, callback)
+      }
+    }
+
     return [
       methodName,
       (...args: any[]) => {
-        const callback = args[args.length - 1]
-        const otherArgs = args.slice(0, -1)
-
-        // Use Turbo Module if available for supported methods
-        if (NativeWatermelonDBModule && supportedTurboModuleMethods.has(methodName)) {
-          try {
-            let returnValue: any
-            if (methodName === 'query') {
-              // For query method: query(tag, table, query)
-              const [table, query] = otherArgs
-              returnValue = NativeWatermelonDBModule.query(tag, table, query)
-            } else if (methodName === 'execSqlQuery') {
-              // For execSqlQuery method: execSqlQuery(tag, sql, args)
-              const [sql, args] = otherArgs
-              returnValue = NativeWatermelonDBModule.execSqlQuery(tag, sql, args)
-            } else if (methodName === 'execSqlQueryOnWriter') {
-              // For execSqlQueryOnWriter method: always uses writer connection
-              const [sql, args] = otherArgs
-              returnValue = NativeWatermelonDBModule.execSqlQueryOnWriter(tag, sql, args)
-            }
-            callback({
-              value: returnValue,
-            })
-          } catch (error: any) {
-            callback({ error })
-          }
+        if (copyInFlight || waitingForCopy.length) {
+          waitingForCopy.push(() => dispatch(...args))
           return
         }
-
-        if (useHybridJSI && supportedHybridJSIMethods.has(methodName)) {
-          try {
-            // @ts-ignore
-            const returnValue = global.WatermelonDB[methodName](tag, ...otherArgs)
-
-            callback(
-              syncReturnToResult({
-                status: 'success',
-                result: returnValue,
-              }),
-            )
-          } catch (error: any) {
-            callback({ error })
-          }
-
-          return
-        }
-
-        // @ts-ignore
-        const returnValue = DatabaseBridge[name](tag, ...otherArgs)
-
-        if (type === 'synchronous') {
-          callback(syncReturnToResult(returnValue as any))
-        } else {
-          fromPromise(returnValue, callback)
-        }
+        dispatch(...args)
       },
     ]
   })

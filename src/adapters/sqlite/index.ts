@@ -40,6 +40,12 @@ let DatabaseBridge: any = null
 let getDispatcherType: any = null
 
 export type { SQL, SQLiteArg, SQLiteQuery, NativeDispatcher, SQLiteAdapterOptions }
+export type {
+  CopyTablesEvent,
+  CopyTablesMode,
+  CopyTablesOptions,
+} from './makeDispatcher/copyTablesOptions'
+export { configureCopyTables } from './makeDispatcher/copyTablesOptions'
 
 // Hacky-ish way to create an object with NativeModule-like shape, but that can dispatch method
 // calls to async, synch NativeModule, or JSI implementation w/ type safety in rest of the impl

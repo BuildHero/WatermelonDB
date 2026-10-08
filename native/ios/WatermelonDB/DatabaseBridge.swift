@@ -468,7 +468,42 @@ extension DatabaseBridge {
             try $0.copyTables(tables, srcDB: srcDB)
         }
     }
-    
+
+    private static let copyTablesQueue = DispatchQueue(label: "com.nozbe.watermelondb.copytables", qos: .userInitiated)
+
+    /// Promise form of `copyTablesSynchronous` for synchronous connections, so a snapshot import doesn't park the JS
+    /// thread on `methodQueue.sync`. The driver is resolved here on `methodQueue`; the copy runs on its own queue.
+    @objc(copyTablesOffThread:tables:srcDB:resolve:reject:)
+    func copyTablesOffThread(tag: ConnectionTag,
+                             tables: [String],
+                             srcDB: String,
+                             resolve: @escaping RCTPromiseResolveBlock,
+                             reject: @escaping RCTPromiseRejectBlock) {
+        guard let connection = connections[tag.intValue],
+              case let .connected(driver, synchronous: true) = connection else {
+            sendReject(reject, "No or invalid connection for tag \(tag)".asError())
+            return
+        }
+
+        // Registered here, before the hop, so a reload that reopens the file before the copy starts still cancels it.
+        let copy: Database.OffThreadCopy
+        do {
+            copy = try driver.database.registerOffThreadCopy()
+        } catch {
+            sendReject(reject, error)
+            return
+        }
+
+        DatabaseBridge.copyTablesQueue.async {
+            do {
+                try driver.database.copyTablesOnRawWriter(tables, srcDB: srcDB, registered: copy)
+                resolve(nil)
+            } catch {
+                self.sendReject(reject, error)
+            }
+        }
+    }
+
     @objc(getDeletedRecords:table:resolve:reject:)
     func getDeletedRecords(tag: ConnectionTag,
                            table: Database.TableName,
