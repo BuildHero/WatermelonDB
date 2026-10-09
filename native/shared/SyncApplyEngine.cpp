@@ -239,8 +239,11 @@ static bool execSql(sqlite3* db, const char* sql, std::string& errorMessage) {
     return true;
 }
 
+// Tables whose columns were re-read during the current page; a key still unknown after that is not a column.
+using ReloadedTables = std::unordered_set<std::string>;
+
 static bool applyRowObject(sqlite3* db, const std::string& table, const JsonValue& rowValue,
-                           std::string& errorMessage);
+                           std::string& errorMessage, ReloadedTables* reloadedTables);
 
 static bool applyRows(sqlite3* db, const std::string& table, const JsonValue& rows, std::string& errorMessage) {
     if (rows.type != JsonValue::Type::Array) {
@@ -250,7 +253,7 @@ static bool applyRows(sqlite3* db, const std::string& table, const JsonValue& ro
         if (rowValue.type != JsonValue::Type::Object) {
             continue;
         }
-        if (!applyRowObject(db, table, rowValue, errorMessage)) {
+        if (!applyRowObject(db, table, rowValue, errorMessage, nullptr)) {
             return false;
         }
     }
@@ -341,7 +344,7 @@ static bool loadTableColumns(sqlite3* db, const std::string& table,
 }
 
 static bool applyRowObject(sqlite3* db, const std::string& table, const JsonValue& rowValue,
-                           std::string& errorMessage) {
+                           std::string& errorMessage, ReloadedTables* reloadedTables) {
     if (rowValue.type != JsonValue::Type::Object) {
         return true;
     }
@@ -377,7 +380,7 @@ static bool applyRowObject(sqlite3* db, const std::string& table, const JsonValu
     
     int missingCount = 0;
     std::vector<std::string> keys = buildKeys(missingCount);
-    if (missingCount > 0) {
+    if (missingCount > 0 && (!reloadedTables || reloadedTables->insert(table).second)) {
         if (!loadTableColumns(db, table, allowedColumns, errorMessage, true)) {
             return false;
         }
@@ -542,9 +545,9 @@ static bool extractRowFromEntry(const JsonValue& entry, JsonValue& outRow) {
     outRow.objectValue.clear();
     for (const auto& kv : entry.objectValue) {
         const std::string& key = kv.first;
-        if (key == "table" || key == "tableName" || key == "deleted" || key == "isDeleted" ||
-            key == "is_deleted" || key == "type" || key == "op" || key == "operation" ||
-            key == "_table" || key == "_deleted" || key == "_sequence_id") {
+        // Flat rows carry real columns (e.g. attachments.type) beside the envelope, so strip only the
+        // keys the apply loop reads; applyRowObject already drops anything that isn't a column.
+        if (key == "_table" || key == "_deleted" || key == "_sequence_id") {
             continue;
         }
         outRow.objectValue.emplace(key, kv.second);
@@ -699,7 +702,7 @@ static bool loadDirtyRecordsForTable(sqlite3* db, const std::string& table,
 
 static bool applyPartialUpdate(sqlite3* db, const std::string& table, const JsonValue& rowValue,
                                const std::string& recordId, const std::string& changedStr,
-                               std::string& errorMessage) {
+                               std::string& errorMessage, ReloadedTables* reloadedTables) {
     std::unordered_set<std::string>* allowedColumns = nullptr;
     if (!loadTableColumns(db, table, allowedColumns, errorMessage)) {
         return false;
@@ -735,7 +738,7 @@ static bool applyPartialUpdate(sqlite3* db, const std::string& table, const Json
     int missingCount = 0;
     buildSetColumns(setColumns, missingCount);
 
-    if (missingCount > 0) {
+    if (missingCount > 0 && (!reloadedTables || reloadedTables->insert(table).second)) {
         if (!loadTableColumns(db, table, allowedColumns, errorMessage, true)) {
             return false;
         }
@@ -844,6 +847,8 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
     std::unordered_map<std::string, size_t> upsertsByTable;
     std::unordered_map<std::string, size_t> deletesCountByTable;
     std::unordered_set<std::string> skippedTables;
+    std::unordered_set<std::string> existingTables;
+    ReloadedTables reloadedTables;
     size_t totalItems = 0;
     size_t totalUpserts = 0;
     size_t totalDeletes = 0;
@@ -904,10 +909,13 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
             totalSkipped++;
             continue;
         }
-        if (!tableExistsInDb(db, table)) {
-            skippedTables.insert(table);
-            totalSkipped++;
-            continue;
+        if (!existingTables.count(table)) {
+            if (!tableExistsInDb(db, table)) {
+                skippedTables.insert(table);
+                totalSkipped++;
+                continue;
+            }
+            existingTables.insert(table);
         }
 
         if (isDeleted) {
@@ -975,7 +983,7 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
                 skippedDirtyByTable[table]++;
             } else if (dirtyInfo && dirtyInfo->status == "updated") {
                 // Record has locally-modified columns — partial update, preserving _changed columns
-                if (!applyPartialUpdate(db, table, *rowPtr, recordId, dirtyInfo->changed, errorMessage)) {
+                if (!applyPartialUpdate(db, table, *rowPtr, recordId, dirtyInfo->changed, errorMessage, &reloadedTables)) {
                     execSql(db, "ROLLBACK", errorMessage);
                     return false;
                 }
@@ -986,7 +994,7 @@ bool applySyncPayload(sqlite3* db, const std::string& payload, std::string& erro
                 }
             } else {
                 // Record is synced or new — full overwrite
-                if (!applyRowObject(db, table, *rowPtr, errorMessage)) {
+                if (!applyRowObject(db, table, *rowPtr, errorMessage, &reloadedTables)) {
                     execSql(db, "ROLLBACK", errorMessage);
                     return false;
                 }
