@@ -444,6 +444,84 @@ void test_synced_record_full_overwrite() {
     sqlite3_close(db);
 }
 
+void test_flat_entry_keeps_type_column() {
+    // MOBILE-7841: /sync/pull-changes sends rows flat, so a real `type` column sits beside the
+    // _table/_deleted/_sequence_id envelope keys and must survive the full overwrite.
+    sqlite3* db = nullptr;
+    sqlite3_open(":memory:", &db);
+    std::string error;
+    execSql(db, "CREATE TABLE local_storage (key TEXT PRIMARY KEY, value TEXT)", error);
+    execSql(db, "CREATE TABLE attachments (id TEXT PRIMARY KEY, file_name TEXT, type TEXT, parent_id TEXT, _status TEXT, _changed TEXT)", error);
+    execSql(db, "INSERT INTO attachments (id, file_name, type, parent_id, _status, _changed) VALUES ('a1', 'local.jpg', 'before', 'v1', 'synced', '')", error);
+
+    std::string payload = R"({
+        "count": 1,
+        "items": [
+          { "_table": "attachments", "_deleted": false, "_sequence_id": "01M4H7V17DMX3AA4WM17CY6FQV",
+            "_origin": "binlog", "ttl": 1796764014,
+            "id": "a1", "file_name": "server.jpg", "type": "before", "parent_id": "v1" }
+        ]
+      })";
+
+    bool ok = watermelondb::applySyncPayload(db, payload, error);
+    expectTrue(ok, "applySyncPayload should succeed for a flat entry");
+
+    std::string fileName;
+    expectTrue(querySingleText(db, "SELECT file_name FROM attachments WHERE id='a1'", fileName), "row should exist");
+    expectTrue(fileName == "server.jpg", "flat entry should overwrite the synced row");
+
+    std::string type;
+    expectTrue(querySingleText(db, "SELECT type FROM attachments WHERE id='a1'", type), "type should be readable");
+    expectTrue(type == "before", "flat entry must keep the row's type column, not NULL it");
+
+    sqlite3_close(db);
+}
+
+int countTableInfoPragma(unsigned type, void* ctx, void* stmt, void*) {
+    if (type == SQLITE_TRACE_STMT) {
+        const char* sql = sqlite3_sql(static_cast<sqlite3_stmt*>(stmt));
+        if (sql && std::string(sql).rfind("PRAGMA table_info", 0) == 0) {
+            (*static_cast<int*>(ctx))++;
+        }
+    }
+    return 0;
+}
+
+void test_flat_entries_reload_columns_once_per_page() {
+    // MOBILE-7841: flat rows always carry non-column keys (ttl, _origin, binlog_*), which used to
+    // force a PRAGMA table_info reload on every row of the page.
+    sqlite3* db = nullptr;
+    sqlite3_open(":memory:", &db);
+    std::string error;
+    execSql(db, "CREATE TABLE flat_reload_rows (id TEXT PRIMARY KEY, name TEXT, _status TEXT, _changed TEXT)", error);
+    execSql(db, "INSERT INTO flat_reload_rows (id, name, _status, _changed) VALUES ('r0', 'local', 'updated', 'name')", error);
+
+    std::string payload = "{\"count\":50,\"items\":[";
+    for (int i = 0; i < 50; i++) {
+        if (i) payload += ",";
+        payload += "{\"_table\":\"flat_reload_rows\",\"_origin\":\"binlog\",\"ttl\":1,\"id\":\"r" +
+                   std::to_string(i) + "\",\"name\":\"server-" + std::to_string(i) + "\"}";
+    }
+    payload += "]}";
+
+    int tableInfoCount = 0;
+    sqlite3_trace_v2(db, SQLITE_TRACE_STMT, countTableInfoPragma, &tableInfoCount);
+    bool ok = watermelondb::applySyncPayload(db, payload, error);
+    sqlite3_trace_v2(db, 0, nullptr, nullptr);
+    expectTrue(ok, "applySyncPayload should succeed for a page of flat entries");
+
+    // One existence check, one column load and one forced reload per table per page.
+    expectTrue(tableInfoCount <= 3, "table schema lookups should happen once per page, not per row");
+    expectTrue(querySingleInt(db, "SELECT COUNT(*) FROM flat_reload_rows") == 50, "every flat row should be written");
+    std::string name;
+    expectTrue(querySingleText(db, "SELECT name FROM flat_reload_rows WHERE id='r49'", name) && name == "server-49",
+               "last flat row should carry the server value");
+    expectTrue(querySingleText(db, "SELECT name FROM flat_reload_rows WHERE id='r0'", name) && name == "local",
+               "locally changed column should survive the partial update");
+
+    sqlite3_close(db);
+}
+
 void test_new_record_pull_gets_synced_status() {
     // MOBILE-6276: a brand-new row delivered by a native pull (a record created on another
     // device, or the server echo of a locally-created record) must land with _status='synced'.
@@ -760,6 +838,8 @@ int main() {
     test_created_record_not_overwritten();
     test_updated_record_partial_merge();
     test_synced_record_full_overwrite();
+    test_flat_entry_keeps_type_column();
+    test_flat_entries_reload_columns_once_per_page();
     test_new_record_pull_gets_synced_status();
     test_deleted_record_not_overwritten();
     test_updated_record_all_changed_skips_update();
