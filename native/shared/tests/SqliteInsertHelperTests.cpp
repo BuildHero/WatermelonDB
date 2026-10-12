@@ -146,12 +146,49 @@ void test_insert_batch_multiple_tables() {
     sqlite3_close(db);
 }
 
+void test_empty_text_and_blob_are_not_null() {
+    sqlite3* db = nullptr;
+    sqlite3_open(":memory:", &db);
+    std::string error;
+    execSql(db, "CREATE TABLE visits (id TEXT PRIMARY KEY, description TEXT, data BLOB, _status TEXT)", error);
+
+    watermelondb::SqliteInsertHelper helper;
+    std::vector<std::string> columns = {"id", "description", "data"};
+    std::vector<std::vector<watermelondb::FieldValue>> rows;
+    rows.push_back({
+        watermelondb::FieldValue::makeText("v1"),
+        watermelondb::FieldValue::makeText(""),
+        watermelondb::FieldValue::makeBlob({})
+    });
+    rows.push_back({
+        watermelondb::FieldValue::makeText("v2"),
+        watermelondb::FieldValue::makeNull(),
+        watermelondb::FieldValue::makeNull()
+    });
+
+    expectTrue(helper.insertRowsMulti(db, "visits", columns, rows, error), "insert empty values");
+
+    expectTrue(querySingleText(db, "SELECT typeof(description) FROM visits WHERE id='v1'") == "text",
+               "empty string stored as TEXT, not NULL");
+    expectTrue(querySingleText(db, "SELECT typeof(data) FROM visits WHERE id='v1'") == "blob",
+               "empty blob stored as BLOB, not NULL");
+    expectTrue(querySingleInt(db, "SELECT length(data) FROM visits WHERE id='v1'") == 0, "empty blob has length 0");
+    expectTrue(querySingleText(db, "SELECT typeof(description) FROM visits WHERE id='v2'") == "null",
+               "NULL stored as NULL");
+    expectTrue(querySingleText(db, "SELECT typeof(data) FROM visits WHERE id='v2'") == "null",
+               "NULL blob stored as NULL");
+
+    helper.finalizeStatements();
+    sqlite3_close(db);
+}
+
 } // namespace
 
 int main() {
     test_insert_rows_multi_basic();
     test_insert_rows_multi_chunking();
     test_insert_batch_multiple_tables();
+    test_empty_text_and_blob_are_not_null();
 
     if (gFailures > 0) {
         std::cerr << gFailures << " test(s) failed\n";

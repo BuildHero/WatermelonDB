@@ -23,6 +23,7 @@
 
 ### Fixes
 
+- Fixed slice import (`importRemoteSlice`) storing empty strings as NULL. The slice format writes `''`, NULL and an empty BLOB all with size 0 and tells them apart by the type tag (`00 03`, `00 00`, `00 04`), but `SliceDecoder` ignored the tag on zero-size fields. It now decodes a zero-size TEXT as `''` and a zero-size BLOB as an empty blob; any other zero-size tag is still NULL. The wire format is unchanged, so slices already generated decode correctly. `SqliteInsertHelper` also binds an empty blob with `sqlite3_bind_zeroblob(..., 0)`, because `sqlite3_bind_blob` with a null pointer stores NULL.
 - Fixed the native sync apply dropping real columns named `type`, `op`, `operation`, `table`, `tableName`, `deleted`, `isDeleted` or `is_deleted` from flat pull rows. `/sync/pull-changes` sends rows flat, so a synced row's `type` (e.g. `attachments.type`) was overwritten with NULL on every native pull. Only the envelope keys the apply loop reads (`_table`, `_deleted`, `_sequence_id`) are stripped now; other non-column keys are still dropped by the column check.
 - Fixed `syncDatabaseAsync()` promises being rejected on `auth_required` even when sync continues after token refresh.
 - Fixed `enableNativeCDC()` enabling `batch()` notify suppression when no CDC subscription is available.
