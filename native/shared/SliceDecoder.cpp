@@ -558,18 +558,24 @@ ParseStatus SliceDecoder::parseRowValues(const std::vector<std::string>& columns
         }
         
         if (fieldSize == 0) {
-            // NULL field: need type tag byte
             if (offset >= decompressedSize_) {
                 if (streamEnded_) {
-                    setError("Truncated NULL field: missing type tag");
+                    setError("Truncated zero-size field: missing type tag");
                     return ParseStatus::Error;
                 }
                 return ParseStatus::NeedMoreData;
             }
-            
-            // Skip type tag (don't validate - NULL regardless of tag value)
-            rowValues.push_back(FieldValue::makeNull());
-            offset++; // Skip type tag
+
+            // The encoder writes NULL, '' and an empty BLOB all as size 0; only the tag tells them apart.
+            uint8_t zeroSizeTag = decompressedBuffer_[offset];
+            if (zeroSizeTag == static_cast<uint8_t>(TypeTag::TEXT)) {
+                rowValues.push_back(FieldValue::makeText(std::string()));
+            } else if (zeroSizeTag == static_cast<uint8_t>(TypeTag::BLOB)) {
+                rowValues.push_back(FieldValue::makeBlob({}));
+            } else {
+                rowValues.push_back(FieldValue::makeNull());
+            }
+            offset++;
             continue;
         }
         

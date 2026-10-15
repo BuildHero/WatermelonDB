@@ -27,6 +27,11 @@ bool SqliteInsertHelper::bindFieldValue(
             rc = sqlite3_bind_text(stmt, paramIndex, value.textValue.c_str(), -1, SQLITE_STATIC);
             break; 
         case FieldValue::Type::BLOB_VALUE:
+            // An empty vector's data() may be null, which sqlite3_bind_blob stores as NULL.
+            if (value.blobValue.empty()) {
+                rc = sqlite3_bind_zeroblob(stmt, paramIndex, 0);
+                break;
+            }
             rc = sqlite3_bind_blob(
                 stmt,
                 paramIndex,
