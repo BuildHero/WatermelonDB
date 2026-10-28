@@ -1,6 +1,6 @@
 import { logger } from '../../../utils/common'
 
-export type CopyTablesMode = 'offThread' | 'blocking'
+export type CopyTablesMode = 'offThread' | 'blocking' | 'asyncBridge'
 
 export type CopyTablesEvent =
   | { type: 'start'; mode: CopyTablesMode; tables: number }

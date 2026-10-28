@@ -32,6 +32,8 @@ import * as ReactNative from 'react-native'
 // eslint-disable-next-line import/first
 import { makeDispatcher } from './index.native'
 // eslint-disable-next-line import/first
+import { configureCopyTables } from './copyTablesOptions'
+// eslint-disable-next-line import/first
 import { logger } from '../../../utils/common'
 
 // @ts-ignore
@@ -232,6 +234,36 @@ describe('makeDispatcher while an off-thread copyTables is in flight', () => {
     await flush()
 
     expect(order).toEqual(['first-callback', 'second-callback', 'find', 'find-callback'])
+  })
+
+  it('holds Turbo Module reads behind an asynchronous bridge copy', async () => {
+    const copy = deferred()
+    bridge.copyTables = jest.fn(() => copy.promise)
+    const events: any[] = []
+    configureCopyTables({ onEvent: (event) => events.push(event) })
+    const dispatcher = makeDispatcher('asynchronous', 7, 'db')
+    const copyCallback = jest.fn(() => order.push('copy-callback'))
+    const queryCallback = jest.fn()
+    const execCallback = jest.fn()
+
+    dispatcher.copyTables(['tasks'], '/tmp/src.db', copyCallback)
+    dispatcher.query('tasks', 'select * from tasks', queryCallback)
+    dispatcher.execSqlQuery('select id from tasks', [], execCallback)
+
+    expect(bridge.copyTables).toHaveBeenCalledWith(7, ['tasks'], '/tmp/src.db')
+    expect(order).toEqual([])
+
+    copy.resolve(null)
+    await flush()
+
+    expect(order).toEqual(['copy-callback', 'query', 'execSqlQuery'])
+    expect(queryCallback).toHaveBeenCalledWith({ value: ['id1'] })
+    expect(execCallback).toHaveBeenCalledWith({ value: [{ id: 'id1' }] })
+    expect(events.map((event) => [event.type, event.mode])).toEqual([
+      ['start', 'asyncBridge'],
+      ['end', 'asyncBridge'],
+    ])
+    configureCopyTables({ onEvent: null })
   })
 
   it('reports a synchronous bridge throw and does not leave later calls stuck', () => {

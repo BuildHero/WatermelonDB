@@ -173,10 +173,13 @@ export const makeDispatcher = (
       }
 
       // Keeps a synchronous connection's snapshot copy off the JS thread; binaries without the method block as before.
-      if (methodName === 'copyTables' && type === 'synchronous') {
+      // The asynchronous bridge already copies off the JS thread, but its Turbo Module reads still need to wait.
+      if (methodName === 'copyTables') {
         const [tables, srcDB] = otherArgs
-        const offThread = isCopyTablesOffThreadEnabled() && !!DatabaseBridge.copyTablesOffThread
-        const mode = offThread ? 'offThread' : 'blocking'
+        const asyncBridge = type !== 'synchronous'
+        const offThread =
+          asyncBridge || (isCopyTablesOffThreadEnabled() && !!DatabaseBridge.copyTablesOffThread)
+        const mode = asyncBridge ? 'asyncBridge' : offThread ? 'offThread' : 'blocking'
         const tableCount = Array.isArray(tables) ? tables.length : 0
         const startedAt = Date.now()
         const report = (result: any) => {
@@ -216,7 +219,9 @@ export const makeDispatcher = (
         copyInFlight = true
         let copyPromise
         try {
-          copyPromise = DatabaseBridge.copyTablesOffThread!(tag, tables, srcDB)
+          copyPromise = asyncBridge
+            ? (DatabaseBridge as any).copyTables(tag, tables, srcDB)
+            : DatabaseBridge.copyTablesOffThread!(tag, tables, srcDB)
         } catch (error: any) {
           settle({ error })
           return
