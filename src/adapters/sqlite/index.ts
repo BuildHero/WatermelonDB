@@ -46,6 +46,8 @@ export type {
   CopyTablesOptions,
 } from './makeDispatcher/copyTablesOptions'
 export { configureCopyTables } from './makeDispatcher/copyTablesOptions'
+// Lets apps tell this build, whose asynchronous bridge holds calls behind a copy, from older ones that do not.
+export const copyTablesQueuesAsyncBridge = true
 
 // Hacky-ish way to create an object with NativeModule-like shape, but that can dispatch method
 // calls to async, synch NativeModule, or JSI implementation w/ type safety in rest of the impl

@@ -117,5 +117,9 @@ RCT_EXTERN_METHOD(disableNativeCDC:(nonnull NSNumber *)connectionTag
 
 RCT_EXTERN__BLOCKING_SYNCHRONOUS_METHOD(WMELON_CONCAT(disableNativeCDC, Synchronous):(nonnull NSNumber *)connectionTag)
 
+WMELON_BRIDGE_METHOD(setCDCEnabled,
+  enabled:(BOOL)enabled
+)
+
 
 @end
