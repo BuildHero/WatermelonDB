@@ -464,10 +464,14 @@ void SyncEngine::startWithCompletion(const std::string& reason, CompletionCallba
             if (completion) {
                 completionCallback_ = std::move(completion);
             }
+            completionCallback_ = withChangesetFlush(std::move(completionCallback_));
             if (!resumeFromAuth) {
                 currentRequestId_ = platform::generateRequestId();
                 currentPullUrl_ = pullEndpointUrl_;
-                accumulatedChangeset_.clear(); // MOBILE-6276: fresh sync starts a fresh changeset
+                // MOBILE-6276: fresh sync starts a fresh changeset. MOBILE-8100: rows left in it are
+                // already committed, so hand them to JS instead of discarding them.
+                emitChangesetLocked(accumulatedChangeset_);
+                accumulatedChangeset_.clear();
             } else if (currentRequestId_.empty()) {
                 currentRequestId_ = platform::generateRequestId();
             }
@@ -871,6 +875,10 @@ void SyncEngine::handleHttpResponse(int64_t syncId, const platform::HttpResponse
                     dst.upserted.insert(dst.upserted.end(), kv.second.upserted.begin(), kv.second.upserted.end());
                     dst.deleted.insert(dst.deleted.end(), kv.second.deleted.begin(), kv.second.deleted.end());
                 }
+            } else {
+                // MOBILE-8100: superseded mid-page, but this page already committed and its sync's
+                // completion has run — emit it now or JS never hears about these rows.
+                emitChangesetLocked(pageChangeset);
             }
         }
     }
@@ -1018,6 +1026,29 @@ std::string SyncEngine::takeAccumulatedChangesetJson() {
     std::string json = serializeChangeset(accumulatedChangeset_);
     accumulatedChangeset_.clear();
     return json;
+}
+
+void SyncEngine::emitChangesetLocked(const SyncChangeset& changeset) {
+    if (changeset.empty()) {
+        return;
+    }
+    emitLocked(std::string("{\"type\":\"pull_changes_committed\",\"changeset\":") + serializeChangeset(changeset) + "}");
+}
+
+SyncEngine::CompletionCallback SyncEngine::withChangesetFlush(CompletionCallback completion) {
+    // MOBILE-8100: only syncDatabaseAsync's completion takes the changeset; for start() and the
+    // background task, emit whatever is left once the completion has had its chance.
+    std::weak_ptr<SyncEngine> weakSelf = weak_from_this();
+    return [weakSelf, completion = std::move(completion)](bool success, const std::string& errorMessage) {
+        if (completion) {
+            completion(success, errorMessage);
+        }
+        if (auto self = weakSelf.lock()) {
+            std::lock_guard<std::mutex> lock(self->mutex_);
+            self->emitChangesetLocked(self->accumulatedChangeset_);
+            self->accumulatedChangeset_.clear();
+        }
+    };
 }
 
 bool SyncEngine::scheduleRetryLocked(int64_t syncId, int statusCode, const std::string& message) {

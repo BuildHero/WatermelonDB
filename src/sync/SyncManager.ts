@@ -63,6 +63,7 @@ export class SyncManager {
   private static database: Database | null = null
   private static authTokenProvider: (() => Promise<string>) | null = null
   private static jsListeners = new Set<(event: SyncEvent) => void>()
+  private static unsubscribeCommittedChanges: SyncUnsubscribe | null = null
 
   static configure(config: SyncConfig): void {
     const {
@@ -103,6 +104,11 @@ export class SyncManager {
       : null
 
     nativeConfigureSync(nativeConfig)
+
+    SyncManager.unsubscribeCommittedChanges?.()
+    const unsubscribeCommittedChanges = nativeAddSyncListener(SyncManager.handleCommittedChanges)
+    SyncManager.unsubscribeCommittedChanges =
+      typeof unsubscribeCommittedChanges === 'function' ? unsubscribeCommittedChanges : null
 
     if (config.backgroundSyncTaskId) {
       nativeConfigureBackgroundSync({
@@ -153,6 +159,15 @@ export class SyncManager {
         throw new Error(error)
       }
     })
+  }
+
+  // MOBILE-8100: native emits pull_changes_committed for committed rows no syncDatabaseAsync promise
+  // will report (a page that committed after a cancel, or a start()/background-task sync).
+  private static handleCommittedChanges = (event: SyncEvent): void => {
+    const changeSet = event?.type === 'pull_changes_committed' ? event.changeset : null
+    if (changeSet && typeof changeSet === 'object') {
+      SyncManager.refreshFromChangeSet(changeSet as NativePullChangeSet)
+    }
   }
 
   private static refreshFromChangeSet(changeSet: NativePullChangeSet | null): Promise<void> {

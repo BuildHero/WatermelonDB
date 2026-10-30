@@ -1450,6 +1450,123 @@ void test_next_sync_does_not_reinvoke_completed_background_completion() {
     expectTrue(probe.calls() == 1, "a later sync must not re-invoke the background completion");
 }
 
+void test_page_committed_after_cancel_is_delivered() {
+    // MOBILE-8100: a page whose transaction commits after its sync was cancelled is in SQLite, so its
+    // ids must still reach JS — they used to be dropped by the syncId guard.
+    EventRecorder recorder;
+    auto engine = std::make_shared<watermelondb::SyncEngine>();
+    engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
+
+    std::mutex applyMutex;
+    std::condition_variable applyCv;
+    bool applyEntered = false;
+    bool releaseApply = false;
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset& changeset) {
+        std::unique_lock<std::mutex> lock(applyMutex);
+        applyEntered = true;
+        applyCv.notify_all();
+        applyCv.wait_for(lock, std::chrono::milliseconds(1000), [&] { return releaseApply; });
+        changeset["quotes"].upserted.push_back("quote-new");
+        return true;
+    });
+
+    watermelondb::platform::setHttpHandler([](const watermelondb::platform::HttpRequest&,
+                                              std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        std::thread([done]() {
+            watermelondb::platform::HttpResponse response;
+            response.statusCode = 200;
+            response.body = "{\"items\":[]}";
+            done(response);
+        }).detach();
+    });
+
+    std::string takenAtCompletion;
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
+    engine->startWithCompletion("cdc-event", [&](bool, const std::string&) {
+        takenAtCompletion = engine->takeAccumulatedChangesetJson();
+    });
+
+    {
+        std::unique_lock<std::mutex> lock(applyMutex);
+        applyCv.wait_for(lock, std::chrono::milliseconds(1000), [&] { return applyEntered; });
+    }
+    expectTrue(applyEntered, "apply should be mid-page before the cancel");
+    engine->cancelSync();
+    {
+        std::lock_guard<std::mutex> lock(applyMutex);
+        releaseApply = true;
+    }
+    applyCv.notify_all();
+
+    expectTrue(takenAtCompletion == "{}", "the cancelled completion runs before the page commits");
+    expectTrue(recorder.waitForContains("\"type\":\"pull_changes_committed\"", 1000),
+               "a page committed after cancel must be emitted, not dropped");
+    expectTrue(recorder.waitForContains("quote-new", 100), "the emitted changeset carries the committed id");
+
+    watermelondb::platform::setHttpHandler(nullptr);
+}
+
+void test_changeset_without_consumer_is_delivered() {
+    // MOBILE-8100: start() and the background-task completion never take the changeset, and the next
+    // sync's start cleared the accumulator — so those committed rows never notified JS.
+    EventRecorder recorder;
+    auto engine = std::make_shared<watermelondb::SyncEngine>();
+    engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset& changeset) {
+        changeset["quotes"].upserted.push_back("quote-bg");
+        return true;
+    });
+    watermelondb::platform::setHttpHandler([](const watermelondb::platform::HttpRequest&,
+                                              std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        watermelondb::platform::HttpResponse response;
+        response.statusCode = 200;
+        response.body = "{\"items\":[]}";
+        done(response);
+    });
+
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
+    std::atomic<bool> backgroundDone{false};
+    engine->startWithCompletion("background_task", [&](bool, const std::string&) { backgroundDone = true; });
+
+    expectTrue(backgroundDone.load(), "background sync should complete");
+    expectTrue(recorder.waitForContains("\"type\":\"pull_changes_committed\""),
+               "an unconsumed changeset must be emitted when its sync finishes");
+    expectTrue(recorder.waitForContains("quote-bg", 100), "the emitted changeset carries the committed id");
+    expectTrue(engine->takeAccumulatedChangesetJson() == "{}", "the emitted changeset is not delivered twice");
+
+    watermelondb::platform::setHttpHandler(nullptr);
+}
+
+void test_consumed_changeset_is_not_reemitted() {
+    // MOBILE-8100: when the completion takes the changeset (syncDatabaseAsync), no extra event is sent.
+    EventRecorder recorder;
+    auto engine = std::make_shared<watermelondb::SyncEngine>();
+    engine->setEventCallback([&](const std::string& eventJson) { recorder.add(eventJson); });
+    engine->setApplyCallback([&](const std::string&, std::string&, watermelondb::SyncChangeset& changeset) {
+        changeset["quotes"].upserted.push_back("quote-fg");
+        return true;
+    });
+    watermelondb::platform::setHttpHandler([](const watermelondb::platform::HttpRequest&,
+                                              std::function<void(const watermelondb::platform::HttpResponse&)> done) {
+        watermelondb::platform::HttpResponse response;
+        response.statusCode = 200;
+        response.body = "{\"items\":[]}";
+        done(response);
+    });
+
+    std::string taken;
+    engine->configure("{\"pullEndpointUrl\":\"https://example.com/pull\",\"connectionTag\":1}");
+    engine->startWithCompletion("foreground", [&](bool, const std::string&) {
+        taken = engine->takeAccumulatedChangesetJson();
+    });
+
+    expectTrue(taken == R"({"quotes":{"upserted":["quote-fg"],"deleted":[]}})", "the completion takes the changeset");
+    expectTrue(!recorder.waitForContains("pull_changes_committed", 100),
+               "a consumed changeset must not also be emitted");
+
+    watermelondb::platform::setHttpHandler(nullptr);
+}
+
 int main() {
     test_success_flow();
     test_auth_required();
@@ -1484,6 +1601,9 @@ int main() {
     test_cancel_after_completed_background_sync_does_not_reinvoke_completion();
     test_cancel_after_auth_refreshed_background_sync_does_not_reinvoke_completion();
     test_next_sync_does_not_reinvoke_completed_background_completion();
+    test_page_committed_after_cancel_is_delivered();
+    test_changeset_without_consumer_is_delivered();
+    test_consumed_changeset_is_not_reemitted();
 
     if (gFailures > 0) {
         std::cerr << gFailures << " test(s) failed\n";

@@ -74,6 +74,8 @@ private:
     bool shutdown_ = false;
 
     void emitLocked(const std::string& eventJson);
+    void emitChangesetLocked(const SyncChangeset& changeset);
+    CompletionCallback withChangesetFlush(CompletionCallback completion);
     void dispatchRequest(int64_t syncId, bool isRetry);
     void handleHttpResponse(int64_t syncId, const platform::HttpResponse& response);
     bool scheduleRetryLocked(int64_t syncId, int statusCode, const std::string& message);
