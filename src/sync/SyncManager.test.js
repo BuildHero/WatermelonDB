@@ -430,6 +430,59 @@ describe('SyncManager', () => {
     expect(applyNativePullChanges).not.toHaveBeenCalled()
   })
 
+  const configureWithCommittedListener = () => {
+    const { SyncManager, nativeSync } = makeModule()
+    const unsubscribe = jest.fn()
+    nativeSync.addSyncListener.mockReturnValue(unsubscribe)
+    const notify = jest.fn()
+    const applyNativePullChanges = jest.fn(() => Promise.resolve())
+    const database = { schema: { tables: { quotes: {} } }, notify, applyNativePullChanges }
+    SyncManager.configure({
+      database,
+      adapter: { _tag: 1 },
+      pushChangesProvider: jest.fn(),
+      pullChangesUrl: 'https://example.com/pull',
+    })
+    const listener = nativeSync.addSyncListener.mock.calls[0][0]
+    return { SyncManager, nativeSync, unsubscribe, notify, applyNativePullChanges, listener }
+  }
+
+  it('applies a pull_changes_committed event outside syncDatabaseAsync (MOBILE-8100)', async () => {
+    const { applyNativePullChanges, notify, listener } = configureWithCommittedListener()
+    const changeset = { quotes: { upserted: ['quote-new'], deleted: [] } }
+
+    listener({ type: 'pull_changes_committed', changeset })
+    await flushMicrotasks()
+
+    expect(applyNativePullChanges).toHaveBeenCalledWith(changeset)
+    expect(notify).not.toHaveBeenCalled()
+  })
+
+  it('ignores other native sync events (MOBILE-8100)', async () => {
+    const { applyNativePullChanges, notify, listener } = configureWithCommittedListener()
+
+    listener({ type: 'state', state: 'done' })
+    listener({ type: 'pull_changes_committed' })
+    await flushMicrotasks()
+
+    expect(applyNativePullChanges).not.toHaveBeenCalled()
+    expect(notify).not.toHaveBeenCalled()
+  })
+
+  it('replaces the committed-changes listener when reconfigured (MOBILE-8100)', () => {
+    const { SyncManager, nativeSync, unsubscribe } = configureWithCommittedListener()
+
+    SyncManager.configure({
+      database: { schema: { tables: { quotes: {} } }, notify: jest.fn() },
+      adapter: { _tag: 1 },
+      pushChangesProvider: jest.fn(),
+      pullChangesUrl: 'https://example.com/pull',
+    })
+
+    expect(unsubscribe).toHaveBeenCalledTimes(1)
+    expect(nativeSync.addSyncListener).toHaveBeenCalledTimes(2)
+  })
+
   it('cancelSync calls native cancelSync', () => {
     const { SyncManager, nativeSync } = makeModule()
     SyncManager.configure({
